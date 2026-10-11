@@ -98,6 +98,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 quality: quality(&sch, &lib),
                 schematic: sch,
                 warnings: Vec::new(),
+                renames: Vec::new(),
             }
         } else {
             let (text, _) = aispice_core::encoding::decode(&bytes);

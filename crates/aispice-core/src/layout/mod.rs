@@ -65,6 +65,9 @@ pub struct LayoutResult {
     /// Elements kept as SPICE lines, nets renamed, and similar notes.
     pub warnings: Vec<String>,
     pub quality: Quality,
+    /// Automatically numbered nets the drawing labels under a new name:
+    /// (name in the netlist, name on the sheet).
+    pub renames: Vec<(String, String)>,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq)]
@@ -120,16 +123,20 @@ pub fn from_netlist(
         return Err(LayoutError::Mismatch(problems));
     };
     let mut warnings = c.warnings.clone();
-    for (n, name) in renames {
+    for (n, name) in &renames {
         warnings.push(format!(
             "net {} is joined by labels and is called `{name}` on the sheet",
-            c.nets[n].name
+            c.nets[*n].name
         ));
     }
     Ok(LayoutResult {
         schematic,
         warnings,
         quality,
+        renames: renames
+            .into_iter()
+            .map(|(n, name)| (c.nets[n].name.clone(), name))
+            .collect(),
     })
 }
 

@@ -1044,7 +1044,7 @@ impl Placer<'_> {
                     (out, common, true)
                 })
             }
-            Kind::Passive if !dev.symbol.eq_ignore_ascii_case("cap") => {
+            Kind::Passive if !is_capacitor(&dev.symbol) => {
                 Some((dev.pins[0].net, dev.pins[1].net, false))
             }
             Kind::Diode => Some((dev.pins[0].net, dev.pins[1].net, false)),
@@ -1472,6 +1472,12 @@ pub(crate) fn place(c: &Circuit, st: &Strategy) -> (Vec<Placement>, f64) {
         p.pos.into_iter().map(|x| x.expect("all placed")).collect(),
         conventions,
     )
+}
+
+/// Capacitors carry no DC current, so they do not stand in current paths.
+fn is_capacitor(symbol: &str) -> bool {
+    let base = symbol.rsplit(['\\', '/']).next().unwrap_or(symbol);
+    base.eq_ignore_ascii_case("cap") || base.to_ascii_lowercase().starts_with("cap_")
 }
 
 #[cfg(test)]

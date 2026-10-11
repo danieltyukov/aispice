@@ -40,3 +40,60 @@ fn a_value_too_long_to_route_around_still_lays_out() {
     assert!(r.schematic.wires().count() == 0, "labels only");
     assert!(r.schematic.flags().count() >= 4);
 }
+
+#[test]
+fn pdk_devices_draw_with_their_symbols() {
+    // A CMOS inverter, an HBT, a MIM capacitor and a poly resistor with its
+    // body terminal, as an xschem netlist of IHP devices writes them.
+    let r = lay(
+        "pdk\nVDD vdd 0 1.2\nVIN in 0 dc 0.6 ac 1\nXM1 out in 0 0 sg13_lv_nmos w=1u l=0.13u ng=1 m=1\nXM2 out in vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1\nXC1 out 0 cap_cmim w=7.0e-6 l=7.0e-6 m=1\nXR1 out fb 0 rppd w=0.5e-6 l=2e-6 m=1 b=0\nXQ1 vdd fb 0 0 npn13G2 Nx=1\n.op\n",
+    );
+    let symbols: Vec<String> = r
+        .schematic
+        .symbols()
+        .map(|s| s.name.replace('/', "\\"))
+        .collect();
+    for want in [
+        "sg13g2\\sg13_lv_nmos",
+        "sg13g2\\sg13_lv_pmos",
+        "sg13g2\\cap_cmim",
+        "sg13g2\\rppd",
+        "sg13g2\\npn13G2",
+    ] {
+        assert!(symbols.iter().any(|s| s == want), "{want}: {symbols:?}");
+    }
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("SPICE line")),
+        "{:?}",
+        r.warnings
+    );
+    assert_eq!(r.quality.wires_through_bodies, 0, "{:?}", r.quality);
+    // `from_netlist` checks the drawing netlists back; check the lines too.
+    let (built, _) = crate::netlist::build(&r.schematic, &SymbolLibrary::builtin_only(), "* pdk");
+    let text = crate::netlist::write(&built.netlist);
+    assert!(
+        text.contains("XM1 out in 0 0 sg13_lv_nmos w=1u l=0.13u ng=1 m=1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("XR1 out fb 0 rppd w=0.5e-6 l=2e-6 m=1 b=0"),
+        "{text}"
+    );
+}
+
+#[test]
+fn pdk_devices_without_parameters_or_with_other_pins_stay_lines() {
+    let r = lay(
+        "pdk\nV1 a 0 1\nXM1 a a 0 0 sg13_lv_nmos\nXM2 a a 0 sg13_lv_nmos w=1u\nR1 a 0 1k\n.op\n",
+    );
+    // No parameters: drawn, with SpiceLine "" so nothing is added.
+    let (built, _) = crate::netlist::build(&r.schematic, &SymbolLibrary::builtin_only(), "* pdk");
+    let text = crate::netlist::write(&built.netlist);
+    assert!(text.contains("XM1 a a 0 0 sg13_lv_nmos\n"), "{text}");
+    // Three nodes for a four-pin device: kept as a line.
+    assert!(
+        r.warnings.iter().any(|w| w.starts_with("XM2")),
+        "{:?}",
+        r.warnings
+    );
+}

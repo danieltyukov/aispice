@@ -34,6 +34,9 @@ pub struct CompareOptions {
     /// Directive keywords left out on both sides, lower case with the dot
     /// (`.global`).
     pub skip_directives: Vec<String>,
+    /// Further node names, on either side, that are automatic names: a
+    /// drawing's labels for nets the netlist had numbered (`n1`).
+    pub auto_names: Vec<String>,
 }
 
 impl CompareOptions {
@@ -47,6 +50,7 @@ impl CompareOptions {
             parametric: true,
             subckts: true,
             skip_directives: vec![".global".into(), ".end".into()],
+            auto_names: Vec::new(),
         }
     }
 
@@ -55,7 +59,9 @@ impl CompareOptions {
     }
 
     fn is_auto(&self, n: &str) -> bool {
-        auto_named(n) || (self.xschem_names && xschem_auto_named(n))
+        auto_named(n)
+            || (self.xschem_names && xschem_auto_named(n))
+            || self.auto_names.iter().any(|a| a.eq_ignore_ascii_case(n))
     }
 }
 
@@ -459,6 +465,22 @@ mod tests {
         // Swapping two nets is still caught.
         let c = parse("t\nR1 N001 0 1k\nR2 N002 N001 2k\nC1 N002 0 1p\n.op\n");
         assert!(compare_with(&a, &c, &opts).is_err());
+        // A drawing's own label for a numbered net counts as automatic when
+        // named so.
+        let d = parse("t\nR1 n1 0 1k\nR2 n1 N002 2k\nC1 N002 0 1p\n.op\n");
+        assert!(compare_with(&a, &d, &opts).is_err());
+        let with = CompareOptions {
+            auto_names: vec!["n1".into()],
+            ..CompareOptions::xschem()
+        };
+        assert_eq!(compare_with(&a, &d, &with), Ok(()));
+        // An xschem netN name is only automatic with xschem names on.
+        assert!(
+            xschem_auto_named("net12")
+                && !xschem_auto_named("netx")
+                && !xschem_auto_named("n\u{e9}t1")
+                && !xschem_auto_named("ab\u{20ac}1")
+        );
     }
 
     #[test]
