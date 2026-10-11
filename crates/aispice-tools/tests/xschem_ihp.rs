@@ -104,6 +104,9 @@ fn run_for(setup: &Setup, pdk: &Path, files: Vec<PathBuf>) -> Run {
     Run {
         library: setup.library.clone(),
         files,
+        // IHP's benches live under the PDK, a trusted root, so nothing is
+        // staged; the project roots are only used for files outside it.
+        project_roots: Vec::new(),
         models_ngspice: Some(pdk.join("libs.tech/ngspice/models")),
         models_xyce: Some(pdk.join("libs.tech/xyce/models")),
     }

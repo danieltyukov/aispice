@@ -174,13 +174,19 @@ impl Sandbox {
 /// network rules), else why it is not. Off Linux there is no Landlock.
 #[cfg(target_os = "linux")]
 fn landlock_choice() -> Result<i32, String> {
-    use crate::backend::confine;
-    match confine::abi() {
-        abi if abi >= confine::MIN_ABI => Ok(abi),
+    landlock_choice_from(crate::backend::confine::abi())
+}
+
+/// Whether a given Landlock ABI is usable. Separate from the kernel probe so
+/// a test can check the floor without the kernel's real value.
+#[cfg(target_os = "linux")]
+fn landlock_choice_from(abi: i32) -> Result<i32, String> {
+    let min = crate::backend::confine::MIN_ABI;
+    match abi {
+        a if a >= min => Ok(a),
         0 => Err("the kernel has no Landlock support".into()),
-        abi => Err(format!(
-            "the kernel's Landlock ABI {abi} is below {} (no network rules)",
-            confine::MIN_ABI
+        a => Err(format!(
+            "the kernel's Landlock ABI {a} is below {min}, which it needs to scope sockets and signals"
         )),
     }
 }
@@ -326,8 +332,28 @@ pub struct Run {
     /// Every file the schematic pulls in (from the safety scan), checked
     /// for characters xschem would read as Tcl and shown in the sandbox.
     pub files: Vec<PathBuf>,
+    /// The folders the schematic and its project symbols live in (the
+    /// schematic's own folder, the project). Files found under these, and
+    /// not under a trusted library or PDK root, are copied into a private
+    /// directory so xschem reads a copy aispice controls, never a path that
+    /// could be swapped for a symlink after the safety scan.
+    pub project_roots: Vec<PathBuf>,
     pub models_ngspice: Option<PathBuf>,
     pub models_xyce: Option<PathBuf>,
+}
+
+/// The library and model folders, which are read-only system or PDK roots:
+/// trusted, and resolved by their own path rather than copied.
+fn trusted_roots(run: &Run) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = run
+        .library
+        .iter()
+        .chain(run.models_ngspice.iter())
+        .chain(run.models_xyce.iter())
+        .filter_map(|p| p.canonicalize().ok())
+        .collect();
+    v.dedup();
+    v
 }
 
 /// Paths xschem would see that it must not: their characters could be read
@@ -352,6 +378,9 @@ pub struct Dirs {
     pub rc: PathBuf,
     pub home: PathBuf,
     pub tmp: PathBuf,
+    /// The private 0700 directory holding the copy of the schematic and its
+    /// project symbols; xschem is given this copy, never the originals.
+    pub staging: PathBuf,
 }
 
 /// The limits every xschem run gets, whichever sandbox is used.
@@ -408,12 +437,36 @@ fn run_env(home: &Path, tmp: &Path, out: &Path, run: &Run) -> Vec<(String, OsStr
     env
 }
 
+/// The binaries xschem may execute: itself and the few helpers it runs
+/// while netlisting (a shell, awk, gzip), plus the dynamic loader, each
+/// resolved to its real path so the pinned descriptor is the binary, not a
+/// symlink. Read access to the system (for shared libraries and Tcl/Tk)
+/// comes from the read set, not from an execute right over all of `/usr`.
+fn exec_helpers(program: &Path) -> Vec<PathBuf> {
+    let mut v = vec![program.to_path_buf()];
+    for h in [
+        "/bin/sh",
+        "/usr/bin/awk",
+        "/usr/bin/gzip",
+        "/lib64/ld-linux-x86-64.so.2",
+        "/lib/ld-linux-aarch64.so.1",
+    ] {
+        if let Ok(real) = Path::new(h).canonicalize()
+            && !v.contains(&real)
+        {
+            v.push(real);
+        }
+    }
+    v
+}
+
 /// The command for one netlist run, without running it. `dirs` are the host
-/// folders aispice made for the run; `sch` is the input.
+/// folders aispice made for the run; `input` is the file xschem opens (the
+/// private copy, or an original already under a trusted root).
 pub fn netlist_command(
     x: &Xschem,
     sandbox: &Sandbox,
-    sch: &Path,
+    input: &Path,
     run: &Run,
     dirs: &Dirs,
 ) -> ProcessSpec {
@@ -421,29 +474,29 @@ pub fn netlist_command(
         .program
         .canonicalize()
         .unwrap_or_else(|_| x.program.clone());
+    let trusted = trusted_roots(run);
     match sandbox {
         Sandbox::Bwrap(bwrap) => {
-            let mut read_only: Vec<PathBuf> = vec![program.clone()];
+            // bubblewrap has its own network and IPC namespaces, so it needs
+            // no seccomp or Landlock; it shows xschem the staged copy and the
+            // trusted roots read-only.
+            let mut read_only: Vec<PathBuf> = vec![program.clone(), dirs.staging.clone()];
             read_only.extend(x.share.iter().cloned());
-            read_only.extend(run.library.iter().cloned());
-            read_only.extend(run.models_ngspice.iter().cloned());
-            read_only.extend(run.models_xyce.iter().cloned());
-            read_only.extend(run.files.iter().cloned());
-            read_only.push(sch.to_path_buf());
+            read_only.extend(trusted.iter().cloned());
+            read_only.push(input.to_path_buf());
             read_only.retain(|p| p.exists());
             let view = View {
                 read_only,
                 out: dirs.out.clone(),
                 rc: dirs.rc.clone(),
             };
-            // Inside the namespace the folders appear at fixed paths.
             let env = run_env(
                 Path::new(SANDBOX_HOME),
                 Path::new("/tmp"),
                 Path::new(SANDBOX_OUT),
                 run,
             );
-            let args = xschem_args(Path::new(SANDBOX_RC), Path::new(SANDBOX_OUT), sch);
+            let args = xschem_args(Path::new(SANDBOX_RC), Path::new(SANDBOX_OUT), input);
             let mut spec = ProcessSpec::new(bwrap, &dirs.out);
             spec.args = bwrap_args(&view, &env, &program, &args);
             spec.clear_env = true;
@@ -451,28 +504,19 @@ pub fn netlist_command(
             spec
         }
         Sandbox::Landlock { .. } => {
-            // xschem runs directly, confined to these folders before it
-            // starts. The writable set is the private home, tmp and output
-            // (and /dev/null); everything else is read-only or read-exec.
-            let mut read_exec: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
-            read_exec.push(program.clone());
-            read_exec.extend(x.share.iter().cloned());
-            let mut read: Vec<PathBuf> = SYSTEM_TRY.iter().map(PathBuf::from).collect();
+            // xschem runs directly, confined before it starts: read the
+            // system, the library, the PDK and the private copy; execute only
+            // itself and its helpers; write only the private folders.
+            let mut read: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
+            read.extend(SYSTEM_TRY.iter().map(PathBuf::from));
             read.extend(["/dev/urandom", "/dev/zero"].iter().map(PathBuf::from));
-            read.extend(run.library.iter().cloned());
-            read.extend(run.models_ngspice.iter().cloned());
-            read.extend(run.models_xyce.iter().cloned());
-            read.extend(run.files.iter().cloned());
-            read.push(sch.to_path_buf());
+            read.extend(x.share.iter().cloned());
+            read.extend(trusted.iter().cloned());
+            read.push(dirs.staging.clone());
             read.push(dirs.rc.clone());
-            let write = vec![
-                dirs.out.clone(),
-                dirs.home.clone(),
-                dirs.tmp.clone(),
-                PathBuf::from("/dev/null"),
-            ];
+            let write = vec![dirs.out.clone(), dirs.home.clone(), dirs.tmp.clone()];
             let env = run_env(&dirs.home, &dirs.tmp, &dirs.out, run);
-            let args = xschem_args(&dirs.rc, &dirs.out, sch);
+            let args = xschem_args(&dirs.rc, &dirs.out, input);
             let mut spec = ProcessSpec::new(&program, &dirs.out);
             spec.args = args;
             spec.env = env
@@ -482,14 +526,102 @@ pub fn netlist_command(
             spec.clear_env = true;
             let mut confine = limits();
             confine.landlock = Some(Landlock {
-                read_exec,
                 read,
+                exec: exec_helpers(&program),
                 write,
+                rw: vec![PathBuf::from("/dev/null")],
             });
             spec.confine = Some(confine);
             spec
         }
     }
+}
+
+/// Create a directory only its owner may use.
+fn make_private_dir(p: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(p)
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir(p)
+}
+
+/// Copy `src` to `dest` without following a symlink at `src`, up to `max`
+/// bytes. The source is one of the user's files; refusing a symlink is what
+/// stops a path from being swapped for a link to a decoy after the scan.
+fn copy_no_symlink(src: &Path, dest: &Path, max: u64) -> std::io::Result<()> {
+    use std::io::Read as _;
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(src)
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if std::fs::symlink_metadata(src)?.file_type().is_symlink() {
+            return Err(std::io::Error::other("refusing to copy a symlink"));
+        }
+        std::fs::File::open(src)
+    };
+    let mut reader = file?.take(max + 1);
+    let mut out = std::fs::File::create(dest)?;
+    if std::io::copy(&mut reader, &mut out)? > max {
+        return Err(std::io::Error::other("a staged file is too large"));
+    }
+    Ok(())
+}
+
+/// Copy the schematic and its project symbols into `staging` and return the
+/// path to the staged schematic. A file already under a trusted root (the
+/// library or PDK) is left where it is, resolved by its own path; everything
+/// else is copied, preserving its location relative to the project folder
+/// that holds the schematic, so xschem's relative lookups still resolve. A
+/// project file outside that folder is refused rather than copied flat.
+fn stage(sch: &Path, run: &Run, staging: &Path) -> Result<PathBuf, SimError> {
+    let trusted = trusted_roots(run);
+    let under_trusted = |p: &Path| trusted.iter().any(|r| p.starts_with(r));
+    // A schematic already under a trusted, read-only root is given to xschem
+    // as it is; the root is pinned read-only, so nothing there is swappable.
+    if under_trusted(sch) {
+        return Ok(sch.to_path_buf());
+    }
+    let base = run
+        .project_roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .find(|r| sch.starts_with(r))
+        .or_else(|| sch.parent().map(Path::to_path_buf))
+        .ok_or_else(|| SimError::Config("the schematic has no folder".into()))?;
+    let mut files = run.files.clone();
+    if !files.iter().any(|f| f == sch) {
+        files.push(sch.to_path_buf());
+    }
+    for f in &files {
+        if under_trusted(f) {
+            continue;
+        }
+        let rel = f.strip_prefix(&base).map_err(|_| {
+            SimError::Config(format!(
+                "xschem was not run: {} is outside the schematic's project folder",
+                f.display()
+            ))
+        })?;
+        let dest = staging.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| SimError::Io(e.to_string()))?;
+        }
+        copy_no_symlink(f, &dest, MAX_FILE)
+            .map_err(|e| SimError::Config(format!("xschem was not run: {}: {e}", f.display())))?;
+    }
+    let rel = sch
+        .strip_prefix(&base)
+        .map_err(|_| SimError::Config("the schematic is outside its project folder".into()))?;
+    Ok(staging.join(rel))
 }
 
 /// Netlist `sch` with xschem, inside `sandbox`, and return the netlist text.
@@ -501,9 +633,18 @@ pub async fn netlist(
     run: &Run,
     cancel: &CancellationToken,
 ) -> Result<String, SimError> {
-    let sch = sch
+    // Canonicalize the folder, but keep the file name and never resolve a
+    // symlink at the schematic itself: the copy below opens it O_NOFOLLOW, so
+    // a schematic swapped for a link to a decoy is refused, not followed.
+    let name = sch
+        .file_name()
+        .ok_or_else(|| SimError::Config("the schematic has no file name".into()))?;
+    let parent = sch
+        .parent()
+        .ok_or_else(|| SimError::Config("the schematic has no folder".into()))?
         .canonicalize()
         .map_err(|e| SimError::Io(format!("{}: {e}", sch.display())))?;
+    let sch = parent.join(name);
     let bad = unsafe_paths(&sch, run);
     if let Some(p) = bad.first() {
         return Err(SimError::Config(format!(
@@ -517,13 +658,17 @@ pub async fn netlist(
         rc: tmp.path().join("aispicerc.tcl"),
         home: tmp.path().join("home"),
         tmp: tmp.path().join("tmp"),
+        staging: tmp.path().join("in"),
     };
     for d in [&dirs.out, &dirs.home, &dirs.tmp] {
         std::fs::create_dir(d).map_err(|e| SimError::Io(e.to_string()))?;
     }
+    // The input copy lives in a directory only aispice may use.
+    make_private_dir(&dirs.staging).map_err(|e| SimError::Io(e.to_string()))?;
     std::fs::write(&dirs.rc, RC).map_err(|e| SimError::Io(e.to_string()))?;
+    let input = stage(&sch, run, &dirs.staging)?;
     let out = dirs.out.clone();
-    let spec = netlist_command(x, sandbox, &sch, run, &dirs);
+    let spec = netlist_command(x, sandbox, &input, run, &dirs);
     let result = process::run(&spec, TIMEOUT, cancel).await?;
     let path = out.join("netlist.spice");
     let meta = std::fs::symlink_metadata(&path).map_err(|_| {
@@ -579,12 +724,15 @@ mod tests {
         assert!(unsafe_paths(Path::new("/tmp/$x.sch"), &Run::default()).len() == 1);
     }
 
+    // Used only by the command-shape tests, which are Unix-only.
+    #[cfg(unix)]
     fn dirs(dir: &Path) -> Dirs {
         Dirs {
             out: dir.join("out"),
             rc: dir.join("rc.tcl"),
             home: dir.join("home"),
             tmp: dir.join("tmp"),
+            staging: dir.join("in"),
         }
     }
 
@@ -678,6 +826,7 @@ mod tests {
             ..Run::default()
         };
         let d = dirs(&dir);
+        std::fs::create_dir_all(&d.staging).unwrap();
         let spec = netlist_command(&x, &sandbox, &sch, &run, &d);
         assert_eq!(spec.program, PathBuf::from("/usr/bin/bwrap"));
         assert!(spec.clear_env && spec.env.is_empty());
@@ -700,13 +849,13 @@ mod tests {
         ] {
             assert!(args.contains(&flag.to_string()), "{flag}: {args:?}");
         }
-        // Read-only views of the system, the PDK and the input files; the
-        // one writable folder; a private, bounded /tmp and home.
+        // Read-only views of the system, the PDK, the private copy and the
+        // input; the one writable folder; a private, bounded /tmp and home.
         assert!(has(&["--ro-bind", "/usr", "/usr"]));
         let s = |p: &Path| p.display().to_string();
         assert!(has(&["--ro-bind", &s(&pdk), &s(&pdk)]));
+        assert!(has(&["--ro-bind", &s(&d.staging), &s(&d.staging)]));
         assert!(has(&["--ro-bind", &s(&sch), &s(&sch)]));
-        assert!(has(&["--ro-bind", &s(&sym), &s(&sym)]));
         assert!(has(&["--ro-bind", &s(&d.rc), SANDBOX_RC]));
         assert!(has(&["--bind", &s(&d.out), SANDBOX_OUT]));
         assert!(has(&["--tmpfs", "/tmp"]) && has(&["--dir", SANDBOX_HOME]));
@@ -771,6 +920,17 @@ mod tests {
             env["AISPICE_XSCHEM_NETLIST_DIR"],
             d.out.display().to_string()
         );
+        // The environment is a fixed allowlist: nothing that could point the
+        // process at the user's session is carried over.
+        for leaked in [
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "SSH_AUTH_SOCK",
+        ] {
+            assert!(!env.contains_key(leaked), "{leaked} reached the sandbox");
+        }
         let args: Vec<String> = spec
             .args
             .iter()
@@ -782,17 +942,25 @@ mod tests {
         );
         assert_eq!(args.last().unwrap(), &sch.display().to_string());
         let ll = spec.confine.as_ref().unwrap().landlock.as_ref().unwrap();
-        // Writable: only the private folders and /dev/null.
+        // Writable: only the private output, home and tmp, never the input's
+        // folder or the user's home; /dev/null is read-write.
         assert!(
             ll.write.contains(&d.out) && ll.write.contains(&d.home) && ll.write.contains(&d.tmp)
         );
         assert!(!ll.write.contains(&dir));
+        assert!(ll.rw.contains(&PathBuf::from("/dev/null")));
         if let Some(home) = std::env::var_os("HOME") {
             assert!(!ll.write.contains(&PathBuf::from(home)));
         }
-        // Readable: the input and the library; executable: the system.
-        assert!(ll.read.contains(&sch));
-        assert!(ll.read_exec.contains(&PathBuf::from("/usr")));
+        // Readable: the system and the private copy. Executable: only xschem
+        // and its helpers, never a directory of binaries like /usr/bin.
+        assert!(ll.read.contains(&PathBuf::from("/usr")));
+        assert!(ll.read.contains(&d.staging));
+        assert!(ll.exec.contains(&PathBuf::from("/usr/bin/xschem")));
+        assert!(
+            !ll.exec.contains(&PathBuf::from("/usr/bin"))
+                && !ll.exec.contains(&PathBuf::from("/usr"))
+        );
     }
 
     /// A sandbox that starts on this machine, or `None` with a note.
@@ -850,12 +1018,36 @@ mod tests {
         assert!(!mark.exists());
     }
 
+    /// Write a stand-in in xschem's place that runs `script`, run it in
+    /// `sandbox` on an empty schematic in `dir`, and return its netlist.
+    #[cfg(unix)]
+    async fn run_stand_in(sandbox: &Sandbox, dir: &Path, script: &str) -> Result<String, SimError> {
+        use std::os::unix::fs::PermissionsExt;
+        let sch = dir.join("tb.sch");
+        std::fs::write(&sch, "").unwrap();
+        let fake = dir.join("fake-xschem");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let x = Xschem {
+            program: fake,
+            share: None,
+        };
+        netlist(
+            &x,
+            sandbox,
+            &sch,
+            &Run::default(),
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
     /// Gated on a sandbox that starts on this machine: whatever the sandbox
     /// is, a stand-in in xschem's place writes only its netlist and cannot,
-    /// from inside, create a file outside its private folder, read a file
-    /// outside what the run allows, or bind a TCP socket. Each attempt is
-    /// benign and records nothing on failure, so the netlist staying exactly
-    /// `ok` is the proof that none of them worked.
+    /// from inside, create a file outside its private folder or read a file
+    /// outside what the run allows. Each attempt is benign and records
+    /// nothing on success, so the netlist staying exactly `ok` is the proof
+    /// that none worked.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_sandbox_holds() {
@@ -864,8 +1056,6 @@ mod tests {
         };
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
-        let sch = dir.join("tb.sch");
-        std::fs::write(&sch, "").unwrap();
         // A file the run does not allow reading, beside the input.
         let decoy = dir.join("decoy");
         std::fs::write(&decoy, "SECRET\n").unwrap();
@@ -882,39 +1072,89 @@ mod tests {
         for m in &marks {
             script.push_str(&format!("touch '{}' 2>/dev/null\n", m.display()));
         }
-        // Each of these appends to the netlist only if it succeeds.
         script.push_str(&format!(
             "cat '{}' >> netlist.spice 2>/dev/null\n",
             decoy.display()
         ));
-        script.push_str(
-            "python3 -c 'import socket,sys\n\
-             try:\n s=socket.socket(); s.bind((\"127.0.0.1\",0)); print(\"bound\")\n\
-             except OSError: sys.exit(0)' >> netlist.spice 2>/dev/null\n",
-        );
-        let fake = dir.join("fake-xschem");
-        std::fs::write(&fake, script).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let x = Xschem {
-            program: fake,
-            share: None,
-        };
-        let text = netlist(
-            &x,
-            &sandbox,
-            &sch,
-            &Run::default(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
+        let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
         let escaped: Vec<&PathBuf> = marks.iter().filter(|m| m.exists()).collect();
         for m in &escaped {
             let _ = std::fs::remove_file(m);
         }
         assert!(escaped.is_empty(), "wrote outside the sandbox: {escaped:?}");
-        // No decoy content, no "bound": the netlist is only what it wrote.
+        // No decoy content: the netlist is only what the stand-in wrote.
         assert_eq!(text, "ok\n", "sandbox let something through");
+    }
+
+    /// Gated on Landlock being the sandbox here: from inside, a stand-in
+    /// cannot execute a binary that is not xschem or one of its helpers, and
+    /// cannot signal a process outside its domain. (bubblewrap covers these
+    /// with its own namespaces, so this is checked only under Landlock.)
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_landlock_sandbox_narrows_exec_and_signals() {
+        let Some(sandbox) = working_sandbox().await else {
+            return;
+        };
+        if !matches!(sandbox, Sandbox::Landlock { .. }) {
+            eprintln!("skipped: the sandbox here is not Landlock");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        // env, if it could run, would print the environment into the netlist;
+        // kill -0 of this test process, if allowed, would append `signalled`.
+        // Under Landlock both are denied, so the netlist stays `ok`.
+        let script = format!(
+            "#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n\
+             /usr/bin/env >> netlist.spice 2>/dev/null\n\
+             kill -0 {} 2>/dev/null && printf 'signalled\\n' >> netlist.spice\n",
+            std::process::id()
+        );
+        let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
+        assert_eq!(text, "ok\n", "exec or signal was not denied");
+    }
+
+    /// A schematic that is a symlink to a file outside the project is refused,
+    /// never followed: the copy opens it without following links, so the
+    /// decoy's contents cannot reach xschem.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_schematic_is_refused_not_followed() {
+        let Some(sandbox) = working_sandbox().await else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let project = dir.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let decoy = dir.join("decoy.sch");
+        std::fs::write(&decoy, "v {xschem version=3.4.4 file_version=1.2}\n").unwrap();
+        let sch = project.join("tb.sch");
+        std::os::unix::fs::symlink(&decoy, &sch).unwrap();
+        let x = Xschem {
+            program: dir.join("never-run"),
+            share: None,
+        };
+        let run = Run {
+            project_roots: vec![project.clone()],
+            ..Run::default()
+        };
+        let err = netlist(&x, &sandbox, &sch, &run, &CancellationToken::new())
+            .await
+            .unwrap_err();
+        // Refused while staging, before any program ran.
+        assert!(err.to_string().contains("xschem was not run"), "{err}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_landlock_abi_floor_is_enforced() {
+        assert!(landlock_choice_from(0).is_err());
+        assert!(landlock_choice_from(crate::backend::confine::MIN_ABI - 1).is_err());
+        assert_eq!(
+            landlock_choice_from(crate::backend::confine::MIN_ABI),
+            Ok(crate::backend::confine::MIN_ABI)
+        );
     }
 }

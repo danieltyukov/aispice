@@ -282,7 +282,7 @@ async fn xschem_compare(
     expected: Expected<'_>,
     cancel: &CancellationToken,
 ) -> XschemCheck {
-    let resolver = setup.resolver(roots);
+    let resolver = setup.resolver(roots.clone());
     let verdict = safety::scan(sch, &resolver, &setup.trusted);
     if let Some(reason) = skip_reason(setup, &expected.builtin, &verdict) {
         return XschemCheck::Skipped { reason };
@@ -305,6 +305,7 @@ async fn xschem_compare(
     let run = Run {
         library: setup.library.clone(),
         files: verdict.files.clone(),
+        project_roots: roots,
         models_ngspice: setup.models("ngspice"),
         models_xyce: setup.models("xyce"),
     };

@@ -25,10 +25,14 @@ tempfile.workspace = true
 tokio-util = "0.7"
 async-trait = "0.1"
 
-# Linux-only: the Landlock sandbox that confines xschem (backend::confine).
-[target.'cfg(target_os = "linux")'.dependencies]
+# libc is used on every Unix for the no-symlink staging copy; Landlock and
+# seccomp (backend::confine) are Linux-only.
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true
+seccompiler.workspace = true
 
 [lints]
 workspace = true

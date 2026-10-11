@@ -24,15 +24,24 @@ pub const OUTPUT_CAP: usize = 1 << 20;
 /// it started (wineserver) may hold them open indefinitely.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
-/// A Landlock domain to confine a child to before it execs: it may read and
-/// execute `read_exec`, read `read`, write under `write`, and (always) make
-/// no TCP bind or connection. Built in the parent and enforced in the
-/// child's `pre_exec` hook by [`super::confine`] (Linux only).
+/// A Landlock domain to confine a child to before it execs. Each path is
+/// opened once with `O_PATH|O_NOFOLLOW` and the rule is built from that
+/// descriptor, never from a path re-resolved later, so nothing can be swapped
+/// for a symlink in between. The domain also scopes off abstract UNIX sockets
+/// and signals to other domains, and (through the handled network access)
+/// forbids every TCP bind and connect. Built in the parent and enforced in
+/// the child's `pre_exec` hook by [`super::confine`] (Linux only).
 #[derive(Debug, Clone, Default)]
 pub struct Landlock {
-    pub read_exec: Vec<PathBuf>,
+    /// Files and directories the tool may read (the system, the library and
+    /// the PDK, the private input copy); a directory is also listable.
     pub read: Vec<PathBuf>,
+    /// The only files the tool may execute: itself and its helpers.
+    pub exec: Vec<PathBuf>,
+    /// Directories the tool may write under (its private output, home, tmp).
     pub write: Vec<PathBuf>,
+    /// Single files the tool may read and write (`/dev/null`).
+    pub rw: Vec<PathBuf>,
 }
 
 /// How a child is confined on Linux: resource limits, and an optional
