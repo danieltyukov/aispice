@@ -2,6 +2,7 @@
 //! app, the CLI and the MCP server all share.
 
 pub mod eval;
+pub mod pdk;
 pub mod project;
 pub mod prompt;
 pub mod runner;
