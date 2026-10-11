@@ -1,6 +1,7 @@
 //! aispice-sim: run simulators and make sense of what they return.
 
 pub mod backend;
+pub mod behavioral;
 pub mod corner;
 pub mod dataset;
 pub mod dialect;

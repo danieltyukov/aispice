@@ -24,6 +24,9 @@ tracing.workspace = true
 tempfile.workspace = true
 tokio-util = "0.7"
 async-trait = "0.1"
+# Behavioural models: the SHA-256 of a library aispice built, checked before
+# it is loaded.
+sha2 = "0.10"
 
 [lints]
 workspace = true

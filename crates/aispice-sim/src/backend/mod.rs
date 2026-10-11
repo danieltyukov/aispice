@@ -107,6 +107,11 @@ pub struct SimJob {
     /// add to it. `Some` also runs ngspice in its native mode, which PDK
     /// model libraries need.
     pub pdk: Option<crate::pdk::PdkRun>,
+    /// Behavioural model libraries aispice built in this process (Verilog-A
+    /// as OSDI, Verilog for `d_cosim`). ngspice writes their bytes into its
+    /// private run folder, checks each SHA-256 and loads them; the other
+    /// backends refuse a job that has any.
+    pub libraries: Vec<std::sync::Arc<crate::behavioral::Library>>,
 }
 
 impl SimJob {
@@ -117,7 +122,17 @@ impl SimJob {
             deck_name: "deck".into(),
             timeout: Duration::from_secs(120),
             pdk: None,
+            libraries: Vec::new(),
         }
+    }
+
+    /// Refuse a job with behavioural libraries on a backend that cannot
+    /// load them.
+    pub fn ngspice_only(&self, sim: SimId) -> Result<(), SimError> {
+        if self.libraries.is_empty() {
+            return Ok(());
+        }
+        Err(SimError::NgspiceOnly(sim.name().to_string()))
     }
 
     /// The sanitised deck name.
@@ -168,6 +183,8 @@ pub enum SimError {
     TooLarge { what: String, size: u64, limit: u64 },
     #[error("{0} is not supported here")]
     Unsupported(String),
+    #[error("Verilog-A models and Verilog co-simulation run on ngspice only, not on {0}")]
+    NgspiceOnly(String),
     #[error(transparent)]
     Raw(#[from] RawError),
     #[error("{0}")]
