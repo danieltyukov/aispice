@@ -320,6 +320,7 @@ async fn a_missing_contact_fails_lvs_and_a_sliver_fails_drc() {
         extra: false,
         antenna: false,
         density: false,
+        recommended: true,
     };
     let report = drc::run(
         &programs,

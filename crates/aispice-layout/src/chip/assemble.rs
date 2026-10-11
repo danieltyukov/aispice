@@ -1,6 +1,7 @@
 //! Putting a chip together: the plan (floorplan, terminals, routes), the
-//! drawing (one KLayout run), fill (Magic) and the checks (IHP's DRC decks
-//! on the finished chip, its LVS deck on the chip without the pad cells).
+//! drawing, fill and merge (three KLayout runs) and the checks (IHP's DRC
+//! decks on the finished chip, its LVS deck on the chip without the pad
+//! cells).
 
 use super::floorplan::{self, BOND_SIZE, Floorplan, MacroGeom, MacroPlaced, SEAL_EDGE};
 use super::geom::{Facing, METAL1, METAL2, METAL3, METAL4, Rect, TEXT};
@@ -19,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 const CHIP_SCRIPT: &str = include_str!("../../klayout/chip.py");
 const MERGE_SCRIPT: &str = include_str!("../../klayout/merge.py");
-const FILL_SCRIPT: &str = include_str!("../../magic/fill.tcl");
+const FILL_SCRIPT: &str = include_str!("../../klayout/fill.drc");
 /// Datatype of pin shapes on metal layers.
 const PIN: i16 = 2;
 
@@ -235,12 +236,6 @@ pub async fn assemble(
     tools::check_path(dir)?;
     tools::check_name("cell", &spec.name)?;
     files.check_pcells()?;
-    if !files.magic_gds_tech.is_file() {
-        return Err(LayoutError::Input(format!(
-            "the PDK has no Magic GDS tech file ({}), which fill needs",
-            files.magic_gds_tech.display()
-        )));
-    }
     for b in blocks {
         tools::check_path(&b.gds)?;
     }
@@ -268,25 +263,24 @@ pub async fn assemble(
         return Err(failed("KLayout (assembling the chip)", &out));
     }
 
-    // Fill runs in a folder of its own: Magic writes a file per tile there.
-    let fill_dir = RunDir::new()?;
-    let fill_script = fill_dir.script("fill.tcl", FILL_SCRIPT)?;
-    let fill = fill_dir.path().join("fill.gds");
-    let out = tools::magic_tech(
+    // Fill comes from aispice's own KLayout script: IHP's filler keep-outs,
+    // with the metals filled only as far as the chip's density needs.
+    let fill = dir.join("fill.gds");
+    let fill_script = run.script("fill.drc", FILL_SCRIPT)?;
+    let out = tools::klayout(
         programs,
-        fill_dir.path(),
-        &files.magic_gds_tech,
+        run.path(),
         &fill_script,
         &[
-            ("AISPICE_GDS", nofill.display().to_string()),
-            ("AISPICE_CELL", spec.name.clone()),
-            ("AISPICE_OUT", fill.display().to_string()),
+            ("input", nofill.display().to_string()),
+            ("top", spec.name.clone()),
+            ("output", fill.display().to_string()),
         ],
         cancel,
     )
     .await?;
-    if !fill.is_file() {
-        return Err(failed("Magic (fill)", &out));
+    if !out.success() || !fill.is_file() {
+        return Err(failed("KLayout (fill)", &out));
     }
     let gds = dir.join(format!("{}.gds", spec.name));
     let merge = run.script("merge.py", MERGE_SCRIPT)?;
@@ -298,7 +292,7 @@ pub async fn assemble(
             ("chip", nofill.display().to_string()),
             ("fill", fill.display().to_string()),
             ("top", spec.name.clone()),
-            ("fill_top", format!("{}_fill_pattern", spec.name)),
+            ("fill_top", format!("{}_fill", spec.name)),
             ("out", gds.display().to_string()),
         ],
         cancel,
@@ -325,6 +319,7 @@ pub async fn check(
         extra: true,
         antenna: true,
         density: true,
+        recommended: false,
     };
     let schematic = LvsNetlist {
         text: netlist.to_string(),
