@@ -25,6 +25,8 @@
 //! - ngspice's `.pz` writes one complex point per root (`v(pole(1))`,
 //!   `v(zero(1))`, in rad/s), and a plot with no variables at all when the
 //!   transfer function has no finite poles or zeros.
+//! - Noise plots name their spectra differently in each simulator; they are
+//!   renamed to [`crate::noise::ONOISE`] and [`crate::noise::INOISE`].
 
 use crate::dataset::{
     AnalysisKind, Complex, Dataset, Quantity, Step, Vector, VectorData, normalize_name,
@@ -723,16 +725,23 @@ fn to_dataset(plot: RawPlot) -> Result<Dataset, RawError> {
         }
         let is_axis = axis == Some(i);
         let raw_q = quantity_of(&var.kind);
-        let quantity = if is_axis && kind == AnalysisKind::Dc {
+        let mut quantity = if is_axis && kind == AnalysisKind::Dc {
             Quantity::Sweep
         } else {
             raw_q
         };
-        let name = if is_axis {
+        let mut name = if is_axis {
             axis_name(&plot, var, kind)
         } else {
             vector_name(&var.name, raw_q)
         };
+        if kind == AnalysisKind::Noise
+            && !is_axis
+            && let Some((n, q)) = crate::noise::canonical(&var.name, &var.kind)
+        {
+            name = n.to_string();
+            quantity = q;
+        }
         let data = match &plot.columns {
             Columns::Real(cols) => {
                 let mut v = cols[i].clone();
@@ -1055,6 +1064,37 @@ mod tests {
         // Any other plot without variables still is.
         let bad = b"Title: x\nPlotname: Transient Analysis\nFlags: real\nNo. Variables: 0\nNo. Points: 1\nVariables:\nBinary:\n";
         assert!(matches!(read_raw(bad), Err(RawError::Header(_))));
+    }
+
+    #[test]
+    fn noise_plots_use_one_naming() {
+        // ngspice 42's header for `.noise V(out) I1`: the input-referred
+        // density of a current source input is typed as a current.
+        let mut bytes = b"Title: * n\nDate: Sun Oct 11 14:44:07  2026\nPlotname: Noise Spectral Density Curves\nFlags: real\nNo. Variables: 3\nNo. Points: 1       \nVariables:\n\t0\tfrequency\tfrequency\tgrid=3\n\t1\tonoise_spectrum\tvoltage-density\n\t2\tinoise_spectrum\tcurrent-density\nBinary:\n".to_vec();
+        for v in [1.0f64, 2.9e-9, 2.9e-12] {
+            bytes.extend(v.to_le_bytes());
+        }
+        bytes.extend(b"Title: * n\nDate: x\nPlotname: Integrated Noise\nFlags: real\nNo. Variables: 2\nNo. Points: 1       \nVariables:\n\t0\tv(onoise_total)\tvoltage\n\t1\ti(inoise_total)\tcurrent\nBinary:\n");
+        for v in [2.9e-6f64, 2.9e-9] {
+            bytes.extend(v.to_le_bytes());
+        }
+        let ds = read_raw(&bytes).unwrap();
+        assert_eq!(ds[0].kind, AnalysisKind::Noise);
+        assert_eq!(ds[0].names(), vec!["frequency", "V(onoise)", "V(inoise)"]);
+        assert_eq!(ds[0].vectors[2].quantity, Quantity::Current);
+        assert_eq!(ds[0].axis, Some(0));
+        assert_eq!(ds[1].kind, AnalysisKind::Noise);
+        assert_eq!(ds[1].axis, None);
+
+        // Spectre's nutascii noise plot, with per-device contributions kept.
+        let text = "Title: * n\nDate: 2:52:59 PM, Sun Oct 11, 2026\nPlotname: Noise Analysis `noise1': freq = (1 Hz -> 1 MHz)\nFlags: real\nNo. Variables:        4\nNo. Points:       1\nVariables:\t0\tfreq\tHz\n\t\t1\tR2.rn\tV^2/Hz plot=0 grid=0\n\t\t2\tout\tV/sqrt(Hz) plot=0 grid=0\n\t\t3\tin\tV/sqrt(Hz) plot=0 grid=0\nValues:\n 0\t1\t4.1e-18\n\t2.87e-09\t5.75e-09\n";
+        let d = &read_raw(text.as_bytes()).unwrap()[0];
+        assert_eq!(d.kind, AnalysisKind::Noise);
+        assert_eq!(
+            d.names(),
+            vec!["frequency", "R2.rn", "V(onoise)", "V(inoise)"]
+        );
+        assert_eq!(d.vector("onoise").unwrap().data.real(), vec![2.87e-9]);
     }
 
     #[test]

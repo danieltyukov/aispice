@@ -4,7 +4,8 @@
 //! whose compiled device models are Xyce plugins. Measurements come from the console, or from
 //! the `deck.cir.mt*` files when the console has none (one file per `.step`
 //! run). Xyce's binary raw names a DC sweep's axis `sweep`, so the swept
-//! source is taken from the deck's `.dc` line.
+//! source is taken from the deck's `.dc` line. Noise spectra come from
+//! `deck.cir_noise.dat`, the only place Xyce writes them.
 
 use super::process::{self, ProcessSpec};
 use super::{
@@ -13,6 +14,7 @@ use super::{
 };
 use crate::dataset::AnalysisKind;
 use crate::log::{parse_xyce_mt, parse_xyce_output};
+use crate::noise;
 use crate::pdk::PdkRun;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -162,7 +164,19 @@ impl Simulator for Xyce {
                 }
             }
         }
-        let mut keep = vec![format!("{stem}.cir"), format!("{stem}.raw")];
+        // Xyce writes noise spectra only to this text file, never to the raw
+        // file.
+        let noise_file = format!("{stem}.cir_noise.dat");
+        if let Some(bytes) = read_log_limited(&ws.file(&noise_file)) {
+            match noise::read_xyce_noise_dat(&String::from_utf8_lossy(&bytes)) {
+                Ok(spectra) => noise::merge_xyce_noise(&mut datasets, spectra),
+                Err(e) => report
+                    .warnings
+                    .push(format!("could not read Xyce's noise output: {e}")),
+            }
+        }
+        noise::mark_input_quantity(&mut datasets, &job.netlist_text);
+        let mut keep = vec![format!("{stem}.cir"), format!("{stem}.raw"), noise_file];
         keep.extend(mt_files);
         let files = ws.keep(&job.run_dir, &keep)?;
         let raw_path = files

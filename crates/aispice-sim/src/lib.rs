@@ -9,6 +9,7 @@ pub mod log;
 pub mod measure;
 pub mod models;
 pub mod montecarlo;
+pub mod noise;
 pub mod oppoint;
 pub mod optimize;
 pub mod pdk;
@@ -16,6 +17,7 @@ pub mod plot;
 pub mod polezero;
 pub mod raw;
 pub mod spec;
+pub mod stimulus;
 pub mod sweep;
 
 pub use dataset::{AnalysisKind, Complex, Dataset, Quantity, Step, Vector, VectorData};
