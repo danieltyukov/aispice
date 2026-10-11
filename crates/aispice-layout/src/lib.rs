@@ -10,6 +10,7 @@ pub mod drc;
 pub mod extract;
 pub mod gds;
 pub mod generator;
+pub mod chip;
 pub mod lvs;
 pub mod macro_export;
 pub mod render;
