@@ -241,7 +241,13 @@ export type ToolData =
   | { kind: "specs"; report: SpecReport }
   | { kind: "measure"; measurements: Measurement[] }
   | { kind: "lint"; findings: Finding[] }
-  | { kind: "schematic"; circuit: string; summary: SchematicSummary }
+  | {
+      kind: "schematic";
+      circuit: string;
+      summary: SchematicSummary;
+      /** From `xschem_import`: findings, notes and the proofs. */
+      xschem?: XschemReport;
+    }
   | { kind: "plot"; svg: string }
   | { kind: "optimize"; best: Record<string, string>; evaluations: number; report: SpecReport | null }
   | { kind: "montecarlo"; runs: number; yield_pct: number; report: string }
@@ -268,6 +274,19 @@ export type ToolData =
       specs_file?: string;
     }
   | { kind: "generic"; value: unknown };
+
+/** What an xschem import or export reports. */
+export interface XschemReport {
+  findings: { subject: string; message: string }[];
+  notes: string[];
+  proofs: {
+    aispice: { compared: string; equivalent: boolean; differences: string[] };
+    xschem:
+      | { status: "ran"; proof: { compared: string; equivalent: boolean; differences: string[] } }
+      | { status: "skipped"; reason: string };
+  };
+  equivalent: boolean;
+}
 
 export interface TemplateInfo {
   id: string;

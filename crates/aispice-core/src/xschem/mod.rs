@@ -10,6 +10,11 @@
 //! while netlisting; aispice evaluates only a small, side-effect-free subset
 //! of it ([`tcl`]), and decides with [`safety`] whether xschem itself may be
 //! run on a file.
+//!
+//! - [`file`] and [`props`]: the file format and property strings.
+//! - [`symbol`]: symbols, and finding them as xschem does.
+//! - [`netlist`]: aispice's own xschem netlister.
+//! - [`import`] and [`export`]: the conversions and their proofs.
 
 mod builtin;
 pub mod export;

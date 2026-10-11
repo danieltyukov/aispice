@@ -148,9 +148,7 @@ pub fn scan(top: &Path, resolver: &Resolver, trusted: &[PathBuf]) -> Verdict {
                 let sch = match sym.attr("schematic").filter(|s| !s.is_empty()) {
                     Some(r) => resolver.locate(&r, &dir),
                     None => match &sym.origin {
-                        Origin::File(p) => {
-                            resolver.locate(&p.with_extension("sch").display().to_string(), &dir)
-                        }
+                        Origin::File(p) => resolver.locate_path(&p.with_extension("sch")),
                         _ => Ok(None),
                     },
                 };
@@ -391,10 +389,7 @@ mod tests {
         // A file outside the project and the library is refused, not read.
         let outside = fx.dir.parent().unwrap().join("outside.sym");
         std::fs::write(&outside, "K {type=resistor}\n").unwrap();
-        let v = verdict(
-            &fx,
-            &format!("C {{{}}} 0 0 0 0 {{name=R1}}\n", outside.display()),
-        );
+        let v = verdict(&fx, "C {../outside.sym} 0 0 0 0 {name=R1}\n");
         assert!(
             v.refused.iter().any(|r| r.contains("outside")),
             "{:?}",

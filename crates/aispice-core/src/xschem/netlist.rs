@@ -684,9 +684,7 @@ impl<'a> Netlister<'a> {
                 let Origin::File(f) = &sym.origin else {
                     return None;
                 };
-                let candidate = f.with_extension("sch");
-                let reference = candidate.display().to_string();
-                match self.resolver.locate(&reference, from_dir) {
+                match self.resolver.locate_path(&f.with_extension("sch")) {
                     Ok(Some(p)) => p,
                     Ok(None) => return None,
                     Err(e) => {

@@ -257,6 +257,22 @@ impl Resolver {
         }
     }
 
+    /// A file aispice found itself (a subcircuit's schematic beside its
+    /// symbol), if it exists inside the folders aispice may read.
+    pub fn locate_path(&self, path: &Path) -> Result<Option<PathBuf>, ResolveError> {
+        let Ok(canon) = path.canonicalize() else {
+            return Ok(None);
+        };
+        if !canon.is_file() {
+            return Ok(None);
+        }
+        if self.allowed(&canon) {
+            Ok(Some(canon))
+        } else {
+            Err(ResolveError::Outside(path.display().to_string()))
+        }
+    }
+
     /// The definition for a reference made from a schematic in `sch_dir`.
     pub fn resolve(&self, reference: &str, sch_dir: &Path) -> Result<XSymbol, ResolveError> {
         let reference = reference.trim();
@@ -413,11 +429,21 @@ mod tests {
             r.resolve("./mine.sym", &proj).unwrap().origin,
             Origin::File(_)
         ));
-        // Outside the allowed folders: refused, even by absolute path.
+        // Outside the allowed folders: refused, even by absolute path (on
+        // Windows such a path has a drive prefix and backslashes, and is
+        // refused as a reference).
         let abs = other.join("secret.sym");
-        assert_eq!(
+        assert!(matches!(
             r.resolve(abs.to_str().unwrap(), &proj),
-            Err(ResolveError::Outside(abs.to_str().unwrap().to_string()))
+            Err(ResolveError::Outside(_) | ResolveError::BadReference(_))
+        ));
+        assert_eq!(
+            r.locate_path(&abs),
+            Err(ResolveError::Outside(abs.display().to_string()))
+        );
+        assert_eq!(
+            r.locate_path(&proj.join("mine.sym")),
+            Ok(Some(proj.join("mine.sym")))
         );
         assert!(matches!(
             r.resolve("../other/secret.sym", &proj),

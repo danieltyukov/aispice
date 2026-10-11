@@ -1986,3 +1986,63 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 </details>
 
+## `xschem_import`
+
+Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted (by aispice, and by xschem when installed) and compared. Refuses to overwrite.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "circuit": {
+      "description": "The LTspice schematic to create. Default: the same name with `.asc`.",
+      "type": "string"
+    },
+    "effort": {
+      "description": "How many candidate layouts to try: 1 is quick, 3 searches widely.",
+      "maximum": 255,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schematic": {
+      "description": "The xschem schematic, relative to the project folder, e.g. `tb.sch`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schematic"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `xschem_export`
+
+Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for stay SPICE lines in a code block. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem when installed). Refuses to overwrite.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "circuit": {
+      "description": "The LTspice schematic to export, relative to the project folder, e.g.\n`amp.asc`.",
+      "type": "string"
+    },
+    "schematic": {
+      "description": "The xschem schematic to create. Default: the same name with `.sch`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "circuit"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+

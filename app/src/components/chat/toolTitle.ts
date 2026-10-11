@@ -37,6 +37,8 @@ const RUNNING: Record<string, (c: string | null) => string> = {
   pdk: () => "Reading the PDK",
   gm_id: () => "Sizing by gm/Id",
   check_macro: () => "Checking the macro package",
+  xschem_import: () => "Importing from xschem",
+  xschem_export: (c) => `Exporting ${c ?? "the schematic"} to xschem`,
 };
 
 function humanName(name: string): string {
@@ -55,6 +57,18 @@ export function toolTitle(call: ChatToolCall, streaming: boolean): { title: stri
   if (out.is_error) {
     if (data?.kind === "run") return { title: `Simulation failed on ${SIMULATOR_NAMES[data.run.simulator]}`, tone: "error" };
     return { title: `${humanName(call.name).replace(/^./, (c) => c.toUpperCase())} failed`, tone: "error" };
+  }
+  if (call.name === "xschem_import" && data?.kind === "schematic") {
+    const proven = data.xschem?.equivalent !== false;
+    return {
+      title: `Imported ${baseName(data.circuit)} from xschem: ${plural(data.summary.components.length, "part")}${proven ? "" : ", proof differs"}`,
+      tone: "done",
+    };
+  }
+  if (call.name === "xschem_export" && data?.kind === "generic") {
+    const value = data.value as { schematic?: string; equivalent?: boolean } | null;
+    const name = value?.schematic ? baseName(value.schematic) : "an xschem schematic";
+    return { title: `Exported ${name}${value?.equivalent === false ? ", proof differs" : ""}`, tone: "done" };
   }
   switch (data?.kind) {
     case "edit":

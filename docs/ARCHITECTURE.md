@@ -47,6 +47,7 @@ Pure computation over files: no processes and no network.
 | `summary`, `diff` | What the agent reads: parts with the net on every pin, and a semantic diff after an edit |
 | `render` | SVG and PNG drawings of schematics |
 | `macropkg` | Macro packages shared with ChipLeap (`macro/v1`, [macro-package.md](macro-package.md)): the manifest, a small interpreter of its JSON schema, readers for GDS, LEF, liberty, Verilog and SPICE, the validator and evidence writing. ChipLeap's Python validator runs the same rules with the same messages |
+| `xschem` | xschem `.sch` and `.sym` files: reading and writing them, a netlister that follows xschem's own (connectivity, net naming, `format` expansion, `spice.awk`, hierarchy), a side-effect-free subset of the Tcl xschem files use, the safety scan that decides whether xschem may be run on a file, and import and export with their proofs. See [XSCHEM.md](XSCHEM.md) |
 
 The netlister is checked against LTspice itself: `crates/aispice-sim/tests/golden_netlist.rs` compares aispice's netlist with LTspice's `-netlist` output for every test schematic, and a larger corpus run matched 660 of 660 files.
 
@@ -70,6 +71,7 @@ Running simulators and reading what they return.
 | `pdk` | An installed PDK: checking its folder, its compiled models, the model header a netlist needs and the git commit it is at |
 | `gmid` | gm/Id lookup tables for a PDK's transistors, built on ngspice and cached, and sizing from them checked by simulation |
 | `plot` | SVG plots of waveforms |
+| `xschem` | xschem run headless as a netlister: no window, an empty environment, a private home and an rc that takes every path from the environment |
 
 ### aispice-layout
 
@@ -111,13 +113,14 @@ Where circuits meet the agent.
 | `workspace` | What all tools share: the project, the runner, and hooks a front end sets (approve an edit first, reload LTspice after a save) |
 | `tools` | The tools themselves. `aispice docs tools` prints the full reference |
 | `templates` | The verified reference circuits behind the `templates` tool, embedded in the binary |
+| `xschem` | xschem import and export with both proofs (aispice's netlist, and xschem's own when it may run), shared by the tools and the CLI |
 | `eval` | The design task runner and judge behind `aispice eval` |
 | `prompt` | The system prompt |
 | `setup` | Builds a workspace and runner from the config file |
 
 ### aispice (CLI)
 
-`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `macro`, `mcp`, `pdk`, `gmid`, `layout`, `drc`, `lvs`, `extract`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
+`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `xschem`, `eval`, `macro`, `mcp`, `pdk`, `gmid`, `layout`, `drc`, `lvs`, `extract`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
 
 ### Desktop app
 
@@ -142,6 +145,7 @@ Circuit files, simulator logs and tool output are data, not instructions. The de
 - **Compiled models.** A PDK's transistor models are compiled code (ngspice OSDI files, Xyce plugins). A netlist can never load one: `pre_osdi`, `osdi`, `codemodel` and includes of compiled libraries are refused everywhere. aispice loads them itself, outside the deck (in the start-up file it writes into the private run folder, or with Xyce's `-plugin`), and only from a PDK folder the user registered with `aispice pdk add`, after checking each resolved path is inside that folder. A project can only name a registered PDK in `aispice.toml`, never a path, and the agent cannot register one. `aispice.toml` is project content: it is read only as a regular file, never through a link, and its errors give a line and column, never its text. Registered folders are include roots whose files get every policy rule except the path heuristic their expressions (`w/ng`) would trip.
 - **Layout programs.** KLayout and Magic run only scripts aispice ships, written into a private run folder that is also their `HOME` and `TMPDIR`, so no start-up file of the user's or a project's is read and no temporary file is shared with another run (IHP's pcell library writes fixed-name modules there and executes them). Paths and names reach them as data (`-rd` values, environment variables), never as script text: cell, net and label names must match `[A-Za-z0-9_$.<>-]`, paths must be absolute without control characters, and each script checks them again. A project's GDS files must lie inside the project and are read first by aispice's own bounded reader (256 MiB, 64 levels of nesting); report databases, LVS results and extracted netlists are read with size and nesting limits, and each reader is fuzzed with random and mutated input.
 - **Tool classes.** Every tool declares what it does to the user's files: `ReadOnly` (it reads the project and writes at most under `.aispice/` or aispice's cache) or `Edit`. MCP clients see the class as `readOnlyHint`. A tool that does not declare one counts as `Edit`. The layout tools write the user's files only through `Workspace::write_files`, which refuses a tool declared read-only, resolves each path with the project's output resolver (inside the project and outside `.aispice/`, no `..`, `~` or drive, never through a symlink), asks for approval once for the set, and records each file in the history so it can be undone. Paths the layout tools read go through the netlist policy's resolver (`resolve_include`): symlinks are followed and the real file must lie in the project or a registered PDK folder. DRC and LVS reports and extracted netlists go into a run folder under `.aispice/layout/` that each run creates, never one that already exists.
+- **xschem files.** xschem evaluates Tcl from the files it opens. aispice never runs Tcl: it evaluates a fixed side-effect-free subset and reports anything else. Before it runs xschem to check a conversion, it reads every file xschem would read and refuses Tcl command substitution in schematics and in symbols outside xschem's library and the registered PDK, any value xschem would paste into a Tcl script (an instance of a tcleval symbol, label names, subcircuit instance properties) that could reshape it, Tcl-looking or outside symbol references, and paths with characters Tcl could read. xschem then runs headless from an argument vector, with an empty environment, a private home and an rc file that holds no path. The readers are bounded (file, string, record, nesting and output size) and tested with hostile and random input. See [XSCHEM.md](XSCHEM.md#running-xschem-safely).
 - **Approval.** Every tool that writes goes through one approval hook, so "ask before applying" covers edits, spec files, optimiser results and undo.
 - **Keys.** API keys stay in the keychain and are never logged, printed or included in errors.
 - **Desktop.** A strict content security policy, minimal Tauri capabilities, and SVG sanitising in the interface. Chat sessions are stored in the user's data folder, never in a project, so a cloned repository cannot plant a conversation.
@@ -162,5 +166,6 @@ See [SECURITY.md](../SECURITY.md) to report a problem.
 | PDK | `crates/aispice-tools/tests/pdk_ihp.rs` with `AISPICE_PDK_IHP` set: IHP circuits drawn with the PDK symbols on ngspice and Xyce, and gm/Id sizing checked by simulation |
 | Macro packages | `crates/aispice-core/tests/macro_contract.rs`: the findings ChipLeap's validator also reports, on fixtures shared with it, and hashes that catch drift between the two copies |
 | Layout | `crates/aispice-layout/tests/` with `AISPICE_PDK_IHP`, KLayout and Magic: a Metal1 spacing violation found with its rule and place; generated mirror, pair, OTA, two-stage op-amp and comparator DRC and LVS clean; a missing contact failing LVS on its net and a sliver failing DRC; the OTA and the op-amp extracted. `crates/aispice-tools/tests/layout_ihp.rs`: the OTA and the two-stage op-amp laid out, checked and simulated after layout through the tools, and the files each layout tool writes (only the GDS and its record, after one approval; nothing from DRC, LVS, extraction, rendering or post-layout specs). `malformed.rs`: every reader of untrusted files against random and mutated input. `crates/aispice-tools/tests/layout_security.rs`: every tool's declared class, a GDS outside the project, outputs with `..`, absolute, under `.aispice/`, through a linked folder or a symlinked name, a user's file under the output name, and a write by a read-only tool, all refused |
+| xschem | `crates/aispice-tools/tests/xschem_ihp.rs` with `AISPICE_PDK_IHP` set and xschem installed: every IHP test bench imports with aispice's xschem netlist equal to xschem's own, and every template and bench exports with xschem's netlist matching the `.asc`'s |
 | Model behaviour | `aispice eval`: design tasks judged by simulation, with reference solutions checked in `crates/aispice-tools/tests/eval_suite.rs` |
 | Desktop app | `npm run test:desktop -w app`: the built app driven through tauri-driver and WebKitWebDriver, with a local mock model |
