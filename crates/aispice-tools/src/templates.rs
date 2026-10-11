@@ -7,9 +7,18 @@
 //! format. Both files are compiled into the binary. The test suite
 //! simulates every template and requires it to meet its own specs, so a
 //! design that starts from one starts from a circuit known to work.
+//!
+//! Integrated-circuit templates (category `ic`) are drawn in a process design
+//! kit's devices and name it (`pdk = "ihp-sg13g2"`): they simulate only in a
+//! project that uses that PDK. Their specs hold at a set of corners the
+//! template names, which `check_specs`, `optimize` and `monte_carlo` take as
+//! `corners`, on the simulators it lists. A template whose block a layout
+//! generator draws names the generator and which instances play which part.
 
 use aispice_core::schematic::{self, Schematic};
+use aispice_sim::corner::CornerSet;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 /// The categories templates are filed under, in display order.
@@ -21,6 +30,7 @@ pub const CATEGORIES: &[&str] = &[
     "oscillators",
     "digital",
     "sensors",
+    "ic",
 ];
 
 /// A part a designer usually changes.
@@ -33,6 +43,34 @@ pub struct Parameter {
     pub controls: String,
     /// The design equation, in plain text.
     pub equation: String,
+}
+
+/// A role's instances: one name or several, as the layout generators read
+/// role maps (`{"pair": ["M1", "M2"], "tail": "M5"}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RoleDevices {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl RoleDevices {
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            RoleDevices::One(s) => vec![s.as_str()],
+            RoleDevices::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// The layout generator that draws a template's block, and the role map it
+/// takes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutHint {
+    /// `current_mirror`, `ota5t`, `two_stage` or `comparator`.
+    pub generator: String,
+    pub roles: BTreeMap<String, RoleDevices>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -49,6 +87,19 @@ pub struct Template {
     pub specs: String,
     #[serde(default)]
     pub parameters: Vec<Parameter>,
+    /// The kind of PDK the circuit is drawn in (`ihp-sg13g2`), for IC
+    /// templates.
+    #[serde(default)]
+    pub pdk: Option<String>,
+    /// The corners the spec table holds at.
+    #[serde(default)]
+    pub corners: Option<CornerSet>,
+    /// The simulators the spec table is verified on; empty means any.
+    #[serde(default)]
+    pub simulators: Vec<String>,
+    /// The layout generator for the block, when there is one.
+    #[serde(default)]
+    pub layout: Option<LayoutHint>,
     /// The `.asc` file.
     #[serde(skip)]
     pub asc: &'static [u8],
@@ -74,10 +125,11 @@ impl Template {
     /// description, ignoring case.
     fn matches(&self, query: &str) -> bool {
         let hay = format!(
-            "{} {} {} {}",
+            "{} {} {} {} {}",
             self.id.replace('_', " "),
             self.title,
             self.category,
+            self.pdk.as_deref().unwrap_or(""),
             self.description
         )
         .to_lowercase();
@@ -116,6 +168,12 @@ const FILES: &[(&str, &str, &[u8])] = embed![
     "wien_bridge_oscillator",
     "level_shifter",
     "transimpedance_amplifier",
+    "current_mirror",
+    "ota5t",
+    "two_stage",
+    "comparator",
+    "bandgap",
+    "ldo",
 ];
 
 static ALL: LazyLock<Vec<Template>> = LazyLock::new(|| {

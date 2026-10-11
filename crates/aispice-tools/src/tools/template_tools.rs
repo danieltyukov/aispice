@@ -34,7 +34,7 @@ pub struct TemplatesInput {
     #[serde(default)]
     pub id: Option<String>,
     /// For `list`: only this category (filters, amplifiers, references,
-    /// power, oscillators, digital, sensors).
+    /// power, oscillators, digital, sensors, ic).
     #[serde(default)]
     pub category: Option<String>,
     /// For `list`: words that must all appear in the id, title or
@@ -49,7 +49,7 @@ pub struct TemplatesInput {
 }
 
 const DESCRIPTION: &str = r#"
-Verified reference circuits to start a design from: passive and active filters, op-amp and transistor gain stages, voltage references, regulators and power switching, an oscillator, a logic level shifter and a photodiode front end. Every template is simulated in aispice's test suite and meets its own spec table. `list` shows the library (filter by category or by words), `show` gives a template's design equations, the parts usually changed, its spec table and the parts and nets of the schematic, and `use` copies it into the project as a new circuit with its specs saved beside it, ready for check_specs and then optimize. `use` refuses to overwrite existing files.
+Verified reference circuits to start a design from: passive and active filters, op-amp and transistor gain stages, voltage references, regulators and power switching, an oscillator, a logic level shifter and a photodiode front end, plus transistor-level IC blocks (category ic) on a PDK: current mirror bias, 5-transistor OTA, two-stage Miller op-amp, StrongARM comparator, bandgap reference and LDO on IHP SG13G2. Every template is simulated in aispice's test suite and meets its own spec table; an IC template meets it at every corner of the set it names, which you pass to check_specs as `corners`. `list` shows the library (filter by category or by words), `show` gives a template's design equations, the parts usually changed, its spec table, corners and layout generator, and the parts and nets of the schematic, and `use` copies it into the project as a new circuit with its specs saved beside it, ready for check_specs and then optimize. An IC template needs a project that uses its PDK (pdk tool, action use). `use` refuses to overwrite existing files.
 "#;
 
 pub struct Templates {
@@ -66,7 +66,41 @@ fn template_json(t: &Template) -> Value {
         "analysis": t.analysis,
         "specs": t.specs.trim(),
         "parameters": t.parameters,
+        "pdk": t.pdk,
+        "corners": t.corners,
+        "simulators": t.simulators,
+        "layout": t.layout,
     })
+}
+
+/// What an IC template needs and promises: its PDK, the corners and
+/// simulators its specs hold on, and the layout generator for its block.
+fn ic_text(t: &Template) -> String {
+    let mut s = String::new();
+    if let Some(pdk) = &t.pdk {
+        s.push_str(&format!(
+            "PDK: {pdk}. The project must use it (pdk tool, action use).\n"
+        ));
+    }
+    if let Some(set) = &t.corners {
+        let on = if t.simulators.is_empty() {
+            String::new()
+        } else {
+            format!(" on {}", t.simulators.join(" and "))
+        };
+        s.push_str(&format!(
+            "The specs hold at every corner of this set{on}; pass it to check_specs, optimize and monte_carlo as corners: {}\n",
+            serde_json::to_string(set).unwrap_or_default()
+        ));
+    }
+    if let Some(layout) = &t.layout {
+        s.push_str(&format!(
+            "Layout: the {} generator draws this block, with the roles {}.\n",
+            layout.generator,
+            serde_json::to_string(&layout.roles).unwrap_or_default()
+        ));
+    }
+    s
 }
 
 /// Design notes for people and models: what to change and why.
@@ -99,9 +133,13 @@ fn list(input: &TemplatesInput) -> Result<ToolOutput, String> {
     let hits = templates::search(input.category.as_deref(), input.query.as_deref());
     let mut text = format!("{} template(s):\n", hits.len());
     for t in &hits {
+        let tag = match &t.pdk {
+            Some(pdk) => format!("{}, {pdk}", t.category),
+            None => t.category.clone(),
+        };
         text.push_str(&format!(
-            "  {} [{}] {}: {}\n",
-            t.id, t.category, t.title, t.description
+            "  {} [{tag}] {}: {}\n",
+            t.id, t.title, t.description
         ));
     }
     if hits.is_empty() {
@@ -122,6 +160,7 @@ fn list(input: &TemplatesInput) -> Result<ToolOutput, String> {
                 "title": t.title,
                 "category": t.category,
                 "description": t.description,
+                "pdk": t.pdk,
             })
         })
         .collect();
@@ -131,7 +170,7 @@ fn list(input: &TemplatesInput) -> Result<ToolOutput, String> {
 fn show(t: &Template) -> ToolOutput {
     let summary = summarize(&t.schematic(), &SymbolLibrary::builtin_only());
     let text = format!(
-        "{}: {} [{}]\n{}\nAnalysis: {}\n{}{}Schematic:\n{}To start from it, call templates with action use, this id and a new circuit file name.\n",
+        "{}: {} [{}]\n{}\nAnalysis: {}\n{}{}{}Schematic:\n{}To start from it, call templates with action use, this id and a new circuit file name.\n",
         t.id,
         t.title,
         t.category,
@@ -139,6 +178,7 @@ fn show(t: &Template) -> ToolOutput {
         t.analysis,
         parameters_text(t),
         specs_text(t),
+        ic_text(t),
         summary.to_text()
     );
     ToolOutput::text(text).with_data(json!({
@@ -187,6 +227,35 @@ fn find(id: Option<&str>) -> Result<&'static Template, String> {
 }
 
 impl Templates {
+    /// Whether the open project uses a PDK of this kind; why not otherwise.
+    fn project_uses(&self, kind: &str) -> Result<(), String> {
+        let p = self.ws.project().map_err(|e| e.to_string())?;
+        let registry = self.ws.runner.config().pdks;
+        let mut candidates = registry.names_of_kind(kind);
+        let hint = match candidates.len() {
+            0 => format!(
+                "no {kind} PDK is registered (the user registers one with `aispice pdk add`)"
+            ),
+            1 => format!(
+                "make it use the registered {} first (pdk tool, action use)",
+                candidates.remove(0)
+            ),
+            _ => format!(
+                "make it use one of the registered {} first (pdk tool, action use)",
+                candidates.join(", ")
+            ),
+        };
+        match self.ws.runner.project_pdk(&p) {
+            Ok(Some(pdk)) if pdk.kit.kind.eq_ignore_ascii_case(kind) => Ok(()),
+            Ok(Some(pdk)) => Err(format!(
+                "this project uses {} ({}); {hint}",
+                pdk.name, pdk.kit.kind
+            )),
+            Ok(None) => Err(format!("this project uses no PDK; {hint}")),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     async fn use_template(&self, t: &'static Template, circuit: Option<String>) -> ToolOutput {
         let Some(circuit) = circuit
             .map(|c| c.trim().to_string())
@@ -200,6 +269,14 @@ impl Templates {
             return ToolOutput::error(format!("`{circuit}` must end in .asc"));
         }
         let specs = specs_file(&circuit);
+        if let Some(kind) = &t.pdk
+            && let Err(e) = self.project_uses(kind)
+        {
+            return ToolOutput::error(format!(
+                "{} is drawn in the {kind} PDK's devices, and {e}; nothing was written",
+                t.id
+            ));
+        }
         // Refuse before asking for approval: both files must be new and
         // inside the project.
         let checked = tokio::task::spawn_blocking({
@@ -255,13 +332,15 @@ impl Templates {
                 .map_err(|e| format!("Created {circuit}, but could not write {specs}: {e}"))?;
             let summary = summarize(&sch, p.library());
             let text = format!(
-                "Created {circuit} from template {} ({}, {} parts); specs saved to {specs}.\n{}{}{}Next: run check_specs on {circuit} to confirm it passes here, then edit the specs to your requirements and size the parameters with optimize.\n",
+                "Created {circuit} from template {} ({}, {} parts); specs saved to {specs}.\n{}{}{}{}Next: run check_specs on {circuit} to confirm it passes here{}, then edit the specs to your requirements and size the parameters with optimize.\n",
                 t.id,
                 t.title,
                 summary.components.len(),
                 summary.to_text(),
                 parameters_text(t),
                 specs_text(t),
+                ic_text(t),
+                if t.corners.is_some() { " (with the corners above)" } else { "" },
             );
             Ok(ToolOutput::text(text).with_data(json!({
                 "kind": "template",
