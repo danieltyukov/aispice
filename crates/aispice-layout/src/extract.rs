@@ -147,6 +147,7 @@ pub fn clean(
     Ok((out, ports, counts, total_cap))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn magic_pass(
     programs: &Programs,
     files: &PdkLayoutFiles,
