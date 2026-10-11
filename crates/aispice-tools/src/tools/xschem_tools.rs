@@ -6,8 +6,8 @@ use super::blocking;
 use super::schematic_tools::spec;
 use crate::workspace::Workspace;
 use crate::xschem::{
-    ExportOutcome, ImportOutcome, Setup, check_export, check_import, export_schematic, import_file,
-    pdk_for, report, report_json,
+    Effort, ExportOutcome, ImportOutcome, MAX_LAYOUT_ELEMENTS, Setup, check_export, check_import,
+    export_schematic, import_file, pdk_for, report, report_json,
 };
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
@@ -96,7 +96,17 @@ impl Tool for XschemImport {
                 let setup = setup(&ws, &p);
                 let roots = vec![p.root().to_path_buf()];
                 let out_dir = target.parent().map(Path::to_path_buf);
-                let imported = import_file(&setup, &sch, roots.clone(), out_dir.as_deref(), p.library(), effort)?;
+                let imported = import_file(
+                    &setup,
+                    &sch,
+                    roots.clone(),
+                    out_dir.as_deref(),
+                    p.library(),
+                    Effort {
+                        effort,
+                        max_elements: Some(MAX_LAYOUT_ELEMENTS),
+                    },
+                )?;
                 Ok((setup, sch, roots, out_dir, circuit, imported))
             }
         })
@@ -221,7 +231,10 @@ impl Tool for XschemExport {
                     &format!("* {circuit}"),
                     &out,
                     vec![p.root().to_path_buf()],
-                    2,
+                    Effort {
+                        effort: 2,
+                        max_elements: Some(MAX_LAYOUT_ELEMENTS),
+                    },
                 )?;
                 Ok((setup, out, exported))
             }

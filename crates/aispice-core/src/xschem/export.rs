@@ -53,6 +53,8 @@ pub struct ExportOptions {
     /// model header: `.lib cornerMOSlv.lib mos_tt`.
     pub model_lines: Vec<String>,
     pub netlist: netlist::Options,
+    /// Refuse circuits with more elements than this rather than redraw them.
+    pub max_elements: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,8 @@ pub enum ExportError {
     Layout(LayoutError),
     #[error(transparent)]
     Netlist(#[from] netlist::NetlistError),
+    #[error("the circuit has {0} elements; the layout handles up to {1}")]
+    TooLarge(usize, usize),
 }
 
 /// How the netlister's line for an instance is made.
@@ -336,6 +340,10 @@ pub fn export(
 ) -> Result<Exported, ExportError> {
     let (built, _) = crate::netlist::build(asc, lib, title);
     let asc_netlist = built.netlist;
+    let elements = asc_netlist.elements().count();
+    if let Some(max) = opts.max_elements.filter(|m| elements > *m) {
+        return Err(ExportError::TooLarge(elements, max));
+    }
     let mut notes: Vec<String> = built.warnings.clone();
     let mut findings = Vec::new();
 

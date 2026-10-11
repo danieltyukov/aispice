@@ -43,6 +43,12 @@ const MAX_SHEETS: usize = 256;
 const MAX_TEXT: usize = 16 << 20;
 /// Point-on-wire tests per sheet before the sheet is refused as too complex.
 const MAX_TESTS: usize = 50_000_000;
+/// Pins on one sheet, all instances together, before the sheet is refused
+/// as too complex.
+const MAX_PINS: usize = 1_000_000;
+/// One element's lines larger than this leave the element out: a format
+/// can repeat a large value many times.
+const MAX_ELEMENT: usize = 1 << 20;
 
 /// Something in the schematic aispice could not netlist as xschem would.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -134,6 +140,8 @@ pub fn netlist(
         opts,
         cache: HashMap::new(),
         out: XNetlist::default(),
+        written: 0,
+        seen: Default::default(),
         globals: Vec::new(),
         device_models: Vec::new(),
         queue: VecDeque::new(),
@@ -162,6 +170,10 @@ struct Netlister<'a> {
     opts: &'a Options,
     cache: HashMap<(String, PathBuf), Result<SymbolRef, ResolveError>>,
     out: XNetlist,
+    /// Bytes of element lines so far, against [`MAX_TEXT`].
+    written: usize,
+    /// Findings already reported, so each is reported once.
+    seen: std::collections::HashSet<(String, String)>,
     globals: Vec<String>,
     /// `device_model` attributes by xschem's key, first one wins.
     device_models: Vec<(String, String)>,
@@ -196,7 +208,7 @@ impl<'a> Netlister<'a> {
             subject: subject.into(),
             message: message.into(),
         };
-        if !self.out.findings.contains(&f) {
+        if self.seen.insert((f.subject.clone(), f.message.clone())) {
             self.out.findings.push(f);
         }
     }
@@ -234,6 +246,7 @@ impl<'a> Netlister<'a> {
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let env = self.opts.env.clone();
         let mut insts = Vec::new();
+        let mut pins = 0usize;
         for raw in &file.instances {
             let sym = match self.symbol(raw, &dir) {
                 Ok(s) => s,
@@ -266,6 +279,10 @@ impl<'a> Netlister<'a> {
                     &name,
                     "a `schematic` attribute on an instance is not supported; the symbol's own schematic is used",
                 );
+            }
+            pins = pins.saturating_add(sym.pins.len());
+            if pins > MAX_PINS {
+                return Err(NetlistError::TooComplex(path.display().to_string()));
             }
             let points = sym
                 .pins
@@ -348,11 +365,13 @@ impl<'a> Netlister<'a> {
             // A shorted instance joins all its pins; pins sharing a name are
             // one pass-through pin.
             let pins = &inst.sym.pins;
-            for j in 0..pins.len() {
-                for k in j + 1..pins.len() {
-                    if inst.ignore == Ignore::Short || pins[j].name == pins[k].name {
-                        uf.union(pin_base[i] + j, pin_base[i] + k);
-                    }
+            let mut first: HashMap<&str, usize> = HashMap::new();
+            for (j, p) in pins.iter().enumerate() {
+                if inst.ignore == Ignore::Short {
+                    uf.union(pin_base[i], pin_base[i] + j);
+                } else {
+                    let k = *first.entry(p.name.as_str()).or_insert(j);
+                    uf.union(pin_base[i] + k, pin_base[i] + j);
                 }
             }
             if tests > MAX_TESTS {
@@ -726,6 +745,13 @@ impl<'a> Netlister<'a> {
             return String::new();
         };
         let mut line = ex.expand(&format);
+        if line.len() > MAX_ELEMENT || self.written > MAX_TEXT {
+            self.finding(
+                &inst.name,
+                "the element's netlist lines grow too large; the element is left out",
+            );
+            return String::new();
+        }
         if line.starts_with("tcleval(") {
             let translated = ex.translate(&line);
             line = match tcl::tcleval(&translated, &env) {
@@ -752,6 +778,7 @@ impl<'a> Netlister<'a> {
         if marker {
             line.push_str("**** end_element\n");
         }
+        self.written = self.written.saturating_add(line.len());
         line
     }
 }
@@ -1122,6 +1149,10 @@ impl Expander<'_, '_> {
                 Piece::Char(c) => out.push(c),
                 Piece::Token { text, after: _ } => self.token(&text, &mut out),
             }
+            // The caller refuses lines over the limit; stop growing here.
+            if out.len() > MAX_ELEMENT {
+                break;
+            }
         }
         out.push('\n');
         out
@@ -1424,9 +1455,12 @@ fn process_line(line: &str, prefix: &str, out: &mut String) {
                 .unwrap_or_default();
             let mult: i64 = f[1..].parse().unwrap_or(1);
             let mult = if mult == -1 { list.len() as i64 } else { mult };
+            // A multiplicity comes from the file: keep it small enough that
+            // the index arithmetic cannot overflow.
+            let mult = mult.clamp(0, 4096) as usize;
             if !list.is_empty() {
-                for l in 0..mult.clamp(0, 4096) as usize {
-                    let ii = (l + mult as usize * i) % list.len();
+                for l in 0..mult {
+                    let ii = (l + mult * i) % list.len();
                     let _ = write!(out, "{} ", list[ii]);
                 }
             }

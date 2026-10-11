@@ -150,13 +150,24 @@ pub struct ExportOutcome {
 
 /// Import the `.sch` at `sch`. `roots` are the folders besides the library
 /// that schematic may pull files from; `out_dir` is where the `.asc` goes.
+/// The most elements the agent's tools lay out, as for `create_schematic`.
+pub const MAX_LAYOUT_ELEMENTS: usize = 150;
+
+/// Layout settings for a conversion: how hard to search, and an element
+/// limit when an agent asked for it.
+#[derive(Debug, Clone, Copy)]
+pub struct Effort {
+    pub effort: u8,
+    pub max_elements: Option<usize>,
+}
+
 pub fn import_file(
     setup: &Setup,
     sch: &Path,
     roots: Vec<PathBuf>,
     out_dir: Option<&Path>,
     lib: &SymbolLibrary,
-    effort: u8,
+    effort: Effort,
 ) -> Result<Imported, String> {
     let text = read_limited(sch).map_err(|e| format!("{}: {e}", sch.display()))?;
     let f = file::parse(&text).map_err(|e| format!("{}: {e}", sch.display()))?;
@@ -166,10 +177,11 @@ pub fn import_file(
             ..Options::default()
         },
         layout: LayoutOptions {
-            effort,
+            effort: effort.effort,
             ..LayoutOptions::default()
         },
         out_dir: out_dir.map(Path::to_path_buf),
+        max_elements: effort.max_elements,
     };
     import(sch, &f, &setup.resolver(roots), lib, &opts).map_err(|e| e.to_string())
 }
@@ -305,14 +317,15 @@ pub fn export_schematic(
     title: &str,
     out: &Path,
     roots: Vec<PathBuf>,
-    effort: u8,
+    effort: Effort,
 ) -> Result<Exported, String> {
     let (built, _) = aispice_core::netlist::build(asc, lib, title);
     let opts = ExportOptions {
         layout: LayoutOptions {
-            effort,
+            effort: effort.effort,
             ..LayoutOptions::default()
         },
+        max_elements: effort.max_elements,
         model_lines: model_lines(&built.netlist),
         netlist: Options {
             env: setup.env(),

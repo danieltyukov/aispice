@@ -13,8 +13,8 @@ use aispice_core::xschem::import::Proof;
 use aispice_core::xschem::netlist::Finding;
 use aispice_tools::pdk::Registry;
 use aispice_tools::xschem::{
-    Setup, XschemCheck, check_export, check_import, export_schematic, import_file, pdk_for, report,
-    report_json,
+    Effort, Setup, XschemCheck, check_export, check_import, export_schematic, import_file, pdk_for,
+    report, report_json,
 };
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -107,7 +107,10 @@ pub fn import(
         roots(&sch),
         Some(&out_dir),
         &lib,
-        effort.clamp(1, 3),
+        Effort {
+            effort: effort.clamp(1, 3),
+            max_elements: None,
+        },
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !imported.proof.equivalent {
@@ -187,7 +190,10 @@ pub fn export(ctx: &Ctx, file: &Path, output: Option<&Path>, force: bool) -> Res
         &format!("* {name}"),
         &out_abs,
         roots(file),
-        2,
+        Effort {
+            effort: 2,
+            max_elements: None,
+        },
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     if !exported.proof.equivalent {

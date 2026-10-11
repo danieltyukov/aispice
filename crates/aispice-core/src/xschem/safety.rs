@@ -65,6 +65,10 @@ pub fn scan(top: &Path, resolver: &Resolver, trusted: &[PathBuf]) -> Verdict {
     let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::from([(top.to_path_buf(), 0)]);
     let mut seen_sheets: BTreeSet<PathBuf> = BTreeSet::new();
     let mut seen_files: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut cache: std::collections::HashMap<
+        (String, PathBuf),
+        Result<std::sync::Arc<super::symbol::XSymbol>, ResolveError>,
+    > = std::collections::HashMap::new();
     while let Some((path, depth)) = queue.pop_front() {
         let shown = path.display().to_string();
         let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -106,9 +110,23 @@ pub fn scan(top: &Path, resolver: &Resolver, trusted: &[PathBuf]) -> Verdict {
                 continue;
             }
             let sym = if let Some(e) = &inst.embedded {
-                super::symbol::XSymbol::from_file(&inst.symbol, (**e).clone(), Origin::Embedded)
+                std::sync::Arc::new(super::symbol::XSymbol::from_file(
+                    &inst.symbol,
+                    (**e).clone(),
+                    Origin::Embedded,
+                ))
             } else {
-                match resolver.resolve(&inst.symbol, &dir) {
+                // Each file is read once however many instances use it.
+                let key = (inst.symbol.trim().to_string(), dir.clone());
+                let resolved = cache
+                    .entry(key)
+                    .or_insert_with(|| {
+                        resolver
+                            .resolve(&inst.symbol, &dir)
+                            .map(std::sync::Arc::new)
+                    })
+                    .clone();
+                match resolved {
                     Ok(s) => s,
                     Err(ResolveError::NotFound(_)) => continue,
                     Err(e) => {

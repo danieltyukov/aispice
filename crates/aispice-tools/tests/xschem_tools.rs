@@ -178,3 +178,21 @@ async fn hostile_schematics_are_data() {
     assert_eq!(x["status"], "skipped", "{x}");
     assert!(!marker.exists());
 }
+
+#[tokio::test]
+async fn import_refuses_what_the_layout_cannot_draw() {
+    let (_d, ws) = workspace();
+    let root = ws.project().unwrap().root().to_path_buf();
+    let big: String = std::iter::once("v {xschem version=3.4.4 file_version=1.2}\n".to_string())
+        .chain((0..200).map(|i| {
+            format!(
+                "C {{devices/res.sym}} {} 0 0 0 {{name=R{i} value=1k}}\n",
+                i * 100
+            )
+        }))
+        .collect();
+    std::fs::write(root.join("big.sch"), big).unwrap();
+    let (text, err, _) = call(&ws, "xschem_import", json!({"schematic": "big.sch"})).await;
+    assert!(err && text.contains("200 elements"), "{text}");
+    assert!(!root.join("big.asc").exists());
+}

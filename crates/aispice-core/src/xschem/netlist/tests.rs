@@ -455,3 +455,46 @@ fn dense_input_is_refused_or_finishes() {
     let _ = netlist(Path::new("/w/x.sch"), &f, &builtins(), &Options::default());
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
+
+#[test]
+fn formats_that_multiply_values_stay_bounded() {
+    // A format repeating a large value: each line is capped and the element
+    // is left out with a finding, without building gigabytes of text.
+    let value = "x".repeat(200_000);
+    let format = "@value ".repeat(2000);
+    let sch = format!(
+        "v {{xschem version=3.4.4 file_version=1.2}}\nC {{devices/res.sym}} 0 0 0 0 {{name=R1 value={value} format=\"{format}\"}}\n"
+    );
+    let n = run(&sch);
+    assert!(
+        n.findings
+            .iter()
+            .any(|f| f.subject == "R1" && f.message.contains("too large")),
+        "{:?}",
+        n.findings
+    );
+    assert!(n.text.len() < 1 << 16);
+    // A huge multiplicity marker in an element line cannot overflow.
+    let out = postprocess("R1,R2,R3 ?9223372036854775807 a,b ?-1 c,d\n");
+    assert!(out.starts_with("R1 "), "{out}");
+}
+
+#[test]
+fn symbols_with_very_many_pins_are_refused_quickly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let mut sym = String::from("K {type=subcircuit format=\"@name @pinlist @symname\"}\n");
+    for k in 0..2000 {
+        sym.push_str(&format!("B 5 {k} 0 {k} 1 {{name=p}}\n"));
+    }
+    std::fs::write(dir.join("wide.sym"), sym).unwrap();
+    let sch: String = (0..600)
+        .map(|i| format!("C {{wide.sym}} 0 {} 0 0 {{name=x{i}}}\n", i * 10))
+        .collect();
+    let f = file::parse(&sch).unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let start = std::time::Instant::now();
+    let res = netlist(&dir.join("top.sch"), &f, &r, &Options::default());
+    assert!(matches!(res, Err(NetlistError::TooComplex(_))), "{res:?}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+}

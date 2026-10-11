@@ -41,6 +41,8 @@ pub struct ImportOptions {
     /// Where the `.asc` will be written. A relative `.include` whose file is
     /// there needs no finding.
     pub out_dir: Option<PathBuf>,
+    /// Refuse decks with more elements than this rather than lay them out.
+    pub max_elements: Option<usize>,
 }
 
 /// Whether two netlists were found to describe the same circuit.
@@ -97,6 +99,10 @@ pub enum ImportError {
     Netlist(#[from] netlist::NetlistError),
     #[error("the schematic has nothing aispice can draw: {0}")]
     Layout(LayoutError),
+    #[error(
+        "the schematic has {0} elements; the layout handles up to {1}. Put repeated blocks in subcircuits."
+    )]
+    TooLarge(usize, usize),
 }
 
 /// A netlist made into a deck aispice may run, and what that took.
@@ -129,6 +135,10 @@ pub fn import(
     deck.title = format!("Imported from xschem: {name}");
     notes.extend(rename_for_ltspice(&mut deck));
     strip_default_cards(&mut deck);
+    let elements = deck.elements().count();
+    if let Some(max) = opts.max_elements.filter(|m| elements > *m) {
+        return Err(ImportError::TooLarge(elements, max));
+    }
 
     let laid =
         crate::layout::from_netlist(&deck, lib, &opts.layout).map_err(ImportError::Layout)?;

@@ -22,10 +22,15 @@ use aispice_sim::pdk::Pdk;
 use aispice_sim::xschem::Run;
 use aispice_tools::templates;
 use aispice_tools::xschem::{
-    Setup, XschemCheck, check_export, check_import, export_schematic, import_file,
+    Effort, Setup, XschemCheck, check_export, check_import, export_schematic, import_file,
 };
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
+
+const QUICK: Effort = Effort {
+    effort: 1,
+    max_elements: None,
+};
 
 fn gate() -> Option<(PathBuf, Setup)> {
     let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {
@@ -82,7 +87,8 @@ async fn every_test_bench_imports_and_xschem_agrees() {
     for sch in &all {
         let name = sch.file_stem().unwrap().to_string_lossy().to_string();
         let roots = vec![sch.parent().unwrap().to_path_buf()];
-        let imported = match import_file(&setup, sch, roots.clone(), Some(out.path()), &lib, 1) {
+        let imported = match import_file(&setup, sch, roots.clone(), Some(out.path()), &lib, QUICK)
+        {
             Ok(i) => i,
             Err(e) => {
                 problems.push(format!("{name}: {e}"));
@@ -147,7 +153,7 @@ async fn templates_and_benches_export_and_xschem_agrees() {
     for sch in benches(&pdk) {
         let name = sch.file_stem().unwrap().to_string_lossy().to_string();
         let roots = vec![sch.parent().unwrap().to_path_buf()];
-        match import_file(&setup, &sch, roots, Some(&dir), &builtin, 1) {
+        match import_file(&setup, &sch, roots, Some(&dir), &builtin, QUICK) {
             Ok(i) => circuits.push((format!("{name} (imported)"), i.schematic)),
             Err(e) => problems.push(format!("{name}: {e}")),
         }
@@ -161,7 +167,7 @@ async fn templates_and_benches_export_and_xschem_agrees() {
             &format!("* {name}"),
             &dir.join(&file),
             vec![dir.clone()],
-            1,
+            QUICK,
         ) {
             Ok(e) => e,
             Err(e) => {
