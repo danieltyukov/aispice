@@ -632,7 +632,11 @@ fn subckt_calls(sch: &Schematic, lib: &SymbolLibrary, conn: &Connectivity, out: 
             None => unreadable = true,
         }
     }
-    let builtin = |n: &str| BUILTIN_SUBCKTS.iter().any(|b| b.eq_ignore_ascii_case(n));
+    // A PDK device's model comes from the PDK the project names, which the
+    // runner includes; without one the run stops with that explanation.
+    let builtin = |n: &str| {
+        BUILTIN_SUBCKTS.iter().any(|b| b.eq_ignore_ascii_case(n)) || crate::pdk::device(n).is_some()
+    };
     for (inst, at, default, call, from_ltspice) in calls {
         let own = default
             .filter(|d| builtin(d))

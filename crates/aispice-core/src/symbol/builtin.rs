@@ -2,6 +2,10 @@
 //!
 //! Pin positions, pin order and attributes match the LTspice symbols of the same
 //! name so schematics are interchangeable. The drawings are original.
+//!
+//! The `sg13g2/` symbols draw IHP SG13G2 devices (see [`crate::pdk`]). LTspice
+//! has no such symbols; their pins follow the PDK's subcircuits and their
+//! default parameters IHP's own xschem symbols.
 
 /// Every built-in symbol, by the name used in `.asc` files.
 pub const NAMES: &[&str] = &[
@@ -40,6 +44,17 @@ pub const NAMES: &[&str] = &[
     "OpAmps/opamp",
     "OpAmps/opamp2",
     "Misc/signal",
+    "sg13g2/sg13_lv_nmos",
+    "sg13g2/sg13_lv_pmos",
+    "sg13g2/sg13_hv_nmos",
+    "sg13g2/sg13_hv_pmos",
+    "sg13g2/rsil",
+    "sg13g2/rppd",
+    "sg13g2/rhigh",
+    "sg13g2/cap_cmim",
+    "sg13g2/npn13G2",
+    "sg13g2/npn13G2l",
+    "sg13g2/npn13G2v",
 ];
 
 /// The `.asy` text for a lower-cased, `/`-separated name.
@@ -80,6 +95,17 @@ pub fn get(key: &str) -> Option<&'static str> {
         "opamps/opamp" => include_str!("../../symbols/OpAmps/opamp.asy"),
         "opamps/opamp2" => include_str!("../../symbols/OpAmps/opamp2.asy"),
         "misc/signal" => include_str!("../../symbols/Misc/signal.asy"),
+        "sg13g2/sg13_lv_nmos" => include_str!("../../symbols/sg13g2/sg13_lv_nmos.asy"),
+        "sg13g2/sg13_lv_pmos" => include_str!("../../symbols/sg13g2/sg13_lv_pmos.asy"),
+        "sg13g2/sg13_hv_nmos" => include_str!("../../symbols/sg13g2/sg13_hv_nmos.asy"),
+        "sg13g2/sg13_hv_pmos" => include_str!("../../symbols/sg13g2/sg13_hv_pmos.asy"),
+        "sg13g2/rsil" => include_str!("../../symbols/sg13g2/rsil.asy"),
+        "sg13g2/rppd" => include_str!("../../symbols/sg13g2/rppd.asy"),
+        "sg13g2/rhigh" => include_str!("../../symbols/sg13g2/rhigh.asy"),
+        "sg13g2/cap_cmim" => include_str!("../../symbols/sg13g2/cap_cmim.asy"),
+        "sg13g2/npn13g2" => include_str!("../../symbols/sg13g2/npn13G2.asy"),
+        "sg13g2/npn13g2l" => include_str!("../../symbols/sg13g2/npn13G2l.asy"),
+        "sg13g2/npn13g2v" => include_str!("../../symbols/sg13g2/npn13G2v.asy"),
         _ => return None,
     })
 }

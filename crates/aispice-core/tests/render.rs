@@ -112,7 +112,7 @@ fn rotated_windows_render_horizontal_text() {
 fn builtin_graphics_reach_every_pin() {
     let lib = SymbolLibrary::builtin_only();
     let hits = lib.search("", usize::MAX);
-    assert_eq!(hits.len(), 35, "built-in symbol count changed");
+    assert_eq!(hits.len(), 46, "built-in symbol count changed");
     for hit in hits {
         let (def, _) = lib.resolve(&hit.name).unwrap();
         assert!(!def.graphics.is_empty(), "{} has no drawing", hit.name);

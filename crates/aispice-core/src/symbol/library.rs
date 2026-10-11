@@ -171,8 +171,11 @@ impl SymbolLibrary {
                 return Some((Arc::new(parse_asy(&text)), dir.source));
             }
         }
+        // PDK device symbols also resolve without their folder, as
+        // `sg13_lv_nmos`, the name xschem and the PDK use.
         builtin::get(key)
             .or_else(|| builtin::get(base))
+            .or_else(|| builtin::get(&format!("sg13g2/{base}")))
             .map(|text| (Arc::new(parse_asy(text)), SymbolSource::Builtin))
     }
 
