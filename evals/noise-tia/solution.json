@@ -1,0 +1,6 @@
+[
+  {"tools": [{"name": "read_schematic", "input": {"circuit": "tia.asc"}}]},
+  {"tools": [{"name": "edit_schematic", "input": {"circuit": "tia.asc", "edits": [{"op": "set_value", "name": "R1", "value": "10k"}], "reason": "Noise budget at 1 kHz"}}]},
+  {"tools": [{"name": "simulate", "input": {"circuit": "tia.asc", "analysis": ".noise V(out) I1 dec 10 10 100k", "measurements": ["in = input_noise_at(1k)", "out = output_noise_at(1k)"]}}]},
+  {"answer": "R1 is now 10 kOhm. Its thermal noise current is sqrt(4kT/R) = 1.29 pA/√Hz and the output noise is sqrt(4kTR) = 12.9 nV/√Hz, which the noise analysis on ngspice confirms. 9.1k would be too noisy at the input and 11k too noisy at the output."}
+]

@@ -5,11 +5,14 @@
 use super::task::{Constraint, Task, collect_files};
 use crate::project::{Project, ProjectOptions, STATE_DIR};
 use crate::runner::{RunMods, RunnerConfig};
+use crate::tools::analysis;
 use crate::workspace::Workspace;
+use aispice_agent::ToolContext;
 use aispice_core::lint::{LintReport, Severity, lint};
 use aispice_core::schematic::{Schematic, normalize_symbol_name};
 use aispice_core::symbol::SymbolLibrary;
 use aispice_core::units;
+use aispice_sim::corner;
 use aispice_sim::optimize::snap;
 use aispice_sim::spec::{SpecReport, evaluate};
 use serde::{Deserialize, Serialize};
@@ -114,6 +117,89 @@ pub struct Verdict {
     pub lint_findings: Vec<String>,
 }
 
+/// Measure the task's specs on the judged circuit with the task's analysis:
+/// one run plus the derived AC runs its PSRR and CMRR specs need, or, when
+/// the task names corners, every corner and the worst case of each spec.
+async fn judge_specs(
+    ws: &Workspace,
+    p: &Project,
+    task: &Task,
+    simulator: &str,
+) -> Result<SpecReport, String> {
+    let mods = RunMods {
+        analysis: task.analysis.clone(),
+        extra: Vec::new(),
+    };
+    let (mut netlist, std_libs, _) = ws
+        .runner
+        .netlist_for(p, &task.circuit)
+        .map_err(|e| format!("simulation failed: {e}"))?;
+    crate::runner::apply_mods(&mut netlist, &mods);
+    let sources = analysis::derived_sources(&netlist, task.specs.iter().map(|s| &s.measure))?;
+    let ctx = ToolContext::default();
+    if let Some(set) = &task.corners {
+        let variants = {
+            let lookup = analysis::section_lookup(ws, p, &task.circuit);
+            corner::variants(&netlist, set, &lookup).map_err(|e| format!("corners: {e}"))?
+        };
+        let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
+        let results = analysis::run_variants(
+            ws,
+            &task.circuit,
+            variants,
+            &std_libs,
+            Some(simulator),
+            &sources,
+            &ctx,
+        )
+        .await;
+        let reports: Vec<Result<SpecReport, String>> = results
+            .into_iter()
+            .map(|(_, r)| r.map(|v| evaluate(&task.specs, &v.datasets)))
+            .collect();
+        let report = corner::summarize(&task.specs, &names[..reports.len()], &reports);
+        if let Some((c, why)) = report.failed.first() {
+            return Err(format!("simulation failed at corner {c}: {why}"));
+        }
+        return Ok(report.worst);
+    }
+    let run = ws
+        .runner
+        .run_circuit(
+            p,
+            &task.circuit,
+            Some(simulator),
+            &mods,
+            &CancellationToken::new(),
+        )
+        .await
+        .map_err(|e| format!("simulation failed: {e}"))?;
+    if run.output.datasets.is_empty() {
+        let why = run
+            .output
+            .errors
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "no results".into());
+        return Err(format!("simulation gave no results: {why}"));
+    }
+    let mut datasets = run.output.datasets.clone();
+    datasets.extend(
+        analysis::derived_datasets(
+            ws,
+            p,
+            &task.circuit,
+            &netlist,
+            &std_libs,
+            Some(simulator),
+            &sources,
+            &ctx,
+        )
+        .await?,
+    );
+    Ok(evaluate(&task.specs, &datasets))
+}
+
 /// Judge the project at `root` after a run. `before` is the state of the
 /// files when the run started. Specs are measured on `simulator` (ngspice
 /// for the suite), with the task's analysis when it names one.
@@ -158,39 +244,14 @@ pub async fn judge(
             });
             ws.set_project(project);
             let p = ws.project().expect("project was just set");
-            let mods = RunMods {
-                analysis: task.analysis.clone(),
-                extra: Vec::new(),
-            };
-            match ws
-                .runner
-                .run_circuit(
-                    &p,
-                    &task.circuit,
-                    Some(simulator),
-                    &mods,
-                    &CancellationToken::new(),
-                )
-                .await
-            {
-                Ok(run) if run.output.datasets.is_empty() => {
-                    let why = run
-                        .output
-                        .errors
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "no results".into());
-                    v.failures
-                        .push(format!("simulation gave no results: {why}"));
-                }
-                Ok(run) => {
-                    let report = evaluate(&task.specs, &run.output.datasets);
+            match judge_specs(&ws, &p, task, simulator).await {
+                Ok(report) => {
                     for row in report.rows.iter().filter(|r| !r.pass) {
                         v.failures.push(format!("spec {}", row.display));
                     }
                     v.specs = Some(report);
                 }
-                Err(e) => v.failures.push(format!("simulation failed: {e}")),
+                Err(e) => v.failures.push(e),
             }
         }
         let report = lint(sch, &lib);

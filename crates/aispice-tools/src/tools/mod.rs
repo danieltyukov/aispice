@@ -4,7 +4,7 @@
 //! structured payload the desktop app renders as a card. Shapes of `data` are
 //! the `ToolData` union in `app/src/ipc/types.ts`.
 
-mod analysis;
+pub(crate) mod analysis;
 mod gmid_tools;
 mod pdk_tools;
 mod render_tools;
