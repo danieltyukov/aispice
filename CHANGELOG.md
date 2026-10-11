@@ -22,6 +22,8 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 
 - A PDK folder is checked again, symlinks resolved, every time it is used, and a filesystem root, the home folder or a folder above it cannot be registered. A registered folder replaced by a link afterwards is no longer trusted.
 - The netlist policy trusts registered PDK folders as include roots, still checking their files with every rule except the path heuristic their expressions trip (`w/ng`). Includes of compiled libraries (`.osdi`, `.so`, `.dll`, `.dylib`, `.cm`) and `osdi` lines are refused; `pre_osdi`, `codemodel` and `.control` stay refused. Compiled models load only from inside a registered PDK, after a check that rejects paths through symlinks or with quotes, commas or `$`.
+- The netlist policy read some include lines differently from the simulators, which could make ngspice or Xyce open a file outside the project that the policy never checked: a `;`, `$` or `//` comment glued to a file name, single quotes or braces around it, an indented include, a `.include` on the title line (ngspice reads it), and `+` continuation lines that Xyce joins across comment, indented and `;` lines. The policy now checks a deck as ngspice and as Xyce join its lines, accepts include lines in one form only (the keyword, the file bare or in double quotes, for `.lib` at most a section name, nothing after it, on one line, no space in a `.lib` path) and refuses lone carriage returns, Unicode line separators and ngspice's `\\` line joining. The deck's own include lines are rewritten to name the checked file by its full path. A test runs every spelling through ngspice and Xyce against a decoy file outside the project.
+- Corner, mismatch and section-inlining code read library files only after the policy approved that exact path (regular files, 16 MiB each, 32 files and 64 MiB per call), with the policy's own parser, and list section names only for libraries in the project. Model resolution no longer reads a file an include names before the policy has approved it.
 
 ### Fixed
 
@@ -30,6 +32,7 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - ngspice could not read library sections (`.lib <file> <section>`) in the LTspice mode aispice runs it in; aispice now inlines the section for ngspice and LTspice.
 - AC measurements could read a noise analysis, which also has a frequency axis.
 - The netlist policy read a `+` continuation after a CRLF line end as a separate line instead of part of the include before it.
+- A Monte Carlo analysis whose every run failed reported a yield over no runs; it now reports the first failure as an error. Runs or optimizer candidates times corners over the limit are refused with the largest number that fits, rather than cut silently.
 
 ## [0.2.0]
 

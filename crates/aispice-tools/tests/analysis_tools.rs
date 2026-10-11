@@ -470,5 +470,35 @@ async fn oversized_corner_requests_fail_fast() {
         "{}",
         out.text_content()
     );
+    // Runs or candidates times corners over the limit, asked for outright.
+    let out = call(
+        &ws,
+        "monte_carlo",
+        json!({"circuit": "rc.cir", "tolerances": [{"target": "R1", "tol_pct": 1}],
+               "specs": "bw = bandwidth_3db(V(out)) >= 1k", "runs": 300,
+               "corners": {"temperatures": [27, 85]}}),
+    )
+    .await;
+    assert!(out.is_error);
+    assert!(
+        out.text_content().contains("at most 250 runs"),
+        "{}",
+        out.text_content()
+    );
+    let out = call(
+        &ws,
+        "optimize",
+        json!({"circuit": "rc.cir", "save_specs": false,
+               "params": [{"name": "C1", "min": "10n", "max": "1u"}],
+               "specs": "bw = bandwidth_3db(V(out)) >= 1k", "max_evals": 300,
+               "corners": {"temperatures": [-40, 0, 27, 85, 125, 150, 175, 200, 225, 250]}}),
+    )
+    .await;
+    assert!(out.is_error);
+    assert!(
+        out.text_content().contains("at most 200 (max_evals)"),
+        "{}",
+        out.text_content()
+    );
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

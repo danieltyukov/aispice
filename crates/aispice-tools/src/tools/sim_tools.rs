@@ -1055,7 +1055,7 @@ pub struct MonteCarloInput {
     /// report the yield per corner as well.
     #[serde(default)]
     pub corners: Option<CornerSet>,
-    /// Number of runs (default 50, at most 500 in all).
+    /// Number of runs (default 50). Runs times corners may be at most 500.
     #[serde(default)]
     pub runs: Option<usize>,
     #[serde(default)]
@@ -1118,6 +1118,21 @@ impl Tool for MonteCarlo {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(e),
         };
+        // The size of the request, from the list lengths alone, before any
+        // netlist is built.
+        let corner_count = match input.corners.as_ref().map(CornerSet::count) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => return ToolOutput::error(format!("corners: {e}")),
+            None => 1,
+        };
+        let mut notes: Vec<String> = Vec::new();
+        let n = match mc_runs(input.runs, corner_count) {
+            Ok((n, note)) => {
+                notes.extend(note);
+                n
+            }
+            Err(e) => return ToolOutput::error(e),
+        };
         let netlist =
             analysis::as_simulator_reads_it(&self.ws, &p, netlist, simulator.as_deref()).await;
         let bases = match &input.corners {
@@ -1127,14 +1142,6 @@ impl Tool for MonteCarlo {
             },
             None => vec![(String::new(), netlist.clone())],
         };
-        let mut notes: Vec<String> = Vec::new();
-        let mut n = input.runs.unwrap_or(50).clamp(1, MAX_MC_RUNS);
-        if n * bases.len() > MAX_MC_RUNS {
-            n = (MAX_MC_RUNS / bases.len()).max(1);
-            notes.push(format!(
-                "{n} runs per corner, to stay within {MAX_MC_RUNS} simulations"
-            ));
-        }
         let seed = input.seed.unwrap_or(1);
         let mut labelled: Vec<(String, Netlist)> = Vec::with_capacity(n * bases.len());
         {
@@ -1262,7 +1269,8 @@ pub struct OptimizeInput {
     pub goal: Option<Goal>,
     #[serde(default)]
     pub method: Method,
-    /// Simulation budget (default 80, at most 400).
+    /// Simulation budget in candidates (default 80, at most 400).
+    /// Candidates times corners may be at most 2000.
     #[serde(default)]
     pub max_evals: Option<usize>,
     /// Write the best (snapped) values into the schematic as an undoable edit.
@@ -1282,6 +1290,60 @@ pub struct OptimizeInput {
 
 /// Simulations one optimization may run, candidates times corners.
 const MAX_OPT_SIMS: usize = 2000;
+
+/// Runs per corner for a Monte Carlo analysis: the runs asked for, refused
+/// when runs times corners is over [`MAX_MC_RUNS`]; without a number, 50 or
+/// as many as fit, with a note.
+fn mc_runs(asked: Option<usize>, corners: usize) -> Result<(usize, Option<String>), String> {
+    let corners = corners.max(1);
+    match asked {
+        Some(runs) if runs.saturating_mul(corners) > MAX_MC_RUNS => Err(format!(
+            "{runs} runs{} is more than the limit of {MAX_MC_RUNS} simulations; ask for at most {} runs",
+            if corners > 1 {
+                format!(" at each of {corners} corners")
+            } else {
+                String::new()
+            },
+            MAX_MC_RUNS / corners
+        )),
+        Some(runs) => Ok((runs.max(1), None)),
+        None if 50 * corners > MAX_MC_RUNS => {
+            let n = (MAX_MC_RUNS / corners).max(1);
+            Ok((
+                n,
+                Some(format!(
+                    "{n} runs per corner, to stay within {MAX_MC_RUNS} simulations"
+                )),
+            ))
+        }
+        None => Ok((50, None)),
+    }
+}
+
+/// Candidates for an optimization: the budget asked for (4 to 400), refused
+/// when candidates times corners is over [`MAX_OPT_SIMS`]; without a
+/// number, 80 or as many as fit, with a note.
+fn opt_candidates(asked: Option<usize>, corners: usize) -> Result<(usize, Option<String>), String> {
+    let corners = corners.max(1);
+    match asked {
+        Some(evals) if evals.clamp(4, 400).saturating_mul(corners) > MAX_OPT_SIMS => Err(format!(
+            "{} candidates at each of {corners} corners is more than the limit of {MAX_OPT_SIMS} simulations; ask for at most {} (max_evals)",
+            evals.clamp(4, 400),
+            (MAX_OPT_SIMS / corners).max(4)
+        )),
+        Some(evals) => Ok((evals.clamp(4, 400), None)),
+        None if 80 * corners > MAX_OPT_SIMS => {
+            let n = (MAX_OPT_SIMS / corners).max(4);
+            Ok((
+                n,
+                Some(format!(
+                    "budget cut to {n} candidates, {corners} corners each, to stay within {MAX_OPT_SIMS} simulations"
+                )),
+            ))
+        }
+        None => Ok((80, None)),
+    }
+}
 
 pub struct Optimize {
     pub ws: Arc<Workspace>,
@@ -1335,6 +1397,17 @@ impl Tool for Optimize {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(e),
         };
+        // The size of the request, from the list lengths alone, before any
+        // netlist is built.
+        let corner_count = match input.corners.as_ref().map(CornerSet::count) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => return ToolOutput::error(format!("corners: {e}")),
+            None => 1,
+        };
+        let (max_evals, budget_note) = match opt_candidates(input.max_evals, corner_count) {
+            Ok(v) => v,
+            Err(e) => return ToolOutput::error(e),
+        };
         // The corners, checked against the circuit's libraries once here;
         // candidates differ only in part values.
         let netlist = if input.corners.is_some() {
@@ -1352,14 +1425,6 @@ impl Tool for Optimize {
             None => Vec::new(),
         };
         let per_candidate = corners.len().max(1);
-        let mut max_evals = input.max_evals.unwrap_or(80).clamp(4, 400);
-        let mut budget_note = None;
-        if max_evals * per_candidate > MAX_OPT_SIMS {
-            max_evals = (MAX_OPT_SIMS / per_candidate).max(4);
-            budget_note = Some(format!(
-                "budget cut to {max_evals} candidates, {per_candidate} corners each, to stay within {MAX_OPT_SIMS} simulations"
-            ));
-        }
         let options = RunOptions {
             max_evals,
             ..Default::default()
@@ -2155,6 +2220,31 @@ impl Tool for OperatingPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Oversized requests fail before anything is built; defaults shrink to
+    /// fit, and say so.
+    #[test]
+    fn run_budgets_are_checked_from_the_counts() {
+        assert_eq!(mc_runs(None, 1).unwrap(), (50, None));
+        assert_eq!(mc_runs(Some(500), 1).unwrap(), (500, None));
+        assert_eq!(mc_runs(Some(0), 1).unwrap(), (1, None));
+        let (n, note) = mc_runs(None, 20).unwrap();
+        assert_eq!(n, 25);
+        assert!(note.unwrap().contains("25 runs per corner"));
+        let err = mc_runs(Some(30), 20).unwrap_err();
+        assert!(err.contains("at most 25 runs"), "{err}");
+        assert!(mc_runs(Some(usize::MAX), 200).is_err());
+        assert!(mc_runs(Some(501), 1).is_err());
+
+        assert_eq!(opt_candidates(None, 1).unwrap(), (80, None));
+        assert_eq!(opt_candidates(Some(1000), 1).unwrap(), (400, None));
+        let (n, note) = opt_candidates(None, 50).unwrap();
+        assert_eq!(n, 40);
+        assert!(note.unwrap().contains("40 candidates"));
+        let err = opt_candidates(Some(100), 50).unwrap_err();
+        assert!(err.contains("at most 40"), "{err}");
+        assert_eq!(opt_candidates(None, 200).unwrap().0, 10);
+    }
 
     /// The measure and check_specs descriptions must say what bandwidth_3db
     /// is measured from and how freq_at_db differs, and name every kind.

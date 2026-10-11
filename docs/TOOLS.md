@@ -1150,7 +1150,7 @@ Monte Carlo analysis: vary component values within their tolerances, device para
       ]
     },
     "runs": {
-      "description": "Number of runs (default 50, at most 500 in all).",
+      "description": "Number of runs (default 50). Runs times corners may be at most 500.",
       "minimum": 0,
       "type": "integer"
     },
@@ -1312,7 +1312,7 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
       "type": "object"
     },
     "max_evals": {
-      "description": "Simulation budget (default 80, at most 400).",
+      "description": "Simulation budget in candidates (default 80, at most 400).\nCandidates times corners may be at most 2000.",
       "minimum": 0,
       "type": "integer"
     },

@@ -65,9 +65,15 @@ fn fixture() -> Fixture {
     symlink(outside.join("decoy.lib"), proj.join("link.lib")).unwrap();
     symlink(&outside, proj.join("linkdir")).unwrap();
     symlink(outside.join("decoy.lib"), proj.join("my")).unwrap();
-    let strace = which("strace");
+    // Only a strace that can trace here (ptrace may be locked down).
+    let strace = which("strace").filter(|s| {
+        Command::new(s)
+            .args(["-f", "-qq", "-o", "/dev/null", "true"])
+            .status()
+            .is_ok_and(|st| st.success())
+    });
     if strace.is_none() {
-        eprintln!("note: strace is not installed; checking printed values and logs only");
+        eprintln!("note: no working strace; checking printed values and logs only");
     }
     Fixture {
         _dir: dir,
@@ -268,7 +274,7 @@ fn cases(fx: &Fixture) -> Vec<(&'static str, String, Expect, Expect)> {
         ),
         (
             "double backslash join",
-            "R9 x 0 1 \\\\\n+ link.lib sec",
+            "R9 x 0 1 \\\\\nlink.lib sec",
             Refused,
             Refused,
         ),

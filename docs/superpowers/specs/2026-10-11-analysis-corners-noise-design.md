@@ -23,13 +23,31 @@ These were checked on this machine (ngspice, Xyce, LTspice under Wine) and on a 
 
 ## Reading library files safely
 
-Corners, mismatch and section inlining read files a netlist names, so they sit on the security boundary. They share the netlist policy's own reading of include lines (`netlist::logical_lines`, `netlist::parse_include`: quoting, keyword case, `+` continuations) and its resolver (`netlist::resolve_include`: the base folder, `..`, symbolic links, allowed folders). `aispice_sim::library::LibraryFiles` opens a file only after the policy has approved that exact resolved path, reads only regular files of at most 16 MiB, at most 32 files and 64 MiB in one call, and each file once. A `.lib` line whose file the policy refuses stops the corner or the Monte Carlo with the policy's reason. Section names are listed in a message only for libraries inside the project. Every rewritten netlist still goes through `Runner::run_netlist_with`, which checks the policy on the final deck before and after inlining. Writing this part turned up one differential in the policy itself: with CRLF line ends a `+` continuation joined an empty line instead of the include before it; `logical_lines` now treats CRLF as one break and drops blank lines after the title.
+Corners, mismatch and section inlining read files a netlist names, so they sit on the security boundary. They share the netlist policy's own reading of include lines (`netlist::logical_lines`, `netlist::parse_include`) and its resolver (`netlist::resolve_include`: the base folder, `..`, symbolic links, allowed folders). `aispice_sim::library::LibraryFiles` opens a file only after the policy has approved that exact resolved path, reads only regular files of at most 16 MiB, at most 32 files and 64 MiB in one call, each file once, and answers each library's sections once. A `.lib` line whose file the policy refuses stops the corner or the Monte Carlo with the policy's reason. Section names are listed in a message only for libraries inside the project. Every rewritten netlist goes through `Runner::run_netlist_with`, which checks the policy on the netlist's include lines before model resolution reads any file, and on the final deck before and after inlining.
+
+**The policy reads as the simulators do.** A check is only as good as its reading of the text, and the policy and the simulators disagreed. Read against ngspice 42's `inpcom.c` and Xyce 7.10's `N_IO_SpiceSeparatedFieldTool.C`, and confirmed with a decoy file outside the project:
+
+| Spelling | ngspice | Xyce |
+|---|---|---|
+| `.include link.lib;x`, `.include a.lib $x` | strips `;` comments, and `$` after a blank (not in `ps` mode) | strips `;` comments |
+| `.include dir/link//x` | strips from `//` | reads the whole name |
+| `.include 'a.lib'`, `{a.lib}` | single quotes quote | single quotes and braces make an expression, stripped from a file name |
+| `.include a(b).lib`, `a,b`, `a=b` | one name | splits the name there |
+| `.lib "my lib.lib" sec` (native mode) | reads `my` as the file | reads the quoted name |
+| `  .include a.lib` (indented) | reads it | a comment |
+| `+` after a `*`, `$`, `#`, `;` or indented line | joins the last line not starting with `*`, `$`, `#` | joins the last line not starting with `*`, `;` or a blank |
+| `.include` on the first line | includes it | the title |
+| lone CR, `\\` at a line end | drops the CR; joins the next line | ends the line; nothing |
+
+So the policy checks a text under both joining rules, accepts an include line in one form only (the keyword, the file bare or in double quotes, for `.lib` at most a section name; nothing after it, on one physical line, no `"`, `'`, `;`, `$`, `` ` ``, brackets, braces, `,`, `=`, `%` or `//` in the name, no space in a `.lib` name, no `\` outside Windows), refuses lone carriage returns, the Unicode line separators, a `+` line with nothing to continue and a line ending in `\\`, and checks a title that starts with a dot. `netlist::canonical_includes` then rewrites the deck's own include lines to name the resolved file in that form, so the simulator opens exactly what was checked; library files are not rewritten, which is why the grammar is strict for them too. `tests/include_differential.rs` runs about fifty spellings, in an included file and as a deck line through the runner, on ngspice in native and LTspice mode and on Xyce: each is refused, or the simulators never open the decoy (by the value they print, their log and, where installed, `strace`). It also shows the refused spellings that do reach the decoy when run unchecked.
+
+A registered PDK's files get every rule but the path heuristic on parameter expressions (`w/ng` is division), and only files whose resolved path lies under a registered root.
+
+**ngspice and library sections.** In its LTspice and PSpice modes (`lt`, `ltps`, `ltpsa`, `ps`) ngspice treats a one-argument `.lib name` as an include, including the section headers inside a library file, so `.lib corner.lib res_typ` fails with "Could not find include file res_typ". aispice runs ngspice in `ltpsa` mode, which its LTspice-flavoured netlists need. So for ngspice (and LTspice) aispice expands each two-argument `.lib <file> <section>` itself before the run (`library::expand_lib_sections`): the line is replaced by that section's lines, with relative `.include` and `.lib` paths inside it resolved against the library's folder as the policy resolves them and written in full, recursively up to the policy's include depth. The expanded deck goes through the netlist policy again. Xyce and Spectre read sections natively and get the line as written. A PDK deck runs ngspice in its native mode, where sections work, so it is not inlined.
 
 ## Limits
 
-Nothing is built before its size is known. A corner set lists at most 64 process corners, 64 temperatures and 8 supplies of at most 64 values each; longer lists are refused while they are read. `CornerSet::count` gives the number of corners from the list lengths alone and refuses more than 200. Monte Carlo runs times corners are capped at 500 and optimizer candidates times corners at 2000, both from the count, before any netlist is made.
-
-**ngspice and library sections.** In its LTspice and PSpice modes (`lt`, `ltps`, `ltpsa`, `ps`) ngspice treats a one-argument `.lib name` as an include, including the section headers inside a library file, so `.lib corner.lib res_typ` fails with "Could not find include file res_typ". aispice runs ngspice in `ltpsa` mode, which its LTspice-flavoured netlists need. So for ngspice (and LTspice) aispice expands each two-argument `.lib <file> <section>` itself before the run (`library::expand_lib_sections`): the line is replaced by that section's lines, with relative `.include` and `.lib` paths inside it resolved against the library's folder as the policy resolves them and written in full, recursively up to the policy's include depth. The expanded deck goes through the netlist policy again, as the deck already does after includes are made absolute. Xyce and Spectre read sections natively and get the line as written. The PDK branch runs PDK decks on ngspice in its native mode, where sections work anyway; the inlining is harmless there.
+Nothing is built before its size is known. A corner set lists at most 64 process corners, 64 temperatures and 8 supplies of at most 64 values each; longer lists are refused while they are read. `CornerSet::count` gives the number of corners from the list lengths alone and refuses more than 200. Monte Carlo runs times corners are capped at 500 and optimizer candidates times corners at 2000, both from the count, before any netlist is made: a request over the limit is refused with the largest number that fits, and the defaults (50 runs, 80 candidates) shrink to fit with a note.
 
 ## Noise
 
@@ -104,7 +122,8 @@ With `corners`, every corner runs the same `runs` samples (the same seeds, so co
 
 - `aispice_sim::corner::{CornerSet, Supply, Corner, Process, CornerError, CornerReport, CornerRow, apply, variants, set_temperature, summarize, worst_case, preset, parse_section, LibSection, SectionKind, SectionUse, section_uses, set_section, SectionLookup, no_lookup, Found, find_section, FAMILIES, MAX_CORNERS, MAX_LIST, MAX_SUPPLIES}` and `CornerSet::count`.
 - `aispice_sim::library::{LibraryFiles, LibraryInfo, read_library, lib_sections, expand_lib_sections, MAX_LIBRARY_BYTES, MAX_LIBRARY_FILES, MAX_TOTAL_BYTES}`.
-- `aispice_core::netlist::{logical_lines, parse_include, Include, resolve_include}`: the policy's own line reader and resolver, for anything else that reads include lines.
+- `aispice_core::netlist::{logical_lines, parse_include, Include, resolve_include, canonical_includes}`: the policy's own line reader (`logical_lines(text, has_title)`), include parser (`parse_include` gives `None` for another line and the reason for an include in any other form), resolver, and the rewrite of a deck's include lines into the checked form, for anything else that reads include lines.
+- `aispice_tools::runner::RunnerConfig::ngspice_exe`.
 - `aispice_sim::montecarlo::{Mismatch, variants_with, sim_seed, statistical}`, and `Variant::seed`.
 - `aispice_sim::noise::{ONOISE, INOISE, integrate_rms, read_xyce_noise_dat, merge_xyce_noise, input_source, mark_input_quantity}`.
 - `aispice_sim::stimulus::{ac_on, needed_sources, mark, marked_source, StimulusError}` and `Measure::stimulus_source`.
@@ -117,5 +136,5 @@ With `corners`, every corner runs the same `runs` samples (the same seeds, so co
 
 - Noise figure and SNR measurements, `.noise` with a stepped sweep.
 - Corner sets stored beside a circuit (a `.corners` file) and corners for `sweep`.
-- Mismatch Monte Carlo on Spectre (it needs Spectre's own `montecarlo` analysis) and on LTspice.
+- Mismatch Monte Carlo on Spectre (it needs Spectre's own `montecarlo` analysis) and on LTspice. On Xyce with IHP SG13G2: its Xyce corner libraries have no `_mismatch` sections, and their `_stat` sections leave `mc_ok` and the `*_vfbo_mm` multipliers undefined, so only ngspice runs IHP mismatch.
 - Expanding `.lib` sections inside included files for ngspice: only the deck's own lines and what they pull in are expanded.
