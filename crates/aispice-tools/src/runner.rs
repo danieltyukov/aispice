@@ -447,7 +447,7 @@ impl Runner {
         allowed.extend(lib_dirs.iter().cloned());
         // Every registered PDK folder may be included from, so a hand-written
         // deck can name a PDK's libraries itself.
-        let trusted = self.config().pdks.roots();
+        let trusted = self.config().pdks.trusted_roots();
         let policy = Policy {
             base_dir: base.clone(),
             allowed_dirs: allowed,
@@ -1007,7 +1007,7 @@ mod tests {
             }
             let policy = Policy {
                 base_dir: project.root().to_path_buf(),
-                trusted_dirs: runner.config().pdks.roots(),
+                trusted_dirs: runner.config().pdks.trusted_roots(),
                 ..Default::default()
             };
             assert_eq!(netlist::check_policy(&deck, &policy), vec![], "{deck}");
@@ -1090,6 +1090,43 @@ mod tests {
         assert!(
             err.contains("none are registered") && err.contains("pdks.toml is not valid"),
             "{err}"
+        );
+    }
+
+    /// A PDK file that is a link to something outside the PDK is refused
+    /// when it would be used: a compiled model before the run starts, a
+    /// model library by the netlist policy.
+    #[cfg(unix)]
+    #[test]
+    fn pdk_files_linked_from_outside_are_refused() {
+        let (dir, runner, project, pdk) = pdk_setup(Some("pdk = \"ihp\"\n"));
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let osdi = pdk.root.join("libs.tech/ngspice/osdi/psp103.osdi");
+        std::fs::write(outside.join("evil.osdi"), b"").unwrap();
+        std::fs::remove_file(&osdi).unwrap();
+        std::os::unix::fs::symlink(outside.join("evil.osdi"), &osdi).unwrap();
+        let linked = Pdk::open("ihp", &pdk.root).unwrap();
+        let err = pdk_run(&linked, SimId::Ngspice).unwrap_err().to_string();
+        assert!(err.contains("not inside a registered PDK folder"), "{err}");
+
+        let corner = pdk.root.join("libs.tech/ngspice/models/cornerMOSlv.lib");
+        std::fs::copy(&corner, outside.join("cornerMOSlv.lib")).unwrap();
+        std::fs::remove_file(&corner).unwrap();
+        std::os::unix::fs::symlink(outside.join("cornerMOSlv.lib"), &corner).unwrap();
+        let (n, _, _) = runner.netlist_for(&project, "inv.cir").unwrap();
+        let mut notes = Vec::new();
+        let (deck, _) = runner.deck_for(SimId::Ngspice, &n, &[], &[], &mut notes, Some(&pdk));
+        let policy = Policy {
+            base_dir: project.root().to_path_buf(),
+            trusted_dirs: runner.config().pdks.trusted_roots(),
+            ..Default::default()
+        };
+        let v = netlist::check_policy(&deck, &policy);
+        assert!(
+            v.iter().any(|v| v.reason.contains("outside the project")),
+            "{v:?}"
         );
     }
 

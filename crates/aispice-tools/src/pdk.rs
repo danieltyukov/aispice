@@ -164,9 +164,15 @@ impl Registry {
         Ok(Pdk::open(name, &entry.path)?)
     }
 
-    /// Every registered folder: the roots the netlist policy trusts.
-    pub fn roots(&self) -> Vec<PathBuf> {
-        self.pdks.values().map(|e| e.path.clone()).collect()
+    /// The roots the netlist policy trusts: every registered folder that
+    /// still checks out as a PDK, checked now and with symlinks resolved, so
+    /// an entry whose folder was moved, replaced by a link or emptied since
+    /// it was registered trusts nothing.
+    pub fn trusted_roots(&self) -> Vec<PathBuf> {
+        self.pdks
+            .iter()
+            .filter_map(|(name, e)| Pdk::open(name, &e.path).ok().map(|p| p.root))
+            .collect()
     }
 }
 
@@ -256,7 +262,7 @@ mod tests {
         let back = Registry::load_from(&file).unwrap();
         assert_eq!(back, reg);
         assert_eq!(back.open("ihp-sg13g2").unwrap().root, pdk.root);
-        assert_eq!(back.roots(), vec![pdk.root.clone()]);
+        assert_eq!(back.trusted_roots(), vec![pdk.root.clone()]);
         let err = back.open("sky130").unwrap_err().to_string();
         assert!(err.contains("registered: ihp-sg13g2"), "{err}");
         let mut back = back;
@@ -268,6 +274,38 @@ mod tests {
                 .to_string()
                 .contains("none are registered")
         );
+    }
+
+    #[test]
+    fn broad_roots_are_refused_at_registration() {
+        let mut reg = Registry::default();
+        let err = reg.add("root", Path::new("/")).unwrap_err();
+        assert!(err.to_string().contains("too broad"), "{err}");
+        if let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_dir())
+        {
+            let err = reg.add("home", &home).unwrap_err();
+            assert!(err.to_string().contains("too broad"), "{err}");
+        }
+        assert!(reg.pdks.is_empty());
+    }
+
+    /// A registered folder replaced afterwards (here by a link to a folder
+    /// without the PDK layout) is no longer trusted.
+    #[cfg(unix)]
+    #[test]
+    fn roots_are_checked_again_when_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = aispice_sim::pdk::fake_ihp(dir.path());
+        let mut reg = Registry::default();
+        reg.add("ihp", &root).unwrap();
+        assert_eq!(reg.trusted_roots().len(), 1);
+        let moved = dir.path().join("moved");
+        std::fs::rename(&root, &moved).unwrap();
+        std::os::unix::fs::symlink(dir.path(), &root).unwrap();
+        assert!(reg.trusted_roots().is_empty());
+        assert!(reg.open("ihp").is_err());
     }
 
     #[test]

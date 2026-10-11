@@ -53,6 +53,11 @@ pub enum PdkError {
         .path.display()
     )]
     NoOsdi { path: PathBuf },
+    #[error(
+        "{} is too broad to register as a PDK: it is a filesystem root, the home folder or a folder above it. Point at the PDK's own folder (`.../IHP-Open-PDK/ihp-sg13g2`)",
+        .0.display()
+    )]
+    TooBroad(PathBuf),
 }
 
 /// An installed PDK, checked.
@@ -79,11 +84,19 @@ pub struct Pdk {
 impl Pdk {
     /// Check a folder and describe the PDK in it. A path to the
     /// IHP-Open-PDK checkout itself is narrowed to its `ihp-sg13g2` folder.
+    /// The root is the folder with symlinks resolved; a filesystem root, the
+    /// home folder or any folder above it is refused, since every file
+    /// under a registered root is trusted as PDK model text. Runs again on
+    /// every use, since the folder can change after it was registered.
     pub fn open(name: &str, path: &Path) -> Result<Self, PdkError> {
-        let mut root =
-            std::fs::canonicalize(path).map_err(|_| PdkError::NotFound(path.to_path_buf()))?;
+        let canonical =
+            |p: &Path| std::fs::canonicalize(p).map_err(|_| PdkError::NotFound(p.to_path_buf()));
+        let mut root = canonical(path)?;
         if !root.join("libs.tech").is_dir() && root.join("ihp-sg13g2/libs.tech").is_dir() {
-            root = root.join("ihp-sg13g2");
+            root = canonical(&root.join("ihp-sg13g2"))?;
+        }
+        if too_broad(&root) {
+            return Err(PdkError::TooBroad(root));
         }
         let kit = &aispice_core::pdk::IHP_SG13G2;
         let missing: Vec<String> = kit
@@ -287,6 +300,17 @@ impl Pdk {
             })
             .collect()
     }
+}
+
+/// Whether a folder is too broad to trust as a PDK: a filesystem root, or
+/// the home folder or one of its ancestors.
+fn too_broad(root: &Path) -> bool {
+    if root.parent().is_none() {
+        return true;
+    }
+    dirs::home_dir()
+        .and_then(|h| std::fs::canonicalize(h).ok())
+        .is_some_and(|home| home.starts_with(root))
 }
 
 /// A header line: `.lib <path> <section>`, the path quoted when it has
@@ -523,6 +547,35 @@ mod tests {
         std::fs::remove_file(root.join(NGSPICE_OSDI).join("psp103.osdi")).unwrap();
         let err = Pdk::open("x", &root).unwrap_err();
         assert!(err.to_string().contains("openvaf-compile-va.sh"), "{err}");
+    }
+
+    #[test]
+    fn broad_folders_are_refused_even_with_a_pdk_layout() {
+        assert!(matches!(
+            Pdk::open("x", Path::new("/")),
+            Err(PdkError::TooBroad(_))
+        ));
+        if let Some(home) = dirs::home_dir().filter(|h| h.is_dir()) {
+            assert!(matches!(Pdk::open("x", &home), Err(PdkError::TooBroad(_))));
+            if let Some(above) = home.parent() {
+                assert!(matches!(Pdk::open("x", above), Err(PdkError::TooBroad(_))));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_pdk_folder_resolves_to_its_target() {
+        let (dir, pdk) = fake();
+        let link = dir.path().join("link-to-pdk");
+        std::os::unix::fs::symlink(&pdk.root, &link).unwrap();
+        assert_eq!(Pdk::open("x", &link).unwrap().root, pdk.root);
+        // A checkout whose ihp-sg13g2 folder is a link is narrowed to the
+        // link's target, not to a path through the link.
+        let checkout = dir.path().join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::os::unix::fs::symlink(&pdk.root, checkout.join("ihp-sg13g2")).unwrap();
+        assert_eq!(Pdk::open("x", &checkout).unwrap().root, pdk.root);
     }
 
     #[test]
