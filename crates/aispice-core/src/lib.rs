@@ -17,6 +17,7 @@ pub mod schematic;
 pub mod summary;
 pub mod symbol;
 pub mod units;
+pub mod xschem;
 
 pub use geometry::{Orient, Point};
 pub use schematic::Schematic;
