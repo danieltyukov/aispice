@@ -11,14 +11,14 @@
 //! - a schematic, or a symbol outside the trusted folders (xschem's own
 //!   library and the registered PDK), has `tcleval(` and a `[` (Tcl command
 //!   substitution) in the same property string or text;
-//! - an instance of a symbol whose properties use `tcleval` has a `[` or `]`
-//!   in its own properties, which xschem would substitute into that Tcl. The
-//!   one exception is the `value` of xschem's own `simulator_commands`
-//!   symbols, which their Tcl wraps in `return {...}`: brackets there are
-//!   text, as long as the value has no brace or backslash that could close
-//!   the group (IHP's test benches put ngspice's `vec[0]` there);
-//! - a symbol reference has `[`, `$`, `;` or a backslash, is not a `.sym` or
-//!   `.sch` file, or leads outside the folders aispice may read;
+//! - a value xschem would paste into Tcl could change that Tcl: the
+//!   properties of an instance of a symbol that uses `tcleval`, label names
+//!   (net names reach other instances' Tcl) and the properties of subcircuit
+//!   instances (they reach the subcircuit's Tcl as parameters) must not hold
+//!   brackets, braces, quotes, `;`, backslashes or line breaks (see
+//!   [`substituted_values`] for the two cases that allow more);
+//! - a symbol reference has any of those or `$`, is not a `.sym` or `.sch`
+//!   file, or leads outside the folders aispice may read;
 //! - a file cannot be read, or the hierarchy is deeper or wider than
 //!   aispice's netlister follows.
 //!
@@ -98,11 +98,7 @@ pub fn scan(top: &Path, resolver: &Resolver, trusted: &[PathBuf]) -> Verdict {
         let dir = canon.parent().map(Path::to_path_buf).unwrap_or_default();
         for inst in &f.instances {
             let name = props::get(&inst.props, "name").unwrap_or_else(|| inst.symbol.clone());
-            if inst
-                .symbol
-                .chars()
-                .any(|c| matches!(c, '[' | ']' | '$' | ';' | '\\'))
-            {
+            if !inert(&inst.symbol) || inst.symbol.contains('$') {
                 v.refused.push(format!(
                     "{shown}: instance {name} refers to symbol `{}`, which xschem would evaluate as Tcl",
                     inst.symbol
@@ -151,16 +147,9 @@ pub fn scan(top: &Path, resolver: &Resolver, trusted: &[PathBuf]) -> Verdict {
                 }
                 Origin::Embedded => {}
             }
-            let symbol_tcl =
-                has_tcleval(&sym.props) || sym.file.shapes.iter().any(|s| has_tcleval(&s.props));
-            if symbol_tcl
-                && inst.props.contains(['[', ']'])
-                && !braced_value_only(&sym, &inst.props, &is_trusted)
-            {
-                v.refused.push(format!(
-                    "{shown}: instance {name} has `[` or `]` in its properties, which xschem would substitute into the Tcl of symbol {}",
-                    sym.reference
-                ));
+            if let Some(problem) = substituted_values(&sym, &inst.props, &is_trusted) {
+                v.refused
+                    .push(format!("{shown}: instance {name}: {problem}"));
             }
             if sym.kind() == "subcircuit" && !props::is_true(&sym.props, "spice_primitive") {
                 let sch = match sym.attr("schematic").filter(|s| !s.is_empty()) {
@@ -189,33 +178,86 @@ fn has_tcleval(s: &str) -> bool {
     s.contains("tcleval(")
 }
 
-/// Whether the brackets in an instance's properties are only in a `value`
-/// that a trusted `simulator_commands` symbol's Tcl puts inside braces.
-fn braced_value_only(
+/// Text that cannot change the shape of a Tcl script it is pasted into: no
+/// command substitution, no braces or quotes to close a word early, no
+/// command separator, no backslash. `$` only reads a variable, and xschem
+/// runs with an empty environment.
+fn inert(s: &str) -> bool {
+    !s.contains(['[', ']', '{', '}', '"', ';', '\\', '\n', '\r'])
+}
+
+/// Why an instance's own values are unsafe to hand to xschem, if they are.
+///
+/// xschem pastes an instance's values (and its name and net names) into
+/// its symbol's `tcleval(...)` text before evaluating it. Inside a command
+/// substitution that text is a script, where a value could close a brace or
+/// quote and start a command of its own, so every value must be [`inert`].
+/// In plain `tcleval( @value )` text, which Tcl only substitutes, a value
+/// just must not hold a command substitution. The one exception is the
+/// `value` of xschem's own `simulator_commands` symbols, which their Tcl
+/// wraps in `return {...}`: anything but a brace or backslash stays text
+/// there (IHP's benches put ngspice's `vec[0]` in it).
+fn substituted_values(
     sym: &super::symbol::XSymbol,
     inst_props: &str,
     is_trusted: &dyn Fn(&Path) -> bool,
-) -> bool {
+) -> Option<String> {
+    let pairs = props::pairs(inst_props);
+    let own_format = props::get(inst_props, "format");
+    let format = own_format
+        .clone()
+        .or_else(|| sym.attr("format"))
+        .unwrap_or_default();
+    let symbol_tcl =
+        has_tcleval(&sym.props) || sym.file.shapes.iter().any(|s| has_tcleval(&s.props));
+    let kind = sym.kind();
+    // Labels name nets, and net names reach other instances' Tcl; the
+    // properties of a subcircuit instance reach its schematic's Tcl as
+    // parameters.
+    let reaches_tcl = matches!(
+        kind.as_str(),
+        "label" | "ipin" | "opin" | "iopin" | "subcircuit"
+    );
+    if !(symbol_tcl || has_tcleval(inst_props) || reaches_tcl) {
+        return None;
+    }
+    let script = reaches_tcl || (symbol_tcl && sym.props.contains('[')) || format.contains('[');
+    let commands = braced_commands(sym, is_trusted) && own_format.is_none();
+    for (k, v) in &pairs {
+        let ok = if !script {
+            !k.contains(['[', ']']) && !v.contains(['[', ']'])
+        } else if commands && k == "value" {
+            !v.contains(['{', '}', '\\'])
+        } else {
+            inert(k) && inert(v)
+        };
+        if !ok {
+            return Some(format!(
+                "property `{k}` holds characters xschem would read as Tcl when it pastes the value into the Tcl of symbol {}",
+                sym.reference
+            ));
+        }
+    }
+    None
+}
+
+/// Whether a symbol is one of xschem's own `simulator_commands` symbols,
+/// from its trusted library, with their format unchanged.
+fn braced_commands(sym: &super::symbol::XSymbol, is_trusted: &dyn Fn(&Path) -> bool) -> bool {
     let Origin::File(path) = &sym.origin else {
         return false;
     };
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let format = norm(&sym.attr("format").unwrap_or_default());
-    let known = [
-        "devices/simulator_commands.sym",
-        "devices/simulator_commands_shown.sym",
-    ]
-    .iter()
-    .filter_map(|r| super::builtin::get(r))
-    .filter_map(|(_, text)| file::parse(text).ok())
-    .any(|f| norm(&props::get(f.symbol_props(), "format").unwrap_or_default()) == format);
-    if !is_trusted(path) || !known || props::get(inst_props, "format").is_some() {
-        return false;
-    }
-    props::pairs(inst_props).iter().all(|(k, v)| {
-        let bracket = |s: &str| s.contains(['[', ']']);
-        !bracket(k) && (!bracket(v) || (k == "value" && !v.contains(['{', '}', '\\'])))
-    })
+    is_trusted(path)
+        && [
+            "devices/simulator_commands.sym",
+            "devices/simulator_commands_shown.sym",
+        ]
+        .iter()
+        .filter_map(|r| super::builtin::get(r))
+        .filter_map(|(_, text)| file::parse(text).ok())
+        .any(|f| norm(&props::get(f.symbol_props(), "format").unwrap_or_default()) == format)
 }
 
 /// Every string of a file, embedded symbols included: refuse any that has
@@ -298,6 +340,18 @@ mod tests {
         let (_, commands) =
             super::super::builtin::get("devices/simulator_commands_shown.sym").unwrap();
         std::fs::write(lib.join("devices/simulator_commands_shown.sym"), commands).unwrap();
+        // A subcircuit symbol with a schematic beside it, so an instance's
+        // properties reach the subcircuit's Tcl.
+        std::fs::write(
+            dir.join("blk.sym"),
+            "K {type=subcircuit\nformat=\"@name @pinlist @symname w=@w\"\ntemplate=\"name=x1 w=1\"}\nB 5 0 0 1 1 {name=A}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("blk.sch"),
+            "C {res.sym} 0 0 0 0 {name=R1 value=@w}\n",
+        )
+        .unwrap();
         let resolver = Resolver::new(vec![lib.join("devices"), lib.clone()], vec![dir.clone()]);
         Fixture {
             _tmp: tmp,
@@ -344,7 +398,24 @@ mod tests {
             ("S {tcleval([exec ls])}\n", "Tcl command substitution"),
             (
                 "C {vsource.sym} 0 0 0 0 {name=V1 value=\"[exec touch /tmp/x]\"}\n",
-                "would substitute",
+                "read as Tcl",
+            ),
+            // A value that closes vsource's `[expr {...}]` word and starts a
+            // command, without any `[` of its own.
+            (
+                "C {vsource.sym} 0 0 0 0 {name=V1 value=\"x\\} ; exec ls ; set y \\{\"}\n",
+                "read as Tcl",
+            ),
+            // A label names a net, and net names are pasted into other
+            // instances' Tcl.
+            (
+                "C {res.sym} 0 0 0 0 {name=R1}\nC {lab_pin.sym} 0 -30 0 0 {name=p1 lab=\"a\\}[exec ls]\\{\"}\n",
+                "read as Tcl",
+            ),
+            // A subcircuit instance's properties reach its schematic's Tcl.
+            (
+                "C {blk.sym} 0 0 0 0 {name=x1 w=\"1\\}[exec ls]\\{\"}\n",
+                "read as Tcl",
             ),
             ("C {[exec ls].sym} 0 0 0 0 {name=X1}\n", "evaluate as Tcl"),
             ("C {/etc/passwd.sym} 0 0 0 0 {name=X1}\n", "not found"),
