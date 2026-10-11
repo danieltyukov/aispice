@@ -1,0 +1,387 @@
+{
+  "schema": "macro.fixtures/v1",
+  "description": "What every macro/v1 validator reports for each fixture. Findings are in report order. A finding with message_prefix instead of message comes from a parser, whose detail differs between tools.",
+  "cases": [
+    {
+      "package": "tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": true,
+      "errors": 0,
+      "warnings": 0,
+      "findings": []
+    },
+    {
+      "package": "tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 0,
+      "findings": []
+    },
+    {
+      "package": "tiny_ota.macro",
+      "pdk": "ihp-sg13g2@22f2a25",
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": true,
+      "errors": 0,
+      "warnings": 0,
+      "findings": []
+    },
+    {
+      "package": "tiny_ota.macro",
+      "pdk": "sky130A",
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.expected",
+          "severity": "error",
+          "file": "macro.toml",
+          "message": "the package is built for \"ihp-sg13g2\", expected \"sky130A\""
+        }
+      ]
+    },
+    {
+      "package": "tiny_counter.macro",
+      "pdk": "ihp-sg13g2@0123456",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 1,
+      "findings": [
+        {
+          "rule": "pdk.expected",
+          "severity": "warning",
+          "file": "macro.toml",
+          "message": "the package is built on PDK commit \"22f2a25f1734796de3debbbf29cf697cbbc54081\", expected \"0123456\""
+        }
+      ]
+    },
+    {
+      "package": "broken/bus-width/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "verilog.width",
+          "severity": "error",
+          "file": "tiny_counter.v",
+          "message": "port \"q\" has width 3, macro.toml says 2"
+        }
+      ]
+    },
+    {
+      "package": "broken/dirname/counter_v2",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 1,
+      "findings": [
+        {
+          "rule": "package.dirname",
+          "severity": "warning",
+          "file": ".",
+          "message": "the directory is \"counter_v2\"; name it \"tiny_counter.macro\""
+        }
+      ]
+    },
+    {
+      "package": "broken/lef-missing-pin/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lef.missing_pin",
+          "severity": "error",
+          "file": "tiny_ota.lef",
+          "message": "pin \"inn\" from macro.toml is missing"
+        }
+      ]
+    },
+    {
+      "package": "broken/lef-use/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lef.use",
+          "severity": "error",
+          "file": "tiny_counter.lef",
+          "message": "pin \"VSS\" is USE POWER, expected USE GROUND"
+        }
+      ]
+    },
+    {
+      "package": "broken/lvs-fail/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "evidence.status",
+          "severity": "error",
+          "file": "evidence/lvs.json",
+          "message": "lvs status is \"fail\", expected pass"
+        }
+      ]
+    },
+    {
+      "package": "broken/manifest-schema/tiny_ota.macro",
+      "pdk": null,
+      "name": null,
+      "kind": null,
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "manifest.schema",
+          "severity": "error",
+          "file": "macro.toml",
+          "message": "pins[0].kind is \"analogue\", expected one of signal, clock, analog, power, ground"
+        },
+        {
+          "rule": "manifest.schema",
+          "severity": "error",
+          "file": "macro.toml",
+          "message": "size.width_um must be greater than 0"
+        }
+      ]
+    },
+    {
+      "package": "broken/manifest-syntax/tiny_ota.macro",
+      "pdk": null,
+      "name": null,
+      "kind": null,
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "manifest.syntax",
+          "severity": "error",
+          "file": "macro.toml",
+          "message_prefix": "not valid TOML: "
+        }
+      ]
+    },
+    {
+      "package": "broken/missing-specs/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "file.missing",
+          "severity": "error",
+          "file": "tiny_ota.specs.toml",
+          "message": "required file is missing"
+        }
+      ]
+    },
+    {
+      "package": "broken/missing-timing/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lib.timing",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "output pin \"q[0]\" has no timing arc"
+        },
+        {
+          "rule": "lib.timing",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "output pin \"q[1]\" has no timing arc"
+        }
+      ]
+    },
+    {
+      "package": "broken/openada-evidence/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 0,
+      "findings": []
+    },
+    {
+      "package": "broken/pdk-mismatch/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.mismatch",
+          "severity": "error",
+          "file": "evidence/drc.json",
+          "message": "ran on PDK \"sky130A\", macro.toml says \"ihp-sg13g2\""
+        }
+      ]
+    },
+    {
+      "package": "broken/power-pin-as-signal/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lib.pg_pin",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "pin \"VDD\" must be a pg_pin"
+        }
+      ]
+    },
+    {
+      "package": "broken/specs-fail/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "specs.fail",
+          "severity": "error",
+          "file": "tiny_ota.specs.toml",
+          "message": "spec \"dc_gain\" at corner \"ss\" is 28.4 dB, below the minimum 30 dB"
+        }
+      ]
+    },
+    {
+      "package": "broken/spice-missing-pin/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "spice.missing_pin",
+          "severity": "error",
+          "file": "tiny_ota.spice",
+          "message": "port \"ibias\" from macro.toml is missing"
+        }
+      ]
+    },
+    {
+      "package": "broken/stale-evidence/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "evidence.stale",
+          "severity": "error",
+          "file": "evidence/drc.json",
+          "message": "input \"tiny_ota.gds\" has sha256 20a9434c6fd5, the package file has 7b9bf4283940"
+        },
+        {
+          "rule": "evidence.stale",
+          "severity": "error",
+          "file": "evidence/lvs.json",
+          "message": "input \"tiny_ota.gds\" has sha256 20a9434c6fd5, the package file has 7b9bf4283940"
+        }
+      ]
+    },
+    {
+      "package": "broken/top-cell/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.top_cell",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "no top cell is named \"tiny_counter\"; top cells: \"counter\""
+        }
+      ]
+    },
+    {
+      "package": "broken/verilog-direction/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "verilog.direction",
+          "severity": "error",
+          "file": "tiny_counter.v",
+          "message": "port \"en\" is output, macro.toml says input"
+        }
+      ]
+    },
+    {
+      "package": "broken/wrong-size/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lef.size",
+          "severity": "error",
+          "file": "tiny_counter.lef",
+          "message": "SIZE is 20 x 10 um, macro.toml says 30 x 10 um"
+        }
+      ]
+    }
+  ]
+}

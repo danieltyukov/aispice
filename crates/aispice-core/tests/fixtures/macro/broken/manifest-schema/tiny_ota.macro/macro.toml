@@ -1,0 +1,83 @@
+schema = "macro/v1"
+name = "tiny_ota"
+kind = "analog"
+description = "Five-transistor OTA. Synthetic test fixture, not a working design."
+
+[pdk]
+name = "ihp-sg13g2"
+commit = "22f2a25f1734796de3debbbf29cf697cbbc54081"
+
+[producer]
+tool = "aispice"
+version = "0.2.0"
+source = "tests/fixtures/macro/generate.py"
+
+[size]
+width_um = 0
+height_um = 8.0
+
+[[domains]]
+name = "core"
+voltage = 1.2
+power = ["vdd"]
+ground = ["vss"]
+
+[[pins]]
+name = "inp"
+direction = "input"
+kind = "analogue"
+domain = "core"
+layer = "Metal2"
+description = "Non-inverting input"
+
+[[pins]]
+name = "inn"
+direction = "input"
+kind = "analog"
+domain = "core"
+layer = "Metal2"
+description = "Inverting input"
+
+[[pins]]
+name = "out"
+direction = "output"
+kind = "analog"
+domain = "core"
+layer = "Metal2"
+
+[[pins]]
+name = "ibias"
+direction = "input"
+kind = "analog"
+domain = "core"
+layer = "Metal2"
+description = "Bias current in, 10 uA"
+
+[[pins]]
+name = "vdd"
+direction = "inout"
+kind = "power"
+layer = "Metal1"
+
+[[pins]]
+name = "vss"
+direction = "inout"
+kind = "ground"
+layer = "Metal1"
+
+[[corners]]
+name = "tt"
+process = "tt"
+temperature = 27
+
+[[corners]]
+name = "ss"
+process = "ss"
+temperature = 125
+voltages = { core = 1.08 }
+
+[[corners]]
+name = "ff"
+process = "ff"
+temperature = -40
+voltages = { core = 1.32 }

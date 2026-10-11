@@ -12,3 +12,7 @@
 *.log -text
 *.specs -text
 *.raw binary
+
+# The macro package fixtures shared with ChipLeap are pinned by SHA-256, so
+# every byte stays as committed.
+crates/aispice-core/tests/fixtures/macro/** -text

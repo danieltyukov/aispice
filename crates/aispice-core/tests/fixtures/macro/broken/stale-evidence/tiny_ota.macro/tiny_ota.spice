@@ -1,0 +1,11 @@
+* tiny_ota: five-transistor OTA. Synthetic test fixture, not a working design.
+.subckt tiny_ota inp inn out ibias vdd vss
+*.PININFO inp:I inn:I out:O ibias:I vdd:B vss:B
+XM1 n1 inp tail vss sg13_lv_nmos w=1u l=0.5u
+XM2 out inn tail vss sg13_lv_nmos w=1u l=0.5u
+XM3 n1 n1 vdd vdd sg13_lv_pmos w=2u l=0.5u
+XM4 out n1 vdd vdd sg13_lv_pmos w=2u l=0.5u
+XM5 tail ibias vss vss sg13_lv_nmos w=2u l=1u
++ m=1
+XM6 ibias ibias vss vss sg13_lv_nmos w=2u l=1u
+.ends tiny_ota

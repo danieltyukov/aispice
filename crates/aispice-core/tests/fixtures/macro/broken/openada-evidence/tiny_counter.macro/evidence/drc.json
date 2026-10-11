@@ -1,0 +1,43 @@
+{
+  "schema": "openada.result/v0alpha1",
+  "operation": "drc",
+  "tool": {
+    "name": "klayout",
+    "path": null,
+    "version": null
+  },
+  "execution": {
+    "status": "completed",
+    "exit_code": 0,
+    "duration_ms": 0,
+    "command": []
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "Synthetic test fixture in OpenADA's envelope: no DRC was run."
+  },
+  "inputs": [
+    {
+      "kind": "gds",
+      "role": "layout",
+      "path": "/design/tiny_counter.gds",
+      "exists": true,
+      "bytes": 1604,
+      "sha256": "4988f7bbcc78628f95052752fe4534fda25f67c0a5a122016679c5af2e32c4bc"
+    }
+  ],
+  "artifacts": [],
+  "diagnostics": [],
+  "data": {
+    "drc_clean": true
+  },
+  "provenance": {
+    "openada_version": "0.4.0",
+    "created_at": "2026-10-11T00:00:00Z",
+    "host": {
+      "system": "Linux",
+      "machine": "x86_64",
+      "python": "3.12.3"
+    }
+  }
+}

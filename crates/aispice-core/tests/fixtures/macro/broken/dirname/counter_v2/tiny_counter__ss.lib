@@ -1,0 +1,86 @@
+/* tiny_counter liberty, corner ss. Synthetic test fixture: the numbers are invented. */
+library (tiny_counter_ss) {
+  delay_model : table_lookup ;
+  time_unit : "1ns" ;
+  voltage_unit : "1V" ;
+  current_unit : "1mA" ;
+  capacitive_load_unit (1, pf) ;
+  leakage_power_unit : "1nW" ;
+  pulling_resistance_unit : "1kohm" ;
+  nom_process : 1 ;
+  nom_temperature : 125 ;
+  nom_voltage : 1.08 ;
+  voltage_map (VDD, 1.08) ;
+  voltage_map (VSS, 0) ;
+  type (bus2) {
+    base_type : array ;
+    data_type : bit ;
+    bit_width : 2 ;
+    bit_from : 1 ;
+    bit_to : 0 ;
+    downto : true ;
+  }
+  cell (tiny_counter) {
+    area : 200 ;
+    cell_leakage_power : 3.5 ;
+    pg_pin (VDD) {
+      pg_type : primary_power ;
+      voltage_name : VDD ;
+    }
+    pg_pin (VSS) {
+      pg_type : primary_ground ;
+      voltage_name : VSS ;
+    }
+    pin (clk) {
+      direction : input ;
+      clock : true ;
+      capacitance : 0.003 ;
+    }
+    pin (rst_n) {
+      direction : input ;
+      capacitance : 0.002 ;
+      timing () {
+        related_pin : "clk" ;
+        timing_type : setup_rising ;
+        rise_constraint (scalar) { values ("0.12") ; }
+        fall_constraint (scalar) { values ("0.12") ; }
+      }
+      timing () {
+        related_pin : "clk" ;
+        timing_type : hold_rising ;
+        rise_constraint (scalar) { values ("0.03") ; }
+        fall_constraint (scalar) { values ("0.03") ; }
+      }
+    }
+    pin (en) {
+      direction : input ;
+      capacitance : 0.002 ;
+      timing () {
+        related_pin : "clk" ;
+        timing_type : setup_rising ;
+        rise_constraint (scalar) { values ("0.12") ; }
+        fall_constraint (scalar) { values ("0.12") ; }
+      }
+      timing () {
+        related_pin : "clk" ;
+        timing_type : hold_rising ;
+        rise_constraint (scalar) { values ("0.03") ; }
+        fall_constraint (scalar) { values ("0.03") ; }
+      }
+    }
+    bus (q) {
+      bus_type : bus2 ;
+      direction : output ;
+      max_capacitance : 0.1 ;
+      timing () {
+        related_pin : "clk" ;
+        timing_type : rising_edge ;
+        timing_sense : non_unate ;
+        cell_rise (scalar) { values ("0.35") ; }
+        cell_fall (scalar) { values ("0.32") ; }
+        rise_transition (scalar) { values ("0.08") ; }
+        fall_transition (scalar) { values ("0.07") ; }
+      }
+    }
+  }
+}
