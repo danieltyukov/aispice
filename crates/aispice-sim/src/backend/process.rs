@@ -30,6 +30,9 @@ pub struct ProcessSpec {
     pub args: Vec<OsString>,
     pub cwd: PathBuf,
     pub env: Vec<(OsString, OsString)>,
+    /// Start from an empty environment instead of aispice's own, so the
+    /// child sees only `env`.
+    pub clear_env: bool,
 }
 
 impl ProcessSpec {
@@ -39,6 +42,7 @@ impl ProcessSpec {
             args: Vec::new(),
             cwd: cwd.into(),
             env: Vec::new(),
+            clear_env: false,
         }
     }
 
@@ -154,6 +158,9 @@ pub async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if spec.clear_env {
+        cmd.env_clear();
+    }
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
