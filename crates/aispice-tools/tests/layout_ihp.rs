@@ -214,6 +214,27 @@ async fn the_ota_is_laid_out_checked_extracted_and_simulated_after_layout() {
         assert!(gbw1 < gbw0 && gbw1 > 0.7 * gbw0, "{gbw0} {gbw1}");
         assert!(pm1 > 45.0, "{pm1}");
     }
+
+    // At corners, before and after layout: the worst case of each spec, and
+    // every corner of the post-layout run.
+    let out = call(
+        &ws,
+        "check_specs",
+        json!({"circuit": "ota.asc", "specs": SPECS, "save": false,
+               "corners": {"process": ["tt", "ss", "ff"], "temperatures": [-40, 125]},
+               "post_layout": {"layout": "ota.gds"}}),
+    )
+    .await;
+    let v = &out.data.as_ref().unwrap()["value"];
+    assert_eq!(v["corners_post"]["corners"].as_array().unwrap().len(), 6);
+    assert!(v["corners_post"]["failed"].as_array().unwrap().is_empty());
+    let (gbw0, gbw1) = (row(&v["pre"], "gbw"), row(&v["post"], "gbw"));
+    eprintln!(
+        "worst corner GBW {:.3} MHz -> {:.3} MHz",
+        gbw0 / 1e6,
+        gbw1 / 1e6
+    );
+    assert!(gbw1 < gbw0, "{gbw0} {gbw1}");
 }
 
 #[tokio::test]

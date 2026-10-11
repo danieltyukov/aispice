@@ -644,7 +644,7 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 ## `check_specs`
 
-Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. With post_layout (a layout from the layout tool), the layout is extracted and simulated in place of the schematic's devices, and each spec is reported before and after layout (at every corner when corners are given). `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
 Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
@@ -706,6 +706,28 @@ Edits your files: each write is approved in ask-before-applying mode and can be 
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "post_layout": {
+      "description": "Check the specs after layout too: the layout (a GDS from the layout\ntool) is extracted and put in place of the schematic's devices, and\neach spec is reported before and after layout.",
+      "properties": {
+        "cell": {
+          "description": "The cell; default the file's one top cell.",
+          "type": "string"
+        },
+        "layout": {
+          "description": "The layout, a GDS file in the project (from the layout tool).",
+          "type": "string"
+        },
+        "resistance": {
+          "default": false,
+          "description": "Extract resistor networks as well as capacitance (default false).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "layout"
+      ],
       "type": "object"
     },
     "save": {

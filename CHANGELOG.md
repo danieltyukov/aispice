@@ -22,7 +22,7 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - `drc` tool and `aispice drc`: IHP's KLayout decks (main rules, extra rules, antenna; density on request), each violation with its rule, layer, description and box in um.
 - `lvs` tool and `aispice lvs`: IHP's KLayout LVS deck against a CDL netlist written from the circuit's PDK devices (only the devices a generated layout drew, plus its dummies), reporting each net, device and pin that does not match by its schematic and layout names.
 - `extract` tool and `aispice extract`: Magic with IHP's tech file, devices and coupling capacitance, and with `resistance` a resistor network on every net.
-- `check_specs` takes `post_layout` (and `aispice check --post-layout <gds>`): the extracted layout replaces the laid-out devices, joined by net name, and each spec is reported before and after layout.
+- `check_specs` takes `post_layout` (and `aispice check --post-layout <gds>`): the extracted layout replaces the laid-out devices, joined by net name, and each spec is reported before and after layout; with a corner set (`--process`, `--temp`, `--supply` on the command line) each spec's worst case before and after, and every corner after layout.
 - `klayout_path` and `magic_path` settings; `aispice doctor` shows KLayout and Magic.
 
 ### Security

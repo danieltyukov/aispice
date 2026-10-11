@@ -227,8 +227,8 @@ pub struct PostLayout {
 
 /// The circuit's netlist with its laid-out devices replaced by the
 /// extracted layout. This is the base netlist every post-layout run starts
-/// from: variants (corners, Monte Carlo) are made from it the same way as
-/// from the schematic's, since the PDK's model header is left as it is.
+/// from: check_specs makes its corner variants from it the same way as from
+/// the schematic's, since the PDK's model header is left as it is.
 pub async fn post_layout_netlist(
     ws: &Workspace,
     circuit: &str,
