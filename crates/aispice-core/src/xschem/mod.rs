@@ -13,5 +13,6 @@
 
 pub mod file;
 pub mod props;
+pub mod tcl;
 
 pub use file::{ParseError, XFile, XInstance, XShape, XText, XWire};
