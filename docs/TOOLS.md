@@ -1988,7 +1988,9 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 ## `xschem_import`
 
-Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted (by aispice, and by xschem when installed) and compared. Refuses to overwrite.
+Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. xschem itself checks an import only when the user started aispice with AISPICE_XSCHEM_CHECK_IMPORTS=1; this tool cannot turn that on. Refuses to overwrite.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
@@ -2021,7 +2023,9 @@ Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the projec
 
 ## `xschem_export`
 
-Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for stay SPICE lines in a code block. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem when installed). Refuses to overwrite.
+Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox when both are installed). Refuses to overwrite.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
