@@ -171,8 +171,10 @@ fn place_libraries(
 
 /// The deck with a `d_cosim` model card for each co-simulation library,
 /// before its `.end`: the only place a `d_cosim` model can come from, since
-/// the netlist policy refuses them in decks.
-pub fn with_cosim_models(deck: &str, cosim: &[(String, PathBuf)]) -> String {
+/// the netlist policy refuses them in decks. The library is named relative
+/// to the run folder ngspice runs in: ngspice lower-cases a card, the path
+/// in quotes included, and the private folder's own name has capitals.
+pub fn with_cosim_models(deck: &str, cosim: &[(String, String)]) -> String {
     if cosim.is_empty() {
         return deck.to_string();
     }
@@ -183,11 +185,8 @@ pub fn with_cosim_models(deck: &str, cosim: &[(String, PathBuf)]) -> String {
         .unwrap_or(lines.len());
     let mut out: Vec<String> = lines[..end].iter().map(|l| l.to_string()).collect();
     out.push("* co-simulation models added by aispice".into());
-    for (model, path) in cosim {
-        out.push(format!(
-            ".model {model} d_cosim simulation=\"{}\"",
-            path.display()
-        ));
+    for (model, file) in cosim {
+        out.push(format!(".model {model} d_cosim simulation=\"./{file}\""));
     }
     out.extend(lines[end..].iter().map(|l| l.to_string()));
     let mut s = out.join("\n");
@@ -271,10 +270,10 @@ impl Simulator for Ngspice {
             .filter(|(l, _)| l.kind == LibraryKind::Osdi)
             .map(|(_, p)| p.clone())
             .collect();
-        let cosim: Vec<(String, PathBuf)> = placed
+        let cosim: Vec<(String, String)> = placed
             .iter()
             .filter(|(l, _)| l.kind == LibraryKind::Cosim)
-            .map(|(l, p)| (l.name.clone(), p.clone()))
+            .map(|(l, _)| (l.name.clone(), l.file_name()))
             .collect();
         let deck = with_cosim_models(&job.netlist_text, &cosim);
         ws.write(&format!("{stem}.cir"), deck.as_bytes())?;
@@ -413,13 +412,10 @@ mod tests {
         assert!(ic.contains("osdi '/pdk/psp103.osdi'\nosdi '/tmp/aispice-run-x/comparator.osdi'\n"));
         assert!(!ic.contains("ngbehavior"));
         let deck = "t\nAcnt [clk] [q] null counter\n.tran 1u 1m\n.end\n";
-        let cosim = vec![(
-            "counter".to_string(),
-            PathBuf::from("/tmp/aispice-run-x/cosim_counter.so"),
-        )];
+        let cosim = vec![("counter".to_string(), "cosim_counter.so".to_string())];
         assert_eq!(
             with_cosim_models(deck, &cosim),
-            "t\nAcnt [clk] [q] null counter\n.tran 1u 1m\n* co-simulation models added by aispice\n.model counter d_cosim simulation=\"/tmp/aispice-run-x/cosim_counter.so\"\n.end\n"
+            "t\nAcnt [clk] [q] null counter\n.tran 1u 1m\n* co-simulation models added by aispice\n.model counter d_cosim simulation=\"./cosim_counter.so\"\n.end\n"
         );
         assert_eq!(with_cosim_models(deck, &[]), deck);
         assert!(!plain_path("/tmp/it's"));

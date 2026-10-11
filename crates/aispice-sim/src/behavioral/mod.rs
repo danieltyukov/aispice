@@ -104,11 +104,13 @@ pub struct Library {
 }
 
 impl Library {
-    /// The library's file name in a run folder.
+    /// The library's file name in a run folder, lower case: ngspice
+    /// lower-cases the `d_cosim` card that names it.
     pub fn file_name(&self) -> String {
+        let name = self.name.to_ascii_lowercase();
         match self.kind {
-            LibraryKind::Osdi => format!("{}.osdi", self.name),
-            LibraryKind::Cosim => format!("cosim_{}.so", self.name),
+            LibraryKind::Osdi => format!("{name}.osdi"),
+            LibraryKind::Cosim => format!("cosim_{name}.so"),
         }
     }
 
@@ -281,7 +283,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// A program's version line, from `--version`, within ten seconds.
-pub(crate) async fn version(program: &Path) -> Option<String> {
+pub async fn version(program: &Path) -> Option<String> {
     let dir = build_dir().ok()?;
     let out = step(
         program,

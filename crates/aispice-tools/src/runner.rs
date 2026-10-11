@@ -80,6 +80,12 @@ pub struct RunnerConfig {
     /// KLayout and Magic for the layout tools; found on PATH when unset.
     #[serde(default)]
     pub layout_programs: aispice_layout::tools::Programs,
+    /// OpenVAF for Verilog-A models; `openvaf` on PATH when unset.
+    #[serde(default)]
+    pub openvaf_exe: Option<PathBuf>,
+    /// Verilator for co-simulated Verilog; `verilator` on PATH when unset.
+    #[serde(default)]
+    pub verilator_exe: Option<PathBuf>,
 }
 
 impl Default for RunnerConfig {
@@ -97,6 +103,8 @@ impl Default for RunnerConfig {
             pdks_error: None,
             gmid_cache_dir: None,
             layout_programs: Default::default(),
+            openvaf_exe: None,
+            verilator_exe: None,
         }
     }
 }
@@ -137,6 +145,8 @@ pub struct Runner {
     detected: OnceCell<Vec<(SimId, Detection)>>,
     runs: Mutex<VecDeque<Arc<StoredRun>>>,
     counter: std::sync::atomic::AtomicU64,
+    /// Behavioural model libraries this process built.
+    behavioral: crate::behavioral::Builder,
 }
 
 impl std::fmt::Debug for Runner {
@@ -158,7 +168,45 @@ impl Runner {
             detected: OnceCell::new(),
             runs: Mutex::new(VecDeque::new()),
             counter: Default::default(),
+            behavioral: Default::default(),
         }
+    }
+
+    /// The project's declared behavioural models that this netlist uses,
+    /// built (or taken from what this process built) and ready to load.
+    pub async fn behavioral_libraries(
+        &self,
+        project: &Project,
+        netlist: &Netlist,
+        cancel: &CancellationToken,
+    ) -> Result<(Vec<Arc<aispice_sim::behavioral::Library>>, Vec<String>), RunError> {
+        let cfg = ProjectConfig::load(project.root()).map_err(RunError::Pdk)?;
+        if cfg.veriloga.is_empty() && cfg.cosim.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let declared = crate::behavioral::declared(project).map_err(RunError::Netlist)?;
+        let names = declared.cosim_names();
+        let (va, cosim) = crate::behavioral::used(netlist, &declared);
+        if va.is_empty() && cosim.is_empty() {
+            return Ok((Vec::new(), names));
+        }
+        let c = self.config();
+        let tools = crate::behavioral::Tools {
+            openvaf: c.openvaf_exe,
+            verilator: c.verilator_exe,
+            ngspice: c.ngspice_exe,
+        };
+        let libs = self
+            .behavioral
+            .build(project, &tools, &va, &cosim, cancel)
+            .await
+            .map_err(RunError::Netlist)?;
+        Ok((libs, names))
+    }
+
+    /// The behavioural libraries this process has built.
+    pub async fn behavioral_built(&self) -> Vec<Arc<aispice_sim::behavioral::Library>> {
+        self.behavioral.built().await
     }
 
     pub fn config(&self) -> RunnerConfig {
@@ -422,6 +470,19 @@ impl Runner {
             return Err(RunError::Pdk(msg));
         }
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
+        // Verilog-A and co-simulated Verilog run on ngspice only: the other
+        // simulators cannot load what aispice builds for them.
+        let (libraries, cosim) = self.behavioral_libraries(project, netlist, cancel).await?;
+        if !libraries.is_empty() && id != SimId::Ngspice {
+            let asked = simulator.is_some() || self.config().simulator != "auto";
+            if asked || !self.available(SimId::Ngspice).await {
+                return Err(RunError::Netlist(format!(
+                    "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
+                    id.name()
+                )));
+            }
+            id = SimId::Ngspice;
+        }
         let lib_dirs = self.model_lib_dirs();
         let base = Self::base_dir(project, circuit)?;
         let policy = self.policy_for(project, &base);
@@ -433,7 +494,15 @@ impl Runner {
         // their full path from here on. The policy checks those paths below.
         let netlist = &canonical_netlist_includes(netlist, &policy);
         let mut notes = Vec::new();
-        let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, pdk.as_ref());
+        let mut text = self.deck_for_with(
+            id,
+            netlist,
+            std_libs,
+            &lib_dirs,
+            &mut notes,
+            pdk.as_ref(),
+            &cosim,
+        );
         if let Some(t) = &text.1 {
             // ngspice or Xyce cannot run this deck; LTspice can, if present
             // and its library may be used. Not for a PDK, whose models
@@ -549,6 +618,18 @@ impl Runner {
             .unwrap_or_else(|| "deck".into());
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
+        for lib in &libraries {
+            notes.push(format!(
+                "loaded {} built by aispice from the project's {} (SHA-256 {})",
+                lib.file_name(),
+                match lib.kind {
+                    aispice_sim::behavioral::LibraryKind::Osdi => "Verilog-A",
+                    aispice_sim::behavioral::LibraryKind::Cosim => "Verilog",
+                },
+                &lib.sha256[..16]
+            ));
+        }
+        job.libraries = libraries;
         job.timeout = Duration::from_secs(self.config().timeout_secs);
         // A deck that includes PDK files by hand in a project that names no
         // PDK runs without the PDK's compiled models; say why if it fails.
@@ -638,6 +719,22 @@ impl Runner {
         notes: &mut Vec<String>,
         pdk: Option<&Pdk>,
     ) -> (String, Option<String>) {
+        self.deck_for_with(id, netlist, std_libs, lib_dirs, notes, pdk, &[])
+    }
+
+    /// As [`deck_for`](Self::deck_for), with the co-simulation models the
+    /// project declares, whose XSPICE instances ngspice keeps.
+    #[allow(clippy::too_many_arguments)]
+    fn deck_for_with(
+        &self,
+        id: SimId,
+        netlist: &Netlist,
+        std_libs: &[String],
+        lib_dirs: &[PathBuf],
+        notes: &mut Vec<String>,
+        pdk: Option<&Pdk>,
+        cosim: &[String],
+    ) -> (String, Option<String>) {
         let target = id.target();
         let source = if target == Target::Ltspice {
             single_analysis(netlist, "LTspice", notes)
@@ -683,7 +780,7 @@ impl Runner {
                 resolved.netlist
             }
         };
-        let t = dialect::translate(&source, target);
+        let t = dialect::translate_with(&source, target, cosim);
         notes.extend(t.notes.iter().cloned());
         let blocked = (!t.unsupported.is_empty()).then(|| t.unsupported.join("; "));
         (t.text, blocked)
