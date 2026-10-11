@@ -37,6 +37,7 @@ Pure computation over files: no processes and no network.
 | `symbol` | `.asy` parser, a built-in library of the common parts, and lookup through the project folder, extra folders and an LTspice installation |
 | `geometry` | Grid points, LTspice's rotate-then-mirror orientations, segment indexing for connectivity |
 | `netlist` | Schematic to SPICE netlist, following LTspice's own netlister: net naming, pin order, model cards, hierarchy. `policy` checks every netlist before a simulator sees it |
+| `pdk` | The devices of the PDKs aispice knows (IHP SG13G2): subcircuit, corner library, pins, default sizes, symbol |
 | `edit` | Typed edit operations (add, remove, move, rotate, set value or attribute, connect pins, label nets, directives) with automatic placement and wire routing |
 | `layout` | Netlist to schematic: places parts by circuit conventions (signal left to right, ground down, rails up, transistor stacks in columns), routes wires on a grid, tries several strategies and keeps the best one that netlists back to the input |
 | `lint` | Rule checks for what makes a simulation fail or mislead: no ground, floating pins, nets with no DC path, shorted parts and sources, sources in parallel, missing values or analysis, duplicate names; readability checks (off-grid, overlapping parts) as information |
@@ -58,6 +59,8 @@ Running simulators and reading what they return.
 | `measure` | Named measurements: values, extremes, rise and fall time, overshoot, settling, crossings, gain, bandwidth, unity-gain frequency, phase and gain margin, peaking and the Q of a second-order lowpass |
 | `spec` | Spec tables: a measurement plus limits, evaluated to pass or fail with a margin |
 | `sweep`, `montecarlo`, `optimize` | Parameter sweeps, tolerance analysis with yield, and sizing parameters within bounds to meet specs |
+| `pdk` | An installed PDK: checking its folder, its compiled models, the model header a netlist needs and the git commit it is at |
+| `gmid` | gm/Id lookup tables for a PDK's transistors, built on ngspice and cached, and sizing from them checked by simulation |
 | `plot` | SVG plots of waveforms |
 
 ### aispice-agent
@@ -80,7 +83,8 @@ Where circuits meet the agent.
 | Module | What it does |
 |---|---|
 | `project` | The open folder. Every path is resolved inside it and refused if it escapes, including through symbolic links. Writes are atomic, and every save records a snapshot for undo |
-| `runner` | Picks a simulator, netlists the circuit, runs it, keeps recent results |
+| `runner` | Picks a simulator, netlists the circuit (with the PDK's model header in a PDK project), runs it, keeps recent results |
+| `pdk` | The user's PDK registry (`pdks.toml`) and a project's `aispice.toml` |
 | `workspace` | What all tools share: the project, the runner, and hooks a front end sets (approve an edit first, reload LTspice after a save) |
 | `tools` | The tools themselves. `aispice docs tools` prints the full reference |
 | `templates` | The verified reference circuits behind the `templates` tool, embedded in the binary |
@@ -90,7 +94,7 @@ Where circuits meet the agent.
 
 ### aispice (CLI)
 
-`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `mcp`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
+`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `mcp`, `pdk`, `gmid`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
 
 ### Desktop app
 
@@ -112,6 +116,7 @@ Circuit files, simulator logs and tool output are data, not instructions. The de
 - **Confinement.** Tools work inside the project folder. Paths are canonicalised and anything outside the folder, or inside `.aispice/`, is refused.
 - **No shell.** Every process is started with an argument vector. The one remote shell command, for Spectre, is built from the user's configuration and values aispice generated and checked.
 - **Netlist policy.** Before a simulator runs, the netlist and everything it includes are checked against an allowlist of dot-commands. Control blocks, shell escapes, and includes outside the project are refused.
+- **Compiled models.** A PDK's transistor models are compiled code (ngspice OSDI files, Xyce plugins). A netlist can never load one: `pre_osdi`, `osdi`, `codemodel` and includes of compiled libraries are refused everywhere. aispice loads them itself, outside the deck (in the start-up file it writes into the private run folder, or with Xyce's `-plugin`), and only from a PDK folder the user registered with `aispice pdk add`, after checking each resolved path is inside that folder. A project can only name a registered PDK in `aispice.toml`, never a path, and the agent cannot register one. Registered folders are include roots whose files get every policy rule except the path heuristic their expressions (`w/ng`) would trip.
 - **Approval.** Every tool that writes goes through one approval hook, so "ask before applying" covers edits, spec files, optimiser results and undo.
 - **Keys.** API keys stay in the keychain and are never logged, printed or included in errors.
 - **Desktop.** A strict content security policy, minimal Tauri capabilities, and SVG sanitising in the interface. Chat sessions are stored in the user's data folder, never in a project, so a cloned repository cannot plant a conversation.
@@ -129,5 +134,6 @@ See [SECURITY.md](../SECURITY.md) to report a problem.
 | MCP | `crates/aispice-cli/tests/mcp.rs`, a real client over stdio |
 | Interface | `npm test -w app` (Vitest) and `npx playwright test` in `app/` against the browser mock |
 | Templates | `crates/aispice-tools/tests/templates.rs`: every template meets its specs on ngspice |
+| PDK | `crates/aispice-tools/tests/pdk_ihp.rs` with `AISPICE_PDK_IHP` set: IHP circuits drawn with the PDK symbols on ngspice and Xyce, and gm/Id sizing checked by simulation |
 | Model behaviour | `aispice eval`: design tasks judged by simulation, with reference solutions checked in `crates/aispice-tools/tests/eval_suite.rs` |
 | Desktop app | `npm run test:desktop -w app`: the built app driven through tauri-driver and WebKitWebDriver, with a local mock model |

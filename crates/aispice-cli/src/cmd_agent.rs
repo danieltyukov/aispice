@@ -113,6 +113,9 @@ pub fn chat(args: ChatArgs) -> Result<ExitCode> {
         circuit: None,
         simulators: sims,
         ltspice_library: ws.runner.ltspice_symbols().is_some(),
+        pdk: aispice_tools::pdk::ProjectConfig::load(&root)
+            .ok()
+            .and_then(|c| c.pdk),
     });
     let agent = Agent::new(provider, Arc::new(registry(ws.clone())), &model)
         .with_system(prompt)
@@ -186,6 +189,19 @@ pub fn chat(args: ChatArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// One line per registered PDK, or why the registry could not be read.
+fn pdk_lines(runner: &aispice_tools::Runner) -> Vec<String> {
+    let cfg = runner.config();
+    let mut out: Vec<String> = cfg.pdks_error.into_iter().collect();
+    for name in cfg.pdks.pdks.keys() {
+        out.push(match cfg.pdks.open(name) {
+            Ok(p) => aispice_tools::tools::summary_line(&p),
+            Err(e) => format!("{name}: unusable: {e}"),
+        });
+    }
+    out
+}
+
 pub fn doctor(json_mode: bool) -> Result<ExitCode> {
     let cfg = Config::load().unwrap_or_default();
     let runner = aispice_tools::setup::runner(&cfg);
@@ -200,6 +216,7 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             "version": env!("CARGO_PKG_VERSION"),
             "simulators": sims.iter().map(|(i, d)| serde_json::json!({"id": i, "found": d.found, "version": d.version, "path": d.path, "notes": d.notes})).collect::<Vec<_>>(),
             "ltspice_library": runner.ltspice_lib_dirs(),
+            "pdks": pdk_lines(&runner),
             "providers": configured.iter().map(|k| serde_json::json!({"provider": k.provider, "source": k.source.to_string()})).collect::<Vec<_>>(),
             "config": Config::default_path(),
         });
@@ -239,6 +256,14 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
                 .join(", ")
         }
     );
+    println!("\nPDKs:");
+    let pdks = pdk_lines(&runner);
+    if pdks.is_empty() {
+        println!("  none registered (for IC design: aispice pdk add <name> <path>)");
+    }
+    for l in pdks {
+        println!("  {l}");
+    }
     println!("\nModel providers with a key:");
     if configured.is_empty() {
         println!(

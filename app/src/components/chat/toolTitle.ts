@@ -34,6 +34,8 @@ const RUNNING: Record<string, (c: string | null) => string> = {
   undo: () => "Undoing",
   templates: () => "Looking up templates",
   symbols: () => "Searching symbols",
+  pdk: () => "Reading the PDK",
+  gm_id: () => "Sizing by gm/Id",
 };
 
 function humanName(name: string): string {

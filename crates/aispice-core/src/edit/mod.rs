@@ -101,8 +101,8 @@ pub enum EditOp {
     /// `near` (or to the right of the circuit), clear of other parts and wires.
     AddComponent {
         /// Symbol name: res, cap, ind, voltage, current, diode, npn, pnp, nmos,
-        /// pmos, OpAmps\opamp, OpAmps\opamp2, bv, e, g, sw, ... or any symbol
-        /// in the user's libraries.
+        /// pmos, OpAmps\opamp, OpAmps\opamp2, bv, e, g, sw, ..., a PDK device
+        /// such as sg13g2\sg13_lv_nmos, or any symbol in the user's libraries.
         symbol: String,
         /// Instance name. Defaults to the next free one for the prefix (R3).
         #[serde(default)]
@@ -551,10 +551,17 @@ fn apply_one(
                 .resolve(symbol)
                 .map_err(|e| EditError::Library(e.to_string()))?;
             let prefix = def.prefix().chars().next().unwrap_or('X').to_string();
+            // PDK devices are subcircuits (prefix X), but are named as the
+            // devices they are: M1, R1, C1, Q1.
+            let letter = crate::pdk::device_for_symbol(symbol).map(|d| d.letter.to_string());
             let name = match name {
                 Some(n) if sch.symbol(n).is_some() => return Err(EditError::NameTaken(n.clone())),
                 Some(n) => n.clone(),
-                None => sch.next_inst_name(if prefix == "X" { "U" } else { &prefix }),
+                None => sch.next_inst_name(letter.as_deref().unwrap_or(if prefix == "X" {
+                    "U"
+                } else {
+                    &prefix
+                })),
             };
             let orient = orient.unwrap_or_default();
             let at = match at {

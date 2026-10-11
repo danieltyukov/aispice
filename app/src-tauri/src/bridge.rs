@@ -126,6 +126,9 @@ pub async fn send(
             circuit: circuit.clone(),
             simulators: sims,
             ltspice_library: state.ws.runner.ltspice_symbols().is_some(),
+            pdk: aispice_tools::pdk::ProjectConfig::load(project.root())
+                .ok()
+                .and_then(|c| c.pdk),
         });
         let agent = Agent::new(
             provider,

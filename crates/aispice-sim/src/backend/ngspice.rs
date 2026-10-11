@@ -7,6 +7,14 @@
 //! can run. The one we write turns on LTspice compatibility
 //! (`ngbehavior=ltpsa`), which aispice's netlists rely on.
 //!
+//! A PDK run differs in two ways. The `.spiceinit` loads the PDK's compiled
+//! device models (`osdi '<file>'`), the one thing a deck may never do. And
+//! it leaves compatibility off: in ngspice 42 the LTspice and PSpice modes
+//! turn `.lib file section` into `.include file section`, which PDK corner
+//! libraries are built on, and even with the sections inlined IHP's PSP
+//! models then give wrong currents (an inverter's output at 0.75 V instead
+//! of 1.2 V with its input low).
+//!
 //! ngspice refuses to evaluate `.meas` in batch mode when it writes a raw
 //! file, so a deck with measurements runs twice: once for the raw file and
 //! once, without it, for the measurements. ngspice runs take milliseconds;
@@ -18,6 +26,7 @@ use super::{
     which,
 };
 use crate::log::parse_ngspice_output;
+use crate::pdk::PdkRun;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -58,9 +67,29 @@ impl Ngspice {
 
     /// The `.spiceinit` aispice runs ngspice with.
     pub fn spiceinit(&self) -> String {
+        self.spiceinit_for(None)
+    }
+
+    /// The `.spiceinit` for a run, loading a PDK's OSDI files when it has
+    /// one. The paths were checked by the caller; a quote or a newline would
+    /// end the command early, so such a path is left out rather than
+    /// written (the run then fails on the missing model, visibly).
+    pub fn spiceinit_for(&self, pdk: Option<&PdkRun>) -> String {
         let mut s = String::from("* written by aispice for this run\n");
-        if let Some(c) = &self.compat {
-            s.push_str(&format!("set ngbehavior={c}\n"));
+        match pdk {
+            Some(pdk) => {
+                for f in &pdk.osdi {
+                    let p = f.display().to_string();
+                    if !p.contains(['\'', '"', '$', '`']) && !p.chars().any(char::is_control) {
+                        s.push_str(&format!("osdi '{p}'\n"));
+                    }
+                }
+            }
+            None => {
+                if let Some(c) = &self.compat {
+                    s.push_str(&format!("set ngbehavior={c}\n"));
+                }
+            }
         }
         s
     }
@@ -152,7 +181,10 @@ impl Simulator for Ngspice {
         let stem = job.stem();
         let ws = Workspace::new()?;
         ws.write(&format!("{stem}.cir"), job.netlist_text.as_bytes())?;
-        ws.write(".spiceinit", self.spiceinit().as_bytes())?;
+        ws.write(
+            ".spiceinit",
+            self.spiceinit_for(job.pdk.as_ref()).as_bytes(),
+        )?;
         let mut spec = ProcessSpec::new(&exe, ws.path())
             .env("HOME", ws.path())
             .env("USERPROFILE", ws.path());
@@ -246,5 +278,25 @@ mod tests {
             ..Default::default()
         };
         assert!(!plain.spiceinit().contains("ngbehavior"));
+    }
+
+    #[test]
+    fn pdk_runs_load_their_osdi_files_in_native_mode() {
+        let pdk = PdkRun {
+            osdi: vec![
+                PathBuf::from("/pdk/osdi/psp103.osdi"),
+                PathBuf::from("/pdk/osdi/r3_cmc.osdi"),
+                PathBuf::from("/pdk/it's/evil.osdi"),
+                PathBuf::from("/pdk/x\nshell id/evil.osdi"),
+            ],
+            xyce_plugins: Vec::new(),
+        };
+        let init = Ngspice::default().spiceinit_for(Some(&pdk));
+        assert_eq!(
+            init,
+            "* written by aispice for this run\nosdi '/pdk/osdi/psp103.osdi'\nosdi '/pdk/osdi/r3_cmc.osdi'\n"
+        );
+        let plain = Ngspice::default().spiceinit_for(None);
+        assert!(!plain.contains("osdi") && plain.contains("ngbehavior=ltpsa"));
     }
 }

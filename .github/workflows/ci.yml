@@ -77,6 +77,73 @@ jobs:
       - name: Tests
         run: cargo test --no-fail-fast
 
+  # The IC path against the real IHP SG13G2 PDK, fetched at a pinned commit
+  # (only its ngspice models and Verilog-A sources; nothing is committed) with
+  # its OSDI models compiled by OpenVAF. Not a required check: it depends on
+  # two downloads. Xyce is not built here, so the Xyce half of these tests
+  # skips; it runs where a plugin-capable Xyce is installed.
+  pdk:
+    name: PDK (IHP SG13G2)
+    runs-on: ubuntu-latest
+    env:
+      IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
+      OPENVAF_URL: https://openva.fra1.cdn.digitaloceanspaces.com/openvaf_23_5_0_linux_amd64.tar.gz
+      OPENVAF_SHA256: 79c0e08ad948a7a9f460dc87be88b261bbd99b63a4038db3c64680189f44e4f0
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the Rust build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-pdk-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-pdk-
+
+      - name: Install ngspice
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ngspice
+
+      - name: Cache the PDK with its compiled models
+        id: pdk-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/pdk
+          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0
+
+      - name: Fetch IHP-Open-PDK at the pinned commit
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        run: |
+          git init -q ~/pdk/IHP-Open-PDK
+          cd ~/pdk/IHP-Open-PDK
+          git remote add origin https://github.com/IHP-GmbH/IHP-Open-PDK.git
+          git sparse-checkout set --no-cone /ihp-sg13g2/libs.tech/ngspice/ /ihp-sg13g2/libs.tech/verilog-a/
+          git fetch -q --depth 1 --filter=blob:none origin "$IHP_PDK_COMMIT"
+          git checkout -q FETCH_HEAD
+
+      - name: Compile the PDK's Verilog-A models to OSDI
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/openvaf.tar.gz" "$OPENVAF_URL"
+          echo "$OPENVAF_SHA256  $RUNNER_TEMP/openvaf.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/openvaf"
+          tar -xzf "$RUNNER_TEMP/openvaf.tar.gz" -C "$RUNNER_TEMP/openvaf"
+          cd ~/pdk/IHP-Open-PDK/ihp-sg13g2/libs.tech/verilog-a
+          PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh
+          ls -l ../ngspice/osdi
+
+      - name: PDK tests
+        run: |
+          export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
+          cargo test -p aispice-sim --lib pdk::
+          cargo test -p aispice-tools --test pdk_ihp -- --nocapture
+
   shell:
     name: Desktop shell
     runs-on: ubuntu-latest

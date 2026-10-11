@@ -108,6 +108,17 @@ pub fn resolve_with(
     standard_libs: &[String],
     lib_dirs: &[PathBuf],
 ) -> ResolvedModels {
+    resolve_with_defined(netlist, standard_libs, lib_dirs, &[])
+}
+
+/// As [`resolve_with`], with names something else defines and that must not
+/// be looked up: a PDK's devices, which its model header brings in.
+pub fn resolve_with_defined(
+    netlist: &Netlist,
+    standard_libs: &[String],
+    lib_dirs: &[PathBuf],
+    defined_elsewhere: &[String],
+) -> ResolvedModels {
     let mut lib = Library::new(lib_dirs);
     let mut out = ResolvedModels {
         netlist: netlist.clone(),
@@ -150,6 +161,7 @@ pub fn resolve_with(
     }
     out.netlist.items = items;
 
+    kept_defs.extend(defined_elsewhere.iter().map(|n| n.to_ascii_uppercase()));
     let mut gave_up: HashSet<String> = HashSet::new();
     // Each round adds definitions whose bodies may reference more; real
     // libraries nest a few levels at most.
@@ -541,6 +553,16 @@ mod tests {
         let r = resolve(&n, &[], None);
         assert!(r.added.is_empty());
         assert_eq!(r.missing, vec!["QX"]);
+    }
+
+    #[test]
+    fn names_defined_elsewhere_are_not_looked_up() {
+        let n = parse("t\nXM1 d g 0 0 sg13_lv_nmos w=1u\nXU1 a b c opamp\n.op\n");
+        let plain = resolve_with(&n, &[], &[]);
+        assert_eq!(plain.missing, vec!["sg13_lv_nmos".to_string()]);
+        let pdk = resolve_with_defined(&n, &[], &[], &["SG13_LV_NMOS".to_string()]);
+        assert!(pdk.missing.is_empty(), "{:?}", pdk.missing);
+        assert!(pdk.added.iter().any(|a| a.name == "opamp"));
     }
 
     #[test]

@@ -409,7 +409,7 @@ Run electrical rule checks on a schematic: missing ground, floating pins, dangli
 
 ## `netlist`
 
-Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models). Useful to check exactly what will be simulated.
+Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models), with the PDK's model header in a PDK project. Useful to check exactly what will be simulated.
 
 <details><summary>Input schema</summary>
 
@@ -1280,6 +1280,141 @@ Verified reference circuits to start a design from: passive and active filters, 
   },
   "required": [
     "action"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `pdk`
+
+Process design kits (PDKs) for transistor-level IC design. `list` shows the PDKs the user has registered and the one the open project uses. `show` describes one: its folder and commit, the compiled device models it loads, its corner libraries with their sections, and the model header aispice adds to every netlist (`.lib <corner library> mos_tt` and the like). `devices` lists the devices with the symbol to place (for example sg13g2\sg13_lv_nmos), the pins in order and the default parameters; set W, L, fingers (ng) and multiplier (m) through the SpiceLine attribute, e.g. `w=2u l=0.5u ng=2 m=1`. `use` makes the open project use a registered PDK by writing aispice.toml. Only the user can register a PDK (with `aispice pdk add`). A PDK project simulates on ngspice or Xyce; LTspice cannot load PDK models.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "description": "The registered PDKs, and the one the open project uses.",
+          "enum": [
+            "list"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One PDK in full: folder, commit, compiled models, corner libraries\nwith their sections, and the model header aispice adds.",
+          "enum": [
+            "show"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The PDK's devices: the symbol to place, pins, default parameters.",
+          "enum": [
+            "devices"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Make the open project use this PDK (writes `aispice.toml`).",
+          "enum": [
+            "use"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "name": {
+      "description": "The registered name, e.g. `ihp-sg13g2`. Default for show and\ndevices: the project's PDK.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `gm_id`
+
+Size a PDK transistor with the gm/Id method. Give the device, the gm/Id you want (S/A), the channel length, and the drain current (or a width); get back W, the number of fingers, VGS, Vth, gm, gds, intrinsic gain gm/gds, Cgg and fT at that bias, and the SpiceLine to give the transistor (`w=... l=... ng=... m=1`). VDS defaults to half the supply. A lookup table made by sweeping the device on ngspice over L, VDS and VGS with the PDK's own models (typical corner) gives the first answer; the first use of a device builds its table (a few seconds) and later uses read it from the cache. The answer is then checked by simulating the device at that size and corrected, since the models do not scale exactly with width. Without gm_id and l, it reports what the table covers. Check the whole circuit by simulating it.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "device": {
+      "description": "The MOS transistor, by subcircuit name: sg13_lv_nmos, sg13_lv_pmos,\nsg13_hv_nmos or sg13_hv_pmos for IHP SG13G2.",
+      "type": "string"
+    },
+    "gm_id": {
+      "description": "Target gm/Id in S/A (1/V): about 5 to 10 in strong inversion (fast,\nsmall), 10 to 18 in moderate inversion, 20 and up in weak inversion\n(efficient, slow). Leave out to see what the table covers.",
+      "type": "number"
+    },
+    "id": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "The drain current to size the width for, e.g. \"50u\"."
+    },
+    "l": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Channel length, e.g. \"0.5u\"."
+    },
+    "pdk": {
+      "description": "A registered PDK. Default: the project's, or the only one registered.",
+      "type": "string"
+    },
+    "refresh": {
+      "default": false,
+      "description": "Rebuild the table even when a cached one matches the PDK.",
+      "type": "boolean"
+    },
+    "vds": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Drain-source voltage magnitude. Default: half the device's supply."
+    },
+    "w": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ],
+      "description": "Or a width, to get the current it carries at this gm/Id."
+    }
+  },
+  "required": [
+    "device"
   ],
   "type": "object"
 }

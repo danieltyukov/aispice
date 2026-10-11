@@ -104,6 +104,7 @@ pub fn job(text: &str, run_dir: &Path, name: &str) -> SimJob {
         run_dir: run_dir.to_path_buf(),
         deck_name: name.to_string(),
         timeout: Duration::from_secs(120),
+        pdk: None,
     }
 }
 

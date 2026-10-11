@@ -3,6 +3,7 @@
 mod cmd_agent;
 mod cmd_eval;
 mod cmd_files;
+mod cmd_pdk;
 mod cmd_sim;
 mod mcp;
 
@@ -138,6 +139,39 @@ enum Command {
         #[arg(long, default_value_t = 900, value_name = "SECONDS")]
         timeout: u64,
     },
+    /// Register and inspect process design kits for IC design.
+    Pdk {
+        #[command(subcommand)]
+        action: PdkAction,
+    },
+    /// Size a PDK transistor by gm/Id: W and VGS for a gm/Id, length and
+    /// current (tables are built on ngspice once and cached).
+    Gmid {
+        /// The transistor, e.g. sg13_lv_nmos.
+        device: String,
+        /// A registered PDK (default: the current folder's aispice.toml, or
+        /// the only registered one).
+        #[arg(long)]
+        pdk: Option<String>,
+        /// Target gm/Id in S/A, e.g. 12.
+        #[arg(long = "gm-id", value_name = "S/A")]
+        gm_id: Option<f64>,
+        /// Channel length, e.g. 0.5u.
+        #[arg(long, value_name = "LENGTH")]
+        l: Option<String>,
+        /// Drain current to size for, e.g. 50u.
+        #[arg(long, value_name = "CURRENT")]
+        id: Option<String>,
+        /// Or a width, to get its current.
+        #[arg(long, value_name = "WIDTH")]
+        w: Option<String>,
+        /// Drain-source voltage magnitude (default: half the supply).
+        #[arg(long, value_name = "VOLTS")]
+        vds: Option<String>,
+        /// Rebuild the table even if a cached one matches.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Check simulators, LTspice's library and model provider keys.
     Doctor,
     /// Manage model provider API keys (kept in the OS keychain).
@@ -162,6 +196,19 @@ enum KeysAction {
     Rm { provider: String },
     /// Show which providers have a key and where it comes from.
     List,
+}
+
+#[derive(Subcommand)]
+enum PdkAction {
+    /// Check a PDK folder and register it under a name (an IHP-Open-PDK
+    /// checkout or its ihp-sg13g2 folder).
+    Add { name: String, path: PathBuf },
+    /// List the registered PDKs.
+    List,
+    /// Describe a registered PDK: models, corner libraries, devices.
+    Show { name: String },
+    /// Unregister a PDK (its files are left alone).
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -260,6 +307,28 @@ fn run(cli: Cli) -> Result<ExitCode> {
             symbols: cli.symbols,
             json: cli.json,
         }),
+        Command::Pdk { action } => match action {
+            PdkAction::Add { name, path } => cmd_pdk::add(&name, &path, cli.json),
+            PdkAction::List => cmd_pdk::list(cli.json),
+            PdkAction::Show { name } => cmd_pdk::show(&name, cli.json),
+            PdkAction::Remove { name } => cmd_pdk::remove(&name),
+        },
+        Command::Gmid {
+            device,
+            pdk,
+            gm_id,
+            l,
+            id,
+            w,
+            vds,
+            refresh,
+        } => cmd_pdk::gmid(
+            serde_json::json!({
+                "device": device, "pdk": pdk, "gm_id": gm_id, "l": l, "id": id,
+                "w": w, "vds": vds, "refresh": refresh,
+            }),
+            cli.json,
+        ),
         Command::Doctor => cmd_agent::doctor(cli.json),
         Command::Keys { action } => match action {
             KeysAction::Set { provider } => cmd_agent::keys_set(&provider),

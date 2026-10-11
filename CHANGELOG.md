@@ -4,6 +4,19 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- PDK registry: `aispice pdk add <name> <path>` checks and registers an installed PDK (IHP SG13G2 from IHP-Open-PDK first) in `pdks.toml` beside `config.toml`; `list`, `show` and `remove` manage it, and `aispice doctor` lists it. Only the user registers a PDK; the agent and MCP clients can read the registry but not change it.
+- A project uses a registered PDK with `pdk = "<name>"` in `aispice.toml` at its root. Its netlists then end with the PDK's model header, one `.lib <corner library> <section>` line per device class the circuit uses (`mos_tt`, `res_typ`, `cap_typ`, `dio_tt`, `hbt_typ`), and runs load the PDK's compiled device models: OSDI files through the `.spiceinit` aispice writes for ngspice (which then runs in its native mode), plugins through `-plugin` for Xyce. LTspice and Spectre are refused for PDK projects. Board-level projects are unchanged.
+- IHP SG13G2 device symbols (`sg13g2\sg13_lv_nmos`, `sg13_lv_pmos`, `sg13_hv_nmos`, `sg13_hv_pmos`, `rsil`, `rppd`, `rhigh`, `cap_cmim`, `npn13G2`, `npn13G2l`, `npn13G2v`) that netlist as the PDK's subcircuits with IHP's default sizes, lint, render and take edits; new instances are named M1, R1, C1, Q1.
+- `pdk` tool: list registered PDKs, describe one (compiled models, corner libraries and their sections, the header aispice adds), list its devices, and make the open project use one.
+- `gm_id` tool and `aispice gmid`: size a PDK transistor by gm/Id from a lookup table built on ngspice over L, VDS and VGS and cached under the user cache folder by PDK commit, then checked and corrected by simulating the device at the size found.
+- `xyce_path` setting for a Xyce built with plugin support.
+
+### Security
+
+- The netlist policy trusts registered PDK folders as include roots, still checking their files with every rule except the path heuristic their expressions trip (`w/ng`). Includes of compiled libraries (`.osdi`, `.so`, `.dll`, `.dylib`, `.cm`) and `osdi` lines are refused; `pre_osdi`, `codemodel` and `.control` stay refused. Compiled models load only from inside a registered PDK, after a check that rejects paths through symlinks or with quotes, commas or `$`.
+
 ## [0.2.0]
 
 A rewrite. aispice is now one Rust engine with three front ends: a desktop app, a command line tool and an MCP server.
