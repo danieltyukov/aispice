@@ -1,0 +1,37 @@
+id = "ota5t"
+title = "Five-transistor OTA (IHP SG13G2)"
+category = "ic"
+pdk = "ihp-sg13g2"
+description = "Single-stage operational transconductance amplifier on IHP SG13G2 low-voltage devices: NMOS input pair M1-M2, PMOS mirror load M3-M4, tail M5 mirrored from M6 with IB = 20 uA, into a 1 pF load. The inputs sit at 0.7 V, so the output can close a unity-gain follower. The open-loop AC run gives about 26 dB of gain, 22 MHz unity-gain frequency and more than 80 degrees of phase margin at 27 C; the specs hold at every process corner from -40 C to 125 C. IHP's NMOS has a low intrinsic gain, so the gain comes from long input devices (L = 2 um)."
+analysis = ".ac dec 20 1 10G"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
+simulators = ["ngspice", "xyce"]
+specs = """
+gain = gain_db_at(V(out), 10) >= 24
+gbw = unity_gain_freq(V(out)) >= 15Meg
+pm = phase_margin(V(out)) >= 70
+"""
+
+[layout]
+generator = "ota5t"
+roles = { pair = ["M1", "M2"], load = ["M3", "M4"], tail = "M5", bias = "M6" }
+
+[[parameters]]
+part = "M1"
+controls = "Transconductance and so the unity-gain frequency (width, with M2 kept equal), and the gain (length)"
+equation = "GBW = gm1 / (2 pi CL); gain = gm1 / (gds2 + gds4); gm1 / Id about 15 S/A here, chosen with the gm_id tool"
+
+[[parameters]]
+part = "IB"
+controls = "The tail current, which sets gm and the bandwidth (and the power)"
+equation = "Itail = IB (W5/L5) / (W6/L6); gm1 = (gm/Id) Itail / 2"
+
+[[parameters]]
+part = "M3"
+controls = "The load mirror (with M4): its length raises the gain, its gate capacitance sets the mirror pole"
+equation = "gain = gm1 / (gds2 + gds4); mirror pole about gm3 / (2 (Cgs3 + Cgs4))"
+
+[[parameters]]
+part = "CL"
+controls = "The load the OTA drives"
+equation = "GBW = gm1 / (2 pi CL)"
