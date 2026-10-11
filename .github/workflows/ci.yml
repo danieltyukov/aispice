@@ -121,7 +121,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/pdk
-          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0-klayout
+          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0-generic-klayout
 
       - name: Fetch IHP-Open-PDK at the pinned commit
         if: steps.pdk-cache.outputs.cache-hit != 'true'
@@ -149,7 +149,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/openvaf"
           tar -xzf "$RUNNER_TEMP/openvaf.tar.gz" -C "$RUNNER_TEMP/openvaf"
           cd ~/pdk/IHP-Open-PDK/ihp-sg13g2/libs.tech/verilog-a
-          PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh
+          # Generic CPU code: OpenVAF targets the build machine's CPU by
+          # default, and the cached models run on other runners, where
+          # native code can stop ngspice before it writes any results.
+          PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh --compile-model-generic
           ls -l ../ngspice/osdi
 
       - name: Install KLayout
