@@ -88,6 +88,14 @@ SYMATTR Value 0.6
 TEXT 0 400 Left 2 !.ac dec 20 1 10G
 ";
 
+/// A two-stage Miller op-amp on the same bias, as a netlist: the OTA's first
+/// stage, a PMOS second stage with its NMOS sink and a 10 x 10 um MIM
+/// capacitor (15 x 15 um) from the first stage's output to the output, into 0.5 pF. Its gain is too
+/// high to bias open loop, so a 1 GH inductor closes the loop at DC and a
+/// 1 F capacitor grounds that input for AC. The second stage inverts, so
+/// the loop closes on inp and the signal goes into inm.
+const TWO_STAGE: &str = "* two-stage Miller op-amp\nVDD vdd 0 1.2\nVM inm 0 0.6 AC 1\nLFB out inp 1G\nCFB inp 0 1\nIB vdd vbn 20u\nCL out 0 0.5p\nXM1 x inp tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM2 out1 inm tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM3 x x vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM4 out1 x vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\nXM8 vbn vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\nXM6 out out1 vdd vdd sg13_lv_pmos w=16u l=0.5u ng=1 m=1\nXM7 out vbn 0 0 sg13_lv_nmos w=8u l=1u ng=1 m=1\nXC1 out1 out cap_cmim w=15u l=15u m=1\n.ac dec 20 1 10G\n.end\n";
+
 const SPECS: &str = "gain = gain_db_at(V(out), 10) >= 20\ngbw = unity_gain_freq(V(out)) >= 1Meg\npm = phase_margin(V(out)) >= 45\n";
 
 fn workspace() -> Option<(tempfile::TempDir, Arc<Workspace>)> {
@@ -111,6 +119,7 @@ fn workspace() -> Option<(tempfile::TempDir, Arc<Workspace>)> {
     }
     std::fs::write(dir.path().join(PROJECT_FILE), "pdk = \"ihp-sg13g2\"\n").unwrap();
     std::fs::write(dir.path().join("ota.asc"), OTA).unwrap();
+    std::fs::write(dir.path().join("two_stage.cir"), TWO_STAGE).unwrap();
     let runner = Runner::new(RunnerConfig {
         pdks,
         embedded_models_only: true,
@@ -205,4 +214,40 @@ async fn the_ota_is_laid_out_checked_extracted_and_simulated_after_layout() {
         assert!(gbw1 < gbw0 && gbw1 > 0.7 * gbw0, "{gbw0} {gbw1}");
         assert!(pm1 > 45.0, "{pm1}");
     }
+}
+
+#[tokio::test]
+async fn the_two_stage_op_amp_is_laid_out_and_simulated_after_layout() {
+    let Some((_dir, ws)) = workspace() else {
+        return;
+    };
+    let out = call(
+        &ws,
+        "layout",
+        json!({"action": "generate", "circuit": "two_stage.cir", "template": "two_stage"}),
+    )
+    .await;
+    let v = &out.data.as_ref().unwrap()["value"];
+    assert_eq!(v["drc"]["rules"], json!([]), "DRC clean");
+    assert_eq!(v["lvs"]["matched"], json!(true), "LVS clean");
+    let specs = "gain = gain_db_at(V(out), 10) >= 50\ngbw = unity_gain_freq(V(out)) >= 1Meg\npm = phase_margin(V(out)) >= 30\n";
+    let out = call(
+        &ws,
+        "check_specs",
+        json!({"circuit": "two_stage.cir", "specs": specs, "save": false,
+               "post_layout": {"layout": "two_stage.gds"}}),
+    )
+    .await;
+    let v = &out.data.as_ref().unwrap()["value"];
+    let (gbw0, gbw1) = (row(&v["pre"], "gbw"), row(&v["post"], "gbw"));
+    let (pm0, pm1) = (row(&v["pre"], "pm"), row(&v["post"], "pm"));
+    eprintln!(
+        "two-stage: GBW {:.3} MHz -> {:.3} MHz, PM {:.2} -> {:.2} deg",
+        gbw0 / 1e6,
+        gbw1 / 1e6,
+        pm0,
+        pm1
+    );
+    assert!(gbw1 > 0.5 * gbw0 && gbw1 < 1.5 * gbw0, "{gbw0} {gbw1}");
+    assert!(pm1 > 30.0, "{pm1}");
 }

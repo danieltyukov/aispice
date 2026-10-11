@@ -8,6 +8,7 @@
 //! a `<cell>.layout.json` beside it recording how it was made, which LVS
 //! and post-layout simulation read back.
 
+pub mod cap;
 pub mod plan;
 pub mod route;
 pub mod row;
@@ -223,6 +224,15 @@ impl Generated {
             m.size_um[1]
         );
         for r in &m.rows {
+            if r["kind"] == "mim" {
+                t.push_str(&format!(
+                    "  capacitor {}: MIM {} x {} um\n",
+                    r["name"].as_str().unwrap_or(""),
+                    r["finger_width_um"],
+                    r["length_um"]
+                ));
+                continue;
+            }
             t.push_str(&format!(
                 "  row {}: {} fingers {} um wide, L {} um; order {}\n",
                 r["name"].as_str().unwrap_or(""),
@@ -284,12 +294,16 @@ pub fn generate(
     params.check()?;
     tools::check_name("cell", cell).map_err(|e| e.to_string())?;
     let mos = templates::mosfets(netlist)?;
-    let block = templates::block(template, &mos, roles)?;
-    let rows = block
+    let caps = templates::caps(netlist)?;
+    let block = templates::block(template, &mos, &caps, roles)?;
+    let mut rows = block
         .rows
         .iter()
         .map(|r| row::build(r, params))
         .collect::<Result<Vec<_>, _>>()?;
+    for c in &block.caps {
+        rows.push(cap::build(c)?);
+    }
     let ports = crate::lvs::block_ports(netlist, Some(&block.elements));
     let (plan, spine) = route::assemble(cell, &rows, &ports, params);
     let bbox = plan.bbox().unwrap_or(plan::Rect::new(0, 0, 0, 0));

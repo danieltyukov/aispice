@@ -6,6 +6,7 @@
 //! topology it expects (the pair's sources share the tail's drain, the load
 //! is a mirror, ...) and says what differs.
 
+use super::cap::CapSpec;
 use super::row::{Island, Kind, RowDev, RowSpec};
 use super::{RoleDevices, Roles, rules};
 use aispice_core::netlist::{Line, Netlist};
@@ -27,6 +28,10 @@ pub enum Template {
     /// (the inputs), `latch_n` and `latch_p` (the cross-coupled pairs) and
     /// `reset` (the clocked precharge devices).
     Comparator,
+    /// Two-stage Miller op-amp: the OTA's roles plus `cs` (the second
+    /// stage), `sink` (its current source, mirrored from the tail) and `cc`
+    /// (the cap_cmim compensation capacitor).
+    TwoStage,
 }
 
 impl Template {
@@ -36,6 +41,7 @@ impl Template {
             Template::DiffPair => "diff_pair",
             Template::Ota5t => "ota5t",
             Template::Comparator => "comparator",
+            Template::TwoStage => "two_stage",
         }
     }
 }
@@ -142,6 +148,8 @@ pub fn mosfets(netlist: &Netlist) -> Result<Vec<Mos>, String> {
 /// drawn and the roles as resolved.
 pub struct Block {
     pub rows: Vec<RowSpec>,
+    /// Capacitors, each a row of its own above the transistors.
+    pub caps: Vec<CapSpec>,
     pub elements: Vec<String>,
     pub roles: Roles,
 }
@@ -250,7 +258,7 @@ fn names(devs: &[&Mos]) -> RoleDevices {
 }
 
 /// Fill in a role map from the topology when none was given.
-fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
+fn auto_roles(template: Template, mos: &[Mos], caps: &[Cap]) -> Result<Roles, String> {
     let mut r = Roles::new();
     let ask = |what: &str| {
         format!(
@@ -262,6 +270,8 @@ fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
                     r#"{"pair": ["M1", "M2"], "load": ["M3", "M4"], "tail": "M5", "bias": "M6"}"#,
                 Template::Comparator =>
                     r#"{"tail": "M0", "pair": ["M1", "M2"], "latch_n": ["M3", "M4"], "latch_p": ["M5", "M6"], "reset": ["M7", "M8", "M9", "M10"]}"#,
+                Template::TwoStage =>
+                    r#"{"pair": ["M1", "M2"], "load": ["M3", "M4"], "tail": "M5", "bias": "M8", "cs": "M6", "sink": "M7", "cc": "C1"}"#,
             }
         )
     };
@@ -303,7 +313,7 @@ fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
             };
             r.insert("pair".into(), names(&[a, b]));
         }
-        Template::Ota5t => {
+        Template::Ota5t | Template::TwoStage => {
             let [(a, b)] = pairs.as_slice() else {
                 return Err(ask("input pair"));
             };
@@ -335,6 +345,41 @@ fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
             r.insert("tail".into(), names(&[tail]));
             if let [bias] = bias.as_slice() {
                 r.insert("bias".into(), names(&[bias]));
+            }
+            if template == Template::TwoStage {
+                let firsts = [&a.dev.d, &b.dev.d];
+                let cs: Vec<&Mos> = mos
+                    .iter()
+                    .filter(|m| m.kind != a.kind && firsts.contains(&&m.dev.g) && !load.contains(m))
+                    .collect();
+                let [cs] = cs.as_slice() else {
+                    return Err(ask("second stage"));
+                };
+                let sink: Vec<&Mos> = mos
+                    .iter()
+                    .filter(|m| {
+                        m.kind == a.kind
+                            && m.dev.g == tail.dev.g
+                            && *m != *tail
+                            && (m.dev.d == cs.dev.d || m.dev.s == cs.dev.d)
+                    })
+                    .collect();
+                let [sink] = sink.as_slice() else {
+                    return Err(ask("output sink"));
+                };
+                let cc: Vec<&Cap> = caps
+                    .iter()
+                    .filter(|c| {
+                        let n = [&c.plus, &c.minus];
+                        n.contains(&&cs.dev.g) && n.contains(&&cs.dev.d)
+                    })
+                    .collect();
+                let [cc] = cc.as_slice() else {
+                    return Err(ask("compensation capacitor"));
+                };
+                r.insert("cs".into(), names(&[cs]));
+                r.insert("sink".into(), names(&[sink]));
+                r.insert("cc".into(), RoleDevices::One(cc.name.clone()));
             }
         }
         Template::Comparator => {
@@ -413,9 +458,14 @@ fn cross_coupled(a: &Mos, b: &Mos, src_a: &str, src_b: &str) -> bool {
 }
 
 /// Check a circuit against a template and lay its devices into rows.
-pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, String> {
+pub fn block(
+    template: Template,
+    mos: &[Mos],
+    caps: &[Cap],
+    given: &Roles,
+) -> Result<Block, String> {
     let roles = if given.is_empty() {
-        auto_roles(template, mos)?
+        auto_roles(template, mos, caps)?
     } else {
         given.clone()
     };
@@ -424,6 +474,7 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
         Template::DiffPair => &["pair"],
         Template::Ota5t => &["pair", "load", "tail", "bias"],
         Template::Comparator => &["tail", "pair", "latch_n", "latch_p", "reset"],
+        Template::TwoStage => &["pair", "load", "tail", "bias", "cs", "sink", "cc"],
     };
     if let Some(k) = roles.keys().find(|k| !expected.contains(&k.as_str())) {
         return Err(format!(
@@ -433,6 +484,8 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
         ));
     }
     let mut used: Vec<&Mos> = Vec::new();
+    let mut cap_list: Vec<CapSpec> = Vec::new();
+    let mut cap_elements: Vec<String> = Vec::new();
     let rows = match template {
         Template::CurrentMirror => {
             let rf = need(mos, &roles, "ref", Some(1))?[0];
@@ -467,80 +520,98 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
             vec![row("pair", &pair)?]
         }
         Template::Ota5t => {
-            let pair = need(mos, &roles, "pair", Some(2))?;
-            let load = need(mos, &roles, "load", Some(2))?;
-            let tail = need(mos, &roles, "tail", Some(1))?[0];
-            let bias = role(mos, &roles, "bias")?.unwrap_or_default();
-            if bias.len() > 1 {
-                return Err("role `bias` takes one device".into());
-            }
-            let tail_net = check_pair(&pair)?;
-            if pair[0].dev.w != pair[1].dev.w {
-                return Err(format!(
-                    "the pair {} and {} differ in width",
-                    pair[0].short(),
-                    pair[1].short()
-                ));
-            }
-            if tail.kind != pair[0].kind {
-                return Err(format!("the tail {} is not the pair's type", tail.short()));
-            }
-            if tail.dev.d != tail_net && tail.dev.s != tail_net {
-                return Err(format!(
-                    "the tail {} does not connect to the pair's source net {tail_net}",
-                    tail.short()
-                ));
-            }
-            if load[0].kind == pair[0].kind {
-                return Err("the load must be the opposite type of the pair".into());
-            }
-            let load_src = common_source(&load, "load")?;
-            if load[0].dev.g != load[1].dev.g {
-                return Err(format!(
-                    "the load {} and {} do not share a gate: it should be a current mirror",
-                    load[0].short(),
-                    load[1].short()
-                ));
-            }
-            if !load
-                .iter()
-                .any(|l| l.dev.g == l.dev.d || l.dev.g == l.dev.s)
-            {
-                return Err("neither load device is diode-connected".into());
-            }
-            let pd: Vec<&String> = pair.iter().map(|p| drain(p, &tail_net)).collect();
-            let ld: Vec<&String> = load.iter().map(|l| drain(l, &load_src)).collect();
-            if !(pd.contains(&ld[0]) && pd.contains(&ld[1])) {
-                return Err(format!(
-                    "the load drains ({}, {}) are not the pair drains ({}, {})",
-                    ld[0], ld[1], pd[0], pd[1]
-                ));
-            }
-            let mut tail_row = vec![tail];
-            if let Some(b) = bias.first() {
-                if b.dev.g != tail.dev.g || b.dev.g != b.dev.d {
-                    return Err(format!(
-                        "the bias {} should be diode-connected on the tail's gate {}",
-                        b.short(),
-                        tail.dev.g
-                    ));
-                }
-                tail_row.push(b);
-            }
-            used.extend(&pair);
-            used.extend(&load);
-            used.extend(&tail_row);
+            let core = ota_core(mos, &roles)?;
+            used.extend(&core.pair);
+            used.extend(&core.load);
+            used.extend(&core.tail_row);
             let rows = vec![
-                row("tail", &tail_row)?,
-                row("pair", &pair)?,
-                row("load", &load)?,
+                row("tail", &core.tail_row)?,
+                row("pair", &core.pair)?,
+                row("load", &core.load)?,
             ];
             // N rows sit below P rows, so the n-well is at the top.
-            if pair[0].kind == Kind::Nmos {
+            if core.pair[0].kind == Kind::Nmos {
                 rows
             } else {
                 rows.into_iter().rev().collect()
             }
+        }
+        Template::TwoStage => {
+            let core = ota_core(mos, &roles)?;
+            let cs = need(mos, &roles, "cs", Some(1))?[0];
+            let sink = need(mos, &roles, "sink", Some(1))?[0];
+            let cc = need_cap(caps, &roles, "cc")?;
+            if core.pair[0].kind != Kind::Nmos {
+                return Err("the two-stage generator takes an NMOS input pair".into());
+            }
+            if cs.kind == core.pair[0].kind || cs.dev.g != core.out1 {
+                return Err(format!(
+                    "the second stage {} should be the load's type with its gate on the first stage's output {}",
+                    cs.short(),
+                    core.out1
+                ));
+            }
+            if cs.dev.s != core.load_src && cs.dev.d != core.load_src {
+                return Err(format!(
+                    "the second stage {} does not sit on the load's supply {}",
+                    cs.short(),
+                    core.load_src
+                ));
+            }
+            let out = drain(cs, &core.load_src).clone();
+            let tail = core.tail_row[0];
+            let tail_src = drain(tail, &core.tail_net).clone();
+            if sink.kind != tail.kind
+                || sink.dev.g != tail.dev.g
+                || (sink.dev.d != out && sink.dev.s != out)
+            {
+                return Err(format!(
+                    "the output sink {} should mirror the tail (gate {}) into the output {out}",
+                    sink.short(),
+                    tail.dev.g
+                ));
+            }
+            let nets = [&cc.plus, &cc.minus];
+            if !(nets.contains(&&core.out1) && nets.contains(&&out)) {
+                return Err(format!(
+                    "the compensation capacitor {} should join {} and {out}",
+                    cc.name, core.out1
+                ));
+            }
+            if drain(sink, &out) != &tail_src {
+                return Err(format!(
+                    "the output sink {} does not share the tail's source {tail_src}",
+                    sink.short()
+                ));
+            }
+            let mut tail_row = core.tail_row.clone();
+            tail_row.push(sink);
+            used.extend(&core.pair);
+            used.extend(&core.load);
+            used.extend(&tail_row);
+            used.push(cs);
+            cap_list.push(CapSpec {
+                name: cc.name.clone(),
+                w: cc.w,
+                l: cc.l,
+                top: cc.plus.clone(),
+                bottom: cc.minus.clone(),
+            });
+            cap_elements.push(cc.element.clone());
+            let load_row = if cs.dev.l == core.load[0].dev.l {
+                // One row, the mirror and the second stage on two islands.
+                let mut r = row("load", &core.load)?;
+                r.islands.push(Island {
+                    devices: vec![cs.dev.clone()],
+                    source: core.load_src.clone(),
+                });
+                vec![r]
+            } else {
+                vec![row("load", &core.load)?, row("cs", &[cs])?]
+            };
+            let mut rows = vec![row("tail", &tail_row)?, row("pair", &core.pair)?];
+            rows.extend(load_row);
+            rows
         }
         Template::Comparator => {
             let tail = need(mos, &roles, "tail", Some(1))?[0];
@@ -636,11 +707,171 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
             n_bulk[0], b
         ));
     }
+    let mut elements: Vec<String> = used.iter().map(|m| m.element.clone()).collect();
+    elements.extend(cap_elements);
     Ok(Block {
         rows,
-        elements: used.iter().map(|m| m.element.clone()).collect(),
+        caps: cap_list,
+        elements,
         roles,
     })
+}
+
+/// The checked parts of a five-transistor OTA, shared by the templates
+/// built on one.
+struct OtaCore<'a> {
+    pair: Vec<&'a Mos>,
+    load: Vec<&'a Mos>,
+    /// The tail, then the bias diode when there is one.
+    tail_row: Vec<&'a Mos>,
+    tail_net: String,
+    load_src: String,
+    /// The first stage's output: the drain on the load's non-diode side.
+    out1: String,
+}
+
+fn ota_core<'a>(mos: &'a [Mos], roles: &Roles) -> Result<OtaCore<'a>, String> {
+    let pair = need(mos, roles, "pair", Some(2))?;
+    let load = need(mos, roles, "load", Some(2))?;
+    let tail = need(mos, roles, "tail", Some(1))?[0];
+    let bias = role(mos, roles, "bias")?.unwrap_or_default();
+    if bias.len() > 1 {
+        return Err("role `bias` takes one device".into());
+    }
+    let tail_net = check_pair(&pair)?;
+    if pair[0].dev.w != pair[1].dev.w {
+        return Err(format!(
+            "the pair {} and {} differ in width",
+            pair[0].short(),
+            pair[1].short()
+        ));
+    }
+    if tail.kind != pair[0].kind {
+        return Err(format!("the tail {} is not the pair's type", tail.short()));
+    }
+    if tail.dev.d != tail_net && tail.dev.s != tail_net {
+        return Err(format!(
+            "the tail {} does not connect to the pair's source net {tail_net}",
+            tail.short()
+        ));
+    }
+    if load[0].kind == pair[0].kind {
+        return Err("the load must be the opposite type of the pair".into());
+    }
+    let load_src = common_source(&load, "load")?;
+    if load[0].dev.g != load[1].dev.g {
+        return Err(format!(
+            "the load {} and {} do not share a gate: it should be a current mirror",
+            load[0].short(),
+            load[1].short()
+        ));
+    }
+    let Some(out1) = load
+        .iter()
+        .find(|l| l.dev.g != *drain(l, &load_src))
+        .map(|l| drain(l, &load_src).clone())
+    else {
+        return Err("both load devices are diode-connected".into());
+    };
+    if !load.iter().any(|l| l.dev.g == *drain(l, &load_src)) {
+        return Err("neither load device is diode-connected".into());
+    }
+    let pd: Vec<&String> = pair.iter().map(|p| drain(p, &tail_net)).collect();
+    let ld: Vec<&String> = load.iter().map(|l| drain(l, &load_src)).collect();
+    if !(pd.contains(&ld[0]) && pd.contains(&ld[1])) {
+        return Err(format!(
+            "the load drains ({}, {}) are not the pair drains ({}, {})",
+            ld[0], ld[1], pd[0], pd[1]
+        ));
+    }
+    let mut tail_row = vec![tail];
+    if let Some(b) = bias.first() {
+        if b.dev.g != tail.dev.g || b.dev.g != b.dev.d {
+            return Err(format!(
+                "the bias {} should be diode-connected on the tail's gate {}",
+                b.short(),
+                tail.dev.g
+            ));
+        }
+        tail_row.push(b);
+    }
+    Ok(OtaCore {
+        pair,
+        load,
+        tail_row,
+        tail_net,
+        load_src,
+        out1,
+    })
+}
+
+/// A PDK MIM capacitor from the netlist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cap {
+    pub element: String,
+    pub name: String,
+    pub w: i64,
+    pub l: i64,
+    pub plus: String,
+    pub minus: String,
+}
+
+/// The `cap_cmim` capacitors at the top level of a netlist.
+pub fn caps(netlist: &Netlist) -> Result<Vec<Cap>, String> {
+    let mut out = Vec::new();
+    for e in netlist.elements() {
+        if e.letter() != 'X'
+            || !e
+                .first_word()
+                .is_some_and(|w| w.eq_ignore_ascii_case("cap_cmim"))
+        {
+            continue;
+        }
+        let device = aispice_core::pdk::device("cap_cmim").expect("a PDK device");
+        let rest = e.rest.split_once(char::is_whitespace).map_or("", |x| x.1);
+        let get = |k: &str| param(rest, device.params, k).unwrap_or(0.0);
+        if get("m") != 1.0 {
+            return Err(format!(
+                "{} has m={}; the generator draws m=1",
+                e.name,
+                get("m")
+            ));
+        }
+        let nm = |v: f64, what: &str| {
+            rules::um_to_nm(v * 1e6)
+                .ok_or_else(|| format!("{} has {what} off the 5 nm grid", e.name))
+        };
+        if e.nodes.len() != 2 {
+            return Err(format!("{} should have two nodes", e.name));
+        }
+        out.push(Cap {
+            element: e.name.clone(),
+            name: e
+                .name
+                .strip_prefix(['X', 'x'])
+                .unwrap_or(&e.name)
+                .to_string(),
+            w: nm(get("w"), "w")?,
+            l: nm(get("l"), "l")?,
+            plus: e.nodes[0].clone(),
+            minus: e.nodes[1].clone(),
+        });
+    }
+    Ok(out)
+}
+
+fn need_cap<'a>(caps: &'a [Cap], roles: &Roles, key: &str) -> Result<&'a Cap, String> {
+    let names = roles
+        .get(key)
+        .ok_or_else(|| format!("the role map has no `{key}`"))?
+        .names();
+    let [name] = names.as_slice() else {
+        return Err(format!("role `{key}` takes one capacitor"));
+    };
+    let bare = name.strip_prefix(['X', 'x']).unwrap_or(name);
+    caps.iter()
+        .find(|c| c.name.eq_ignore_ascii_case(bare))
+        .ok_or_else(|| format!("no cap_cmim capacitor {name} in the circuit"))
 }
 
 fn drain<'a>(m: &'a Mos, source: &str) -> &'a String {
@@ -684,7 +915,7 @@ mod tests {
         let mos = mosfets(&parse(OTA)).unwrap();
         assert_eq!(mos.len(), 6);
         assert_eq!(mos[4].dev.w, 4000);
-        let b = block(Template::Ota5t, &mos, &Roles::new()).unwrap();
+        let b = block(Template::Ota5t, &mos, &[], &Roles::new()).unwrap();
         assert_eq!(
             b.roles["pair"],
             RoleDevices::Many(vec!["M1".into(), "M2".into()])
@@ -711,16 +942,18 @@ mod tests {
             RoleDevices::Many(vec!["M2".into(), "M4".into()]),
         );
         roles.insert("tail".into(), RoleDevices::One("M5".into()));
-        let e = block(Template::Ota5t, &mos, &roles).err().unwrap();
+        let e = block(Template::Ota5t, &mos, &[], &roles).err().unwrap();
         assert!(e.contains("not the same type"), "{e}");
         let mut roles = Roles::new();
         roles.insert("ref".into(), RoleDevices::One("M4".into()));
         roles.insert("out".into(), RoleDevices::One("M3".into()));
-        let e = block(Template::CurrentMirror, &mos, &roles).err().unwrap();
+        let e = block(Template::CurrentMirror, &mos, &[], &roles)
+            .err()
+            .unwrap();
         assert!(e.contains("not diode-connected"), "{e}");
         let mut roles = Roles::new();
         roles.insert("pear".into(), RoleDevices::One("M4".into()));
-        let e = block(Template::DiffPair, &mos, &roles).err().unwrap();
+        let e = block(Template::DiffPair, &mos, &[], &roles).err().unwrap();
         assert!(e.contains("not one of diff_pair's"), "{e}");
         let e = lookup(&mos, "M9").err().unwrap();
         assert!(e.contains("M1, M2"), "{e}");
@@ -731,7 +964,7 @@ mod tests {
     #[test]
     fn the_comparator_roles_are_found_and_split_into_islands() {
         let mos = mosfets(&parse(STRONGARM)).unwrap();
-        let b = block(Template::Comparator, &mos, &Roles::new()).unwrap();
+        let b = block(Template::Comparator, &mos, &[], &Roles::new()).unwrap();
         assert_eq!(b.roles["tail"], RoleDevices::One("M0".into()));
         assert_eq!(
             b.roles["reset"],
@@ -755,8 +988,36 @@ mod tests {
             "reset".into(),
             RoleDevices::Many(vec!["M6".into(), "M8".into()]),
         );
-        let e = block(Template::Comparator, &mos, &roles).err().unwrap();
+        let e = block(Template::Comparator, &mos, &[], &roles)
+            .err()
+            .unwrap();
         assert!(e.contains("cross-coupled"), "{e}");
+    }
+
+    pub const TWO_STAGE: &str = "* two-stage Miller op-amp\nVDD vdd 0 1.2\nVP inp 0 0.6 AC 0.5\nVM inm 0 0.6 AC -0.5\nIB vdd vbn 20u\nCL out 0 1p\nXM1 x inp tail 0 sg13_lv_nmos w=2u l=0.5u\nXM2 out1 inm tail 0 sg13_lv_nmos w=2u l=0.5u\nXM3 x x vdd vdd sg13_lv_pmos w=4u l=0.5u\nXM4 out1 x vdd vdd sg13_lv_pmos w=4u l=0.5u\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u\nXM8 vbn vbn 0 0 sg13_lv_nmos w=4u l=1u\nXM6 out out1 vdd vdd sg13_lv_pmos w=16u l=0.5u\nXM7 out vbn 0 0 sg13_lv_nmos w=8u l=1u\nXC1 out1 out cap_cmim w=10u l=10u m=1\n.ac dec 20 1 1G\n";
+
+    #[test]
+    fn the_two_stage_roles_are_found_and_checked() {
+        let n = parse(TWO_STAGE);
+        let mos = mosfets(&n).unwrap();
+        let caps = caps(&n).unwrap();
+        assert_eq!(caps[0].w, 10_000);
+        let b = block(Template::TwoStage, &mos, &caps, &Roles::new()).unwrap();
+        assert_eq!(b.roles["cs"], RoleDevices::One("M6".into()));
+        assert_eq!(b.roles["sink"], RoleDevices::One("M7".into()));
+        assert_eq!(b.roles["cc"], RoleDevices::One("C1".into()));
+        let names: Vec<&str> = b.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["tail", "pair", "load"]);
+        assert_eq!(b.rows[2].islands.len(), 2, "mirror and second stage");
+        assert_eq!(b.caps[0].top, "out1");
+        assert!(b.elements.contains(&"XC1".to_string()));
+        // The second stage's gate on the wrong node is named.
+        let mut roles = b.roles.clone();
+        roles.insert("cs".into(), RoleDevices::One("M3".into()));
+        let e = block(Template::TwoStage, &mos, &caps, &roles)
+            .err()
+            .unwrap();
+        assert!(e.contains("first stage's output out1"), "{e}");
     }
 
     #[test]

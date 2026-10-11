@@ -21,14 +21,18 @@ use std::collections::BTreeMap;
 
 /// Widest finger the planner chooses by itself.
 const MAX_FINGER_W: i64 = 2000;
-/// Activ gap between two islands of a row.
-const ISLAND_GAP: i64 = 600;
+/// Activ gap between two islands of a row: the PMOS pcell's pSD reaches
+/// 0.18 um past Activ on each side, and two pSD regions must be 0.31 um
+/// apart (`pSD.b`).
+const ISLAND_GAP: i64 = 800;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Nmos,
     Pmos,
+    /// A MIM capacitor (a row of its own, see `cap`).
+    Mim,
 }
 
 impl Kind {
@@ -36,6 +40,7 @@ impl Kind {
         match self {
             Kind::Nmos => "nmos",
             Kind::Pmos => "pmos",
+            Kind::Mim => "cmim",
         }
     }
 }

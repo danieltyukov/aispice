@@ -44,12 +44,16 @@ top = ly.create_cell(cell_name)
 
 for inst in data["instances"]:
     pcell = inst["pcell"]
-    if pcell not in ("nmos", "pmos"):
+    if pcell not in ("nmos", "pmos", "cmim"):
         raise ValueError("bad pcell %r" % (pcell,))
     w, l, ng = integer(inst["w"]), integer(inst["l"]), integer(inst["ng"])
     if ng < 1 or ng > 1000 or w <= 0 or l <= 0:
         raise ValueError("bad device size")
-    c = ly.create_cell(pcell, "SG13_dev", {"w": um(w), "l": um(l), "ng": ng})
+    if pcell == "cmim":
+        params = {"w": um(w), "l": um(l)}
+    else:
+        params = {"w": um(w), "l": um(l), "ng": ng}
+    c = ly.create_cell(pcell, "SG13_dev", params)
     if c is None:
         raise RuntimeError("pcell %s did not build" % pcell)
     top.insert(pya.CellInstArray(c.cell_index(), pya.Trans(integer(inst["x"]), integer(inst["y"]))))

@@ -4,7 +4,7 @@ Spec: `docs/superpowers/specs/2026-10-11-analog-layout-design.md`. Branch `feat/
 
 ## Tasks
 
-Status 2026-10-11: tasks 1 to 13 done, with the deviations listed under "As built" in the spec. The comparator generator is in; the two-stage op-amp is a follow-up.
+Status 2026-10-11: tasks 1 to 13 done, with the deviations listed under "As built" in the spec. The comparator and two-stage generators are in.
 
 1. **Crate scaffold.** `crates/aispice-layout` with `Tools` (KLayout and Magic paths), the run-folder helper and the argument-vector runner over `aispice_sim::backend::process`. Config fields `klayout_path`, `magic_path`.
 2. **GDS reader** (`gds.rs`): records, structures, references, top cells, limits. Test GDS writer for synthetic fixtures.

@@ -176,9 +176,10 @@ A generator is a deterministic planner: it reads the circuit, checks the topolog
 | `current_mirror` | `ref` (diode-connected), `out` (one or more) |
 | `diff_pair` | `pair` |
 | `ota5t` | `pair`, `load`, `tail`, `bias` (optional) |
+| `two_stage` | the `ota5t` roles plus `cs` (second stage), `sink` (its current source) and `cc` (a `cap_cmim` of at least 2 um a side, drawn above the transistors with both plates brought down to the routing) |
 | `comparator` | `tail`, `pair`, `latch_n`, `latch_p`, `reset` (StrongARM latch) |
 
-Roles are found from the topology when you give none; `--roles '{"pair": ["M1", "M2"], "tail": "M5"}'` names them. Parameters (`--params` as JSON): `pattern` (`common_centroid` or `interdigitated`), `dummies` (0 to 4 per row end), `guard_ring`, `fingers` (of the smallest device in a row; even), `track_pitch` and `row_gap` in um. Devices must be `sg13_lv_nmos` or `sg13_lv_pmos`, sized on the 5 nm grid, with fingers at least 0.3 um wide.
+Roles are found from the topology when you give none; `--roles '{"pair": ["M1", "M2"], "tail": "M5"}'` names them. Parameters (`--params` as JSON): `pattern` (`common_centroid` or `interdigitated`), `dummies` (0 to 4 per row end), `guard_ring`, `fingers` (of the smallest device in a row; even), `track_pitch` and `row_gap` in um. Transistors must be `sg13_lv_nmos` or `sg13_lv_pmos`, sized on the 5 nm grid, with fingers at least 0.3 um wide.
 
 `generate` writes `<cell>.gds` and `<cell>.layout.json` (the template, roles, parameters, the devices drawn and the dummies) and runs DRC and LVS. When DRC fails on a rule a parameter addresses (spacing on the routing layers, wells, latch-up), it changes that parameter and draws again, up to three times. It overwrites only a layout it made itself.
 

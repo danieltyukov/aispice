@@ -20,6 +20,10 @@ pub enum Layer {
     Metal3,
     Via3,
     Metal4,
+    Via4,
+    Metal5,
+    TopVia1,
+    TopMetal1,
 }
 
 impl Layer {
@@ -38,6 +42,10 @@ impl Layer {
             Layer::Metal3 => 30,
             Layer::Via3 => 49,
             Layer::Metal4 => 50,
+            Layer::Via4 => 66,
+            Layer::Metal5 => 67,
+            Layer::TopVia1 => 125,
+            Layer::TopMetal1 => 126,
         }
     }
 
@@ -48,8 +56,10 @@ impl Layer {
             Layer::GatPoly => 180,
             Layer::Cont => 180,
             Layer::Metal1 => 180,
-            Layer::Via1 | Layer::Via2 | Layer::Via3 => 220,
-            Layer::Metal2 | Layer::Metal3 | Layer::Metal4 => 210,
+            Layer::Via1 | Layer::Via2 | Layer::Via3 | Layer::Via4 => 220,
+            Layer::Metal2 | Layer::Metal3 | Layer::Metal4 | Layer::Metal5 => 210,
+            Layer::TopVia1 => 420,
+            Layer::TopMetal1 => 1640,
             Layer::PSd => 310,
             Layer::NWell => 620,
         }
@@ -140,10 +150,11 @@ pub struct Shape {
     pub net: Option<String>,
 }
 
-/// One of IHP's MOS pcells, placed unrotated with its origin at (x, y).
+/// One of IHP's pcells, placed unrotated with its origin at (x, y): a MOS
+/// transistor or a MIM capacitor (`cmim`, `w` by `l`, `ng` 1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PcellInst {
-    /// `nmos` or `pmos`.
+    /// `nmos`, `pmos` or `cmim`.
     pub pcell: String,
     /// Total width over all fingers, nm.
     pub w: i64,
@@ -308,9 +319,26 @@ impl Plan {
 /// have no net.
 pub fn pcell_shapes(i: &PcellInst, nets: &BTreeMap<(i64, i64), String>) -> Vec<Shape> {
     use super::rules::*;
+    let net = |x: i64, y: i64| nets.get(&(x, y)).cloned();
+    if i.pcell == "cmim" {
+        // Measured: Metal5 plate 0.6 um round the MIM, TopMetal1 0.04 um.
+        let m5 = Rect::new(i.x - 600, i.y - 600, i.x + i.w + 600, i.y + i.l + 600);
+        let tm1 = Rect::new(i.x - 40, i.y - 40, i.x + i.w + 40, i.y + i.l + 40);
+        return vec![
+            Shape {
+                layer: Layer::Metal5,
+                rect: m5,
+                net: net(m5.x1, m5.y1),
+            },
+            Shape {
+                layer: Layer::TopMetal1,
+                rect: tm1,
+                net: net(tm1.x1, tm1.y1),
+            },
+        ];
+    }
     let wf = i.w / i.ng.max(1);
     let p = i.l + PCELL_PITCH_EXTRA;
-    let net = |x: i64, y: i64| nets.get(&(x, y)).cloned();
     let mut out = Vec::new();
     let act = Rect::new(i.x, i.y, i.x + PCELL_ACT_END + i.ng * p, i.y + wf);
     out.push(Shape {

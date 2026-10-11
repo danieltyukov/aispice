@@ -308,7 +308,7 @@ enum LayoutAction {
     /// LVS (exit code 1 when either fails).
     Generate {
         circuit: PathBuf,
-        /// current_mirror, diff_pair, ota5t or comparator.
+        /// current_mirror, diff_pair, ota5t, two_stage or comparator.
         #[arg(long)]
         template: String,
         /// Role map as JSON, e.g. '{"pair": ["M1", "M2"], "tail": "M5"}'

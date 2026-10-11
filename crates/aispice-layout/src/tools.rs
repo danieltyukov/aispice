@@ -1,8 +1,9 @@
 //! Finding and running KLayout and Magic.
 //!
-//! Each run gets a private temporary folder that is also its `HOME` (and
-//! `KLAYOUT_HOME`), so neither program reads the user's or a project's
-//! start-up files, and runs from an argument vector with a timeout and
+//! Each run gets a private temporary folder that is also its `HOME`,
+//! `KLAYOUT_HOME` and `TMPDIR`, so neither program reads the user's or a
+//! project's start-up files or shares temporary files with another run, and
+//! runs from an argument vector with a timeout and
 //! cancellation. Scripts are aispice's own files, written into the folder;
 //! values reach them as `-rd name=value` arguments (KLayout) or environment
 //! variables (Magic), never as script text.
@@ -181,6 +182,13 @@ pub async fn klayout(
     let mut spec = ProcessSpec::new(&exe, dir)
         .env("HOME", dir)
         .env("KLAYOUT_HOME", dir)
+        // IHP's pcell library writes preprocessed modules under fixed names
+        // in the temporary folder and deletes them after loading: a shared
+        // /tmp lets two runs delete each other's files, or a local user
+        // plant one. Each run gets its own.
+        .env("TMPDIR", dir)
+        .env("TMP", dir)
+        .env("TEMP", dir)
         // Batch mode opens no window; this keeps Qt off the display too.
         .env("QT_QPA_PLATFORM", "offscreen")
         .arg("-b")
@@ -211,6 +219,7 @@ pub async fn magic(
     let exe = programs.magic()?;
     let mut spec = ProcessSpec::new(&exe, dir)
         .env("HOME", dir)
+        .env("TMPDIR", dir)
         .arg("-dnull")
         .arg("-noconsole")
         .arg("-rcfile")
@@ -295,7 +304,7 @@ mod tests {
         }
         assert!(check_path(Path::new("relative.gds")).is_err());
         assert!(check_path(Path::new("/tmp/a\nb.gds")).is_err());
-        assert!(check_path(Path::new("/tmp/a.gds")).is_ok());
+        assert!(check_path(&std::env::temp_dir().join("a.gds")).is_ok());
     }
 
     #[test]

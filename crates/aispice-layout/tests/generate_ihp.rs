@@ -379,3 +379,47 @@ async fn a_generated_comparator_is_drc_and_lvs_clean() {
     );
     keep(dir);
 }
+
+const TWO_STAGE: &str = "* two-stage Miller op-amp\nVDD vdd 0 1.2\nVP inp 0 0.6 AC 0.5\nVM inm 0 0.6 AC -0.5\nIB vdd vbn 20u\nCL out 0 1p\nXM1 x inp tail 0 sg13_lv_nmos w=2u l=0.5u\nXM2 out1 inm tail 0 sg13_lv_nmos w=2u l=0.5u\nXM3 x x vdd vdd sg13_lv_pmos w=4u l=0.5u\nXM4 out1 x vdd vdd sg13_lv_pmos w=4u l=0.5u\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u\nXM8 vbn vbn 0 0 sg13_lv_nmos w=4u l=1u\nXM6 out out1 vdd vdd sg13_lv_pmos w=16u l=0.5u\nXM7 out vbn 0 0 sg13_lv_nmos w=8u l=1u\nXC1 out1 out cap_cmim w=10u l=10u m=1\n.ac dec 20 1 1G\n";
+
+#[tokio::test]
+async fn a_generated_two_stage_op_amp_is_drc_and_lvs_clean() {
+    let Some((programs, files)) = setup() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let n = parse(TWO_STAGE);
+    let c = generate_and_check(
+        &programs,
+        &files,
+        &n,
+        Template::TwoStage,
+        &Params::default(),
+        dir.path(),
+        "two_stage",
+    )
+    .await;
+    assert!(c.drc.clean(), "{}", c.drc.to_text());
+    assert!(c.lvs.matched, "{}", c.lvs.to_text());
+    assert_eq!(
+        c.generated.meta.ports,
+        ["0", "inm", "inp", "out", "vbn", "vdd"]
+    );
+    if programs.magic().is_ok() {
+        let ex = extract::run(
+            &programs,
+            &files,
+            &dir.path().join("two_stage.gds"),
+            "two_stage",
+            false,
+            &dir.path().join("ext"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        eprintln!("{}", ex.to_text());
+        assert!(ex.text.contains("cap_cmim"), "{}", ex.text);
+        extract::post_layout(&n, &ex, &c.generated.meta.devices).unwrap();
+    }
+    keep(dir);
+}
