@@ -90,15 +90,16 @@ With `corners`, every corner runs the same `runs` samples (the same seeds, so co
 
 - Tool schemas: the new arguments above, with short descriptions; `MEASURE_SYNTAX` and `SPEC_SYNTAX` list the new kinds and the PSRR convention.
 - `docs/TOOLS.md` regenerated, README features, CHANGELOG under Unreleased, ARCHITECTURE module table.
-- Evals: `noise-divider` (resize a divider to meet an output noise density without changing its ratio, judged with `.noise`) and `temp-corners` (check a circuit over temperature and report the worst-case corner, judged by reading the tool's report). The judge runs derived AC runs and an optional `corners` set from `task.toml`.
+- Evals: `noise-tia` (size a front-end resistor so the input noise current and the output noise voltage at 1 kHz both meet a budget, judged with `.noise`; only one E24 value does) and `temp-corners` (choose C1 so an RC corner stays in band from -40 C to 125 C with a resistor that drifts, judged at every temperature; the value a room-temperature design picks fails at 125 C). The judge runs the derived AC runs and an optional `corners` set from `task.toml`.
 
 ## Public API for later parts
 
-- `aispice_sim::corner::{CornerSet, Supply, Corner, Process, CornerError, CornerReport, CornerRow, apply, variants, summarize, worst_case, preset, parse_section, LibSection, SectionKind, lib_sections, expand_lib_sections}`.
-- `aispice_sim::montecarlo::{Mismatch, McSetup, variants_with, sim_seed, statistical}`.
-- `aispice_sim::noise::{ONOISE, INOISE, integrate_rms, read_xyce_noise_dat}`.
-- `aispice_sim::stimulus::{ac_on, needed_sources, mark, marked_source}`.
+- `aispice_sim::corner::{CornerSet, Supply, Corner, Process, CornerError, CornerReport, CornerRow, apply, variants, set_temperature, summarize, worst_case, preset, parse_section, LibSection, SectionKind, SectionUse, section_uses, set_section, lib_sections, SectionLookup, no_lookup, defines, expand_lib_sections, FAMILIES, MAX_CORNERS}`.
+- `aispice_sim::montecarlo::{Mismatch, variants_with, sim_seed, statistical}`, and `Variant::seed`.
+- `aispice_sim::noise::{ONOISE, INOISE, integrate_rms, read_xyce_noise_dat, merge_xyce_noise, input_source, mark_input_quantity}`.
+- `aispice_sim::stimulus::{ac_on, needed_sources, mark, marked_source, StimulusError}` and `Measure::stimulus_source`.
 - `aispice_sim::optimize::Objective::score_worst`.
+- `aispice_tools::runner::Runner::{policy_for, base_dir}`: the policy every deck is checked against, which also decides which libraries a corner lookup may read. PDK roots belong there.
 - Measurement kinds `output_noise_at`, `input_noise_at`, `output_noise_rms`, `input_noise_rms`, `psrr_db_at`, `cmrr_db_at`.
 - Tool arguments: `check_specs.corners`, `optimize.corners`, `monte_carlo.corners`, `monte_carlo.mismatch`.
 
