@@ -457,8 +457,9 @@ impl Runner {
         }
         // ngspice in its LTspice mode, and LTspice, cannot select a section
         // of a library file, so aispice inlines it, reading only files the
-        // policy approves; the check below sees the result.
-        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) {
+        // policy approves; the check below sees the result. A PDK run puts
+        // ngspice in its native mode, which selects sections itself.
+        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
             let files = LibraryFiles::new(policy.clone(), project.root());
             expand_lib_sections(&deck, &files).map_err(RunError::Netlist)?
         } else {

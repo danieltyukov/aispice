@@ -168,6 +168,26 @@ pub(crate) fn library_files(
     Ok(LibraryFiles::new(ws.runner.policy_for(p, &base), p.root()))
 }
 
+/// The netlist with its PDK's corner libraries as the simulator that will
+/// run it reads them, so corner and mismatch rewrites check the sections of
+/// that simulator's library (IHP's Xyce models, for one, have no
+/// `_mismatch` sections). Unchanged without a PDK; the runner's own
+/// retargeting leaves a retargeted netlist as it is.
+pub(crate) async fn as_simulator_reads_it(
+    ws: &Workspace,
+    p: &Project,
+    netlist: Netlist,
+    simulator: Option<&str>,
+) -> Netlist {
+    let Ok(Some(pdk)) = ws.runner.project_pdk(p) else {
+        return netlist;
+    };
+    match ws.runner.choose_for(simulator, Some(&pdk)).await {
+        Ok(id) => pdk.retarget(&netlist, id.target()),
+        Err(_) => netlist,
+    }
+}
+
 /// The corner report for the model: the summary, each spec's worst case,
 /// then every spec at every corner.
 pub(crate) fn corner_text(r: &CornerReport) -> String {

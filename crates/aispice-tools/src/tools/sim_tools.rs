@@ -624,6 +624,7 @@ async fn check_corners(
         .runner
         .netlist_for(p, circuit)
         .map_err(|e| e.to_string())?;
+    let netlist = analysis::as_simulator_reads_it(ws, p, netlist, simulator).await;
     let sources = analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure))?;
     let variants = corner_variants(ws, p, circuit, &netlist, set)?;
     let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
@@ -1117,6 +1118,8 @@ impl Tool for MonteCarlo {
             Ok(s) => s,
             Err(e) => return ToolOutput::error(e),
         };
+        let netlist =
+            analysis::as_simulator_reads_it(&self.ws, &p, netlist, simulator.as_deref()).await;
         let bases = match &input.corners {
             Some(set) => match corner_variants(&self.ws, &p, &input.circuit, &netlist, set) {
                 Ok(v) => v,
@@ -1194,7 +1197,13 @@ impl Tool for MonteCarlo {
         let y = montecarlo::summarize(&all);
         let mut t = format!("{}\n", y.summary);
         if failed_runs > 0 {
-            t.push_str(&format!("  {failed_runs} run(s) failed to simulate\n"));
+            let first = results
+                .iter()
+                .find_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
+                .unwrap_or_default();
+            t.push_str(&format!(
+                "  {failed_runs} run(s) failed to simulate; the first, {first}\n"
+            ));
         }
         for note in &notes {
             t.push_str(&format!("  note: {note}\n"));
@@ -1322,6 +1331,11 @@ impl Tool for Optimize {
         };
         // The corners, checked against the circuit's libraries once here;
         // candidates differ only in part values.
+        let netlist = if input.corners.is_some() {
+            analysis::as_simulator_reads_it(&self.ws, &p, netlist, input.simulator.as_deref()).await
+        } else {
+            netlist
+        };
         let corners = match &input.corners {
             Some(set) => {
                 if let Err(e) = corner_variants(&self.ws, &p, &input.circuit, &netlist, set) {
