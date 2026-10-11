@@ -247,4 +247,31 @@ mod tests {
         assert!(!is_true("x=false", "x"));
         assert!(!is_true("", "x"));
     }
+
+    /// Random property text never panics, and whatever value is read
+    /// writes back so it reads the same.
+    #[test]
+    fn random_property_text_never_panics() {
+        let alphabet: Vec<char> = "ab=\"\\ ;\n\t{}x1\u{e9}\u{1f600}".chars().collect();
+        let mut rng = crate::xschem::test_rng(0x9e0b_5eed);
+        for _ in 0..4000 {
+            let text: String = (0..rng.below(80))
+                .map(|_| alphabet[rng.below(alphabet.len())])
+                .collect();
+            let list = pairs(&text);
+            let _ = get(&text, "a");
+            let _ = is_true(&text, "b");
+            for (k, v) in &list {
+                if k.is_empty()
+                    || k.chars()
+                        .any(|c| is_space(c) || c == '"' || c == '\\' || c == '=')
+                {
+                    continue;
+                }
+                let again = write(&[(k.clone(), v.clone())]);
+                assert_eq!(get(&again, k).as_deref(), Some(v.as_str()), "{text:?}");
+            }
+            let _ = set(&text, "a", &text);
+        }
+    }
 }

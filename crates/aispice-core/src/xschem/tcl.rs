@@ -10,13 +10,22 @@
 //! commands `expr`, `ev`, `if`, `return` and `sim_is_<simulator>`. Any other
 //! command is an error, never a guess, so a file cannot make aispice do
 //! anything but compute a string.
+//!
+//! The text comes from files aispice did not write, so evaluation is bounded
+//! as well as side-effect free: the input and every intermediate string are
+//! capped, command substitutions, script bodies, parentheses and operator
+//! chains share one nesting limit (the parser recurses, so the limit is what
+//! keeps a hostile file from exhausting the stack), integer arithmetic is
+//! checked, and every scan stops at the end of the text. Any input gives a
+//! string or an error, never a panic.
 
 use std::collections::BTreeMap;
 
-/// Nesting of command substitutions and expressions.
+/// Nesting of command substitutions, script bodies, expressions,
+/// parentheses and unary or `**` chains, together.
 const MAX_DEPTH: usize = 32;
-/// Characters of output, and of any intermediate string.
-const MAX_OUTPUT: usize = 256 * 1024;
+/// Bytes of input, of output, and of any intermediate string.
+pub const MAX_OUTPUT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TclError {
@@ -59,6 +68,9 @@ impl Env {
 /// What xschem's `tclpropeval2` does with a property or netlist line that
 /// starts with `tcleval(`: drop the wrapper and `subst` the rest.
 pub fn tcleval(text: &str, env: &Env) -> Result<String, TclError> {
+    if text.len() > MAX_OUTPUT {
+        return Err(TclError::Limit);
+    }
     let s = text.replace("\\}", "}");
     let s = s.strip_prefix("tcleval(").unwrap_or(&s);
     // The last `)`, keeping the white space after it.
@@ -73,6 +85,9 @@ pub fn tcleval(text: &str, env: &Env) -> Result<String, TclError> {
 /// Tcl's `subst`: backslash, variable and command substitution; braces are
 /// ordinary characters.
 pub fn subst(text: &str, env: &Env) -> Result<String, TclError> {
+    if text.len() > MAX_OUTPUT {
+        return Err(TclError::Limit);
+    }
     let mut i = Interp { env, depth: 0 };
     let chars: Vec<char> = text.chars().collect();
     let mut pos = 0;
@@ -163,7 +178,8 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// The end of a brace group that opens at `pos`, or an error.
+/// The end of a brace group that opens at `pos`, or an error. Iterative, so
+/// any depth of nested braces costs one pass and no stack.
 fn close_brace(chars: &[char], pos: usize) -> Result<usize, TclError> {
     let mut depth = 0usize;
     let mut k = pos;
@@ -172,7 +188,7 @@ fn close_brace(chars: &[char], pos: usize) -> Result<usize, TclError> {
             '\\' => k += 1,
             '{' => depth += 1,
             '}' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Ok(k);
                 }
@@ -198,7 +214,7 @@ fn close_bracket(chars: &[char], pos: usize) -> Result<usize, TclError> {
             }
             '[' => depth += 1,
             ']' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Ok(k);
                 }
@@ -309,7 +325,10 @@ impl Interp<'_> {
     /// The words of the command at `pos`, substituted, and where the next
     /// command starts.
     fn words(&mut self, chars: &[char], mut pos: usize) -> Result<(Vec<String>, usize), TclError> {
-        let mut words = Vec::new();
+        let mut words: Vec<String> = Vec::new();
+        // Bytes in `words`, kept as a running total: summing the list after
+        // every word would be quadratic in the number of words.
+        let mut total = 0usize;
         loop {
             while chars
                 .get(pos)
@@ -359,6 +378,9 @@ impl Interp<'_> {
                                 k += 1;
                             }
                         }
+                        if total + word.len() > MAX_OUTPUT {
+                            return Err(TclError::Limit);
+                        }
                     }
                     words.push(word);
                     pos = k + 1;
@@ -388,11 +410,15 @@ impl Interp<'_> {
                                 pos += 1;
                             }
                         }
+                        if total + word.len() > MAX_OUTPUT {
+                            return Err(TclError::Limit);
+                        }
                     }
                     words.push(word);
                 }
             }
-            if words.iter().map(String::len).sum::<usize>() > MAX_OUTPUT {
+            total += words.last().map_or(0, String::len);
+            if total > MAX_OUTPUT {
                 return Err(TclError::Limit);
             }
         }
@@ -612,8 +638,14 @@ pub fn format_g(v: f64, precision: usize) -> String {
         return tcl_double(v);
     }
     let sci = format!("{:.*e}", p - 1, v);
-    let (mantissa, exp) = sci.split_once('e').expect("exponent form");
-    let exp: i32 = exp.parse().expect("exponent digits");
+    // Rust always writes `<mantissa>e<exponent>` for a finite value; the
+    // fallback only keeps this total.
+    let Some((mantissa, exp)) = sci.split_once('e') else {
+        return sci;
+    };
+    let Ok(exp) = exp.parse::<i32>() else {
+        return sci;
+    };
     let trim = |s: &str| -> String {
         if s.contains('.') {
             s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -637,6 +669,19 @@ struct ExprParser<'a, 'b, 'c> {
 }
 
 impl ExprParser<'_, '_, '_> {
+    /// Run `f` one nesting level deeper. The parser recurses for
+    /// parentheses, function arguments, `?:`, unary operators and `**`, so
+    /// each of those counts against the interpreter's depth limit.
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, TclError>,
+    ) -> Result<T, TclError> {
+        self.interp.enter()?;
+        let r = f(self);
+        self.interp.depth = self.interp.depth.saturating_sub(1);
+        r
+    }
+
     fn skip_space(&mut self) {
         while self.chars.get(self.pos).is_some_and(|c| c.is_whitespace()) {
             self.pos += 1;
@@ -675,16 +720,18 @@ impl ExprParser<'_, '_, '_> {
     }
 
     fn ternary(&mut self) -> Result<Value, TclError> {
-        let cond = self.or()?;
-        if self.eat("?") {
-            let a = self.ternary()?;
-            if !self.eat(":") {
-                return Err(TclError::Expr("`?` without `:`".into()));
+        self.nested(|p| {
+            let cond = p.or()?;
+            if p.eat("?") {
+                let a = p.ternary()?;
+                if !p.eat(":") {
+                    return Err(TclError::Expr("`?` without `:`".into()));
+                }
+                let b = p.ternary()?;
+                return Ok(if cond.truth()? { a } else { b });
             }
-            let b = self.ternary()?;
-            return Ok(if cond.truth()? { a } else { b });
-        }
-        Ok(cond)
+            Ok(cond)
+        })
     }
 
     fn or(&mut self) -> Result<Value, TclError> {
@@ -787,7 +834,7 @@ impl ExprParser<'_, '_, '_> {
         let base = self.unary()?;
         if self.eat("**") {
             // Right associative.
-            let exp = self.power()?;
+            let exp = self.nested(Self::power)?;
             return arith(base, exp, '^');
         }
         Ok(base)
@@ -795,19 +842,22 @@ impl ExprParser<'_, '_, '_> {
 
     fn unary(&mut self) -> Result<Value, TclError> {
         if self.eat("!") {
-            let v = self.unary()?;
+            let v = self.nested(Self::unary)?;
             return Ok(Value::Int((!v.truth()?) as i64));
         }
         if self.peek_str("-") {
             self.pos += 1;
-            return match self.unary()?.numeric()? {
-                Value::Int(i) => Ok(Value::Int(-i)),
+            return match self.nested(Self::unary)?.numeric()? {
+                Value::Int(i) => i
+                    .checked_neg()
+                    .map(Value::Int)
+                    .ok_or_else(|| TclError::Expr("integer overflow".into())),
                 Value::Float(f) => Ok(Value::Float(-f)),
-                Value::Str(_) => unreachable!("numeric"),
+                Value::Str(s) => Err(TclError::Expr(format!("`{s}` is not a number"))),
             };
         }
         if self.eat("+") {
-            return self.unary()?.numeric();
+            return self.nested(Self::unary)?.numeric();
         }
         self.primary()
     }
@@ -957,11 +1007,15 @@ fn arith(a: Value, b: Value, op: char) -> Result<Value, TclError> {
                 if y == 0 {
                     return Err(TclError::Expr("divide by zero".into()));
                 }
-                // Tcl rounds integer division toward minus infinity.
+                // Tcl rounds integer division toward minus infinity. The
+                // one overflowing case, i64::MIN / -1, is an error.
+                let q = floor_div(x, y).ok_or_else(overflow)?;
                 if op == '/' {
-                    floor_div(x, y)
+                    q
                 } else {
-                    x - floor_div(x, y) * y
+                    q.checked_mul(y)
+                        .and_then(|qy| x.checked_sub(qy))
+                        .ok_or_else(overflow)?
                 }
             }
             '^' => {
@@ -971,7 +1025,7 @@ fn arith(a: Value, b: Value, op: char) -> Result<Value, TclError> {
                 let e = u32::try_from(y).map_err(|_| overflow())?;
                 x.checked_pow(e).ok_or_else(overflow)?
             }
-            _ => unreachable!("operator"),
+            other => return Err(TclError::Expr(format!("operator `{other}`"))),
         }));
     }
     let (x, y) = (a.as_f64()?, b.as_f64()?);
@@ -987,16 +1041,18 @@ fn arith(a: Value, b: Value, op: char) -> Result<Value, TclError> {
         }
         '%' => return Err(TclError::Expr("% needs integers".into())),
         '^' => x.powf(y),
-        _ => unreachable!("operator"),
+        other => return Err(TclError::Expr(format!("operator `{other}`"))),
     }))
 }
 
-fn floor_div(x: i64, y: i64) -> i64 {
-    let q = x / y;
-    if (x % y != 0) && ((x < 0) != (y < 0)) {
-        q - 1
+/// Integer division rounded toward minus infinity, or `None` when it
+/// overflows or divides by zero.
+fn floor_div(x: i64, y: i64) -> Option<i64> {
+    let q = x.checked_div(y)?;
+    if (x.checked_rem(y)? != 0) && ((x < 0) != (y < 0)) {
+        q.checked_sub(1)
     } else {
-        q
+        Some(q)
     }
 }
 
@@ -1009,7 +1065,10 @@ fn function(name: &str, args: &[Value]) -> Result<Value, TclError> {
     let float = |v: f64| Ok(Value::Float(v));
     match name {
         "abs" => match args.first().cloned().map(Value::numeric).transpose()? {
-            Some(Value::Int(i)) => Ok(Value::Int(i.abs())),
+            Some(Value::Int(i)) => i
+                .checked_abs()
+                .map(Value::Int)
+                .ok_or_else(|| TclError::Expr("integer overflow".into())),
             _ => float(f(0)?.abs()),
         },
         "sqrt" => float(f(0)?.sqrt()),
@@ -1178,5 +1237,128 @@ mod tests {
         assert!(subst("[expr {(1", &env()).is_err());
         assert!(subst("[if {1}", &env()).is_err());
         assert!(subst("\"unterminated", &env()).is_ok());
+    }
+
+    /// Input that would recurse once per character must stop at the
+    /// nesting limit, quickly, instead of overflowing the stack.
+    #[test]
+    fn hostile_nesting_is_an_error_not_a_crash() {
+        const N: usize = 100_000;
+        let start = std::time::Instant::now();
+        // Each case stays under the input cap, so it is the nesting limit
+        // that stops it.
+        let cases = [
+            format!("[expr {{{}1{}}}]", "(".repeat(N), ")".repeat(N)),
+            format!("[expr {{{}1}}]", "!".repeat(N)),
+            format!("[expr {{{}1}}]", "-".repeat(N)),
+            format!("[expr {{{}1}}]", "+ ".repeat(N)),
+            format!("[expr {{1{}}}]", "**1".repeat(N / 2)),
+            format!("[expr {{{}1{}}}]", "1?".repeat(N / 2), ":1".repeat(N / 2)),
+            format!("[expr {{{}1{}}}]", "abs(".repeat(N / 4), ")".repeat(N / 4)),
+            format!("{}1{}", "[".repeat(N), "]".repeat(N)),
+            format!("{}{}", "[if 1 {".repeat(N / 4), "}]".repeat(N / 4)),
+            format!("{}{}", "[ev {".repeat(N / 4), "}]".repeat(N / 4)),
+        ];
+        for case in &cases {
+            assert!(case.len() <= MAX_OUTPUT, "{}", &case[..40]);
+            assert_eq!(subst(case, &env()), Err(TclError::Limit), "{}", &case[..40]);
+        }
+        // Braces are scanned without recursion: deep but balanced braces
+        // are just a long word.
+        let braces = format!("[expr {{{}x{}}}]", "{".repeat(N), "}".repeat(N));
+        assert!(subst(&braces, &env()).is_ok());
+        let braces = format!("[return {}x{}]", "{".repeat(N), "}".repeat(N));
+        assert!(subst(&braces, &env()).is_ok());
+        // Unbalanced input ends in an error at the end of the text.
+        for case in [
+            format!("[expr {}", "{".repeat(N)),
+            format!("[expr {{\"{}}}]", "\"(".repeat(N)),
+            "[".repeat(N),
+            format!("[return \"{}]", "x".repeat(N)),
+            format!("${{{}", "a".repeat(N)),
+        ] {
+            assert!(subst(&case, &env()).is_err(), "{}", &case[..20]);
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn integer_overflow_is_an_error() {
+        for bad in [
+            "[expr {(-9223372036854775807 - 1) / -1}]",
+            "[expr {(-9223372036854775807 - 1) % -1}]",
+            "[expr {-(-9223372036854775807 - 1)}]",
+            "[expr {abs(-9223372036854775807 - 1)}]",
+            "[expr {9223372036854775807 + 1}]",
+            "[expr {3037000500 * 3037000500}]",
+            "[expr {2 ** 64}]",
+            "[expr {0x-8000000000000000 / -1}]",
+        ] {
+            assert!(subst(bad, &env()).is_err(), "{bad}");
+        }
+        assert_eq!(
+            subst("[expr {-9223372036854775807 - 1}]", &env()).unwrap(),
+            "-9223372036854775808"
+        );
+        assert_eq!(subst("[expr {-7 % -2}]", &env()).unwrap(), "-1");
+        assert_eq!(subst("[expr {7 % -2}]", &env()).unwrap(), "-1");
+    }
+
+    #[test]
+    fn size_limits() {
+        let big = "x".repeat(MAX_OUTPUT + 1);
+        assert_eq!(subst(&big, &env()), Err(TclError::Limit));
+        assert_eq!(tcleval(&big, &env()), Err(TclError::Limit));
+        // A word built from many variables stops at the cap.
+        let many = format!("[return {}]", "$::MODELS_NGSPICE".repeat(20_000));
+        assert_eq!(subst(&many, &env()), Err(TclError::Limit));
+        // Many small words are checked with a running total, in linear time.
+        let words = format!("[return {}]", "a ".repeat(100_000));
+        let start = std::time::Instant::now();
+        assert!(subst(&words, &env()).is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    /// Random text and cut-off real constructs never panic.
+    #[test]
+    fn random_and_truncated_input_never_panics() {
+        let corpus = [
+            "tcleval( .lib $::MODELS_NGSPICE/cornerHBT.lib hbt_typ\n )\n",
+            "tcleval(R5 a b ptap1 R=[ev {  1.0 / ( 1.0 / ( 9.8e-10 / ( 10.0e-6 * 1.0e-6 ) ) + 1.0 ) }] w=1 )",
+            "tcleval([expr {false ? \"V1 a b dc 1\n.save I( ?1 V1 )\" : \"V1 a b dc 1 \"}])",
+            "tcleval(\n[if {[ sim_is_ngspice ]} { return {\n.op\n}} elseif {1} then {return x} else {return y}]\n)",
+            "[expr {max(1, 2.5, 0x1f) + abs(-3) * 2 ** 3 % 5 - int(2.7) / 1.5e3 eq \"a\" ne {b}}]",
+            "\\x41\\u00e9\\101\\\n  ${MODELS_NGSPICE} $a(b) \\[ ]",
+        ];
+        let mut rng = crate::xschem::test_rng(0x7c1e_5eed);
+        let alphabet: Vec<char> = "[]{}()\"\\$:;# \n\tx01e.-+*/%!?<>=&|,ab\u{e9}\u{1f600}"
+            .chars()
+            .collect();
+        for case in 0..4000 {
+            let text: String = if case % 2 == 0 {
+                let base = corpus[case / 2 % corpus.len()];
+                let cut = rng.below(base.len() + 1);
+                // Cut on a character boundary, then add a few random characters.
+                let cut = (0..=cut)
+                    .rev()
+                    .find(|i| base.is_char_boundary(*i))
+                    .unwrap_or(0);
+                let mut t = base[..cut].to_string();
+                for _ in 0..rng.below(4) {
+                    t.push(alphabet[rng.below(alphabet.len())]);
+                }
+                t
+            } else {
+                (0..rng.below(200))
+                    .map(|_| alphabet[rng.below(alphabet.len())])
+                    .collect()
+            };
+            let _ = subst(&text, &env());
+            let _ = tcleval(&text, &env());
+        }
     }
 }

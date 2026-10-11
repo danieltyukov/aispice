@@ -658,4 +658,59 @@ set sim(spice,1,cmd) \{ngspice  \\"$N\\" -a\}
         assert_eq!(num(-30.0), "-30");
         assert_eq!(num(19.921875), "19.921875");
     }
+
+    #[test]
+    fn hostile_nesting_is_bounded() {
+        // `{` strings do not nest: a hundred thousand opening braces are
+        // text, and a missing close is an error at the end of the file.
+        let deep = format!("S {{{}}}\n", "\\{".repeat(100_000));
+        assert_eq!(parse(&deep).unwrap().spice.len(), 100_000);
+        assert!(parse(&format!("S {}", "{".repeat(100_000))).is_err());
+        // Embedded symbols are capped at a few levels.
+        let embeds = "C {a.sym} 0 0 0 0 {}\n[\n".repeat(10_000);
+        assert!(parse(&embeds).is_err());
+        let string = format!("S {{{}}}", "x".repeat(MAX_STRING_BYTES + 1));
+        assert!(parse(&string).is_err());
+    }
+
+    /// Random bytes, and real files cut short or with characters changed,
+    /// give a file or an error, never a panic; whatever reads also writes
+    /// and reads back.
+    #[test]
+    fn random_and_truncated_files_never_panic() {
+        let sym = "v {xschem version=3.4.4 file_version=1.2}\nK {type=nmos\nformat=\"@name @pinlist\"}\nB 5 -2.5 -32.5 2.5 -27.5 {name=D dir=inout}\nP 4 3 0 0 10 10 0 10 {fill=true}\nA 4 0 0 5 0 360 {}\nT {@name} 5 5 0 0 0.2 0.2 {}\n";
+        let embedded = format!("C {{x.sym}} 0 0 1 1 {{name=x1}}\n[\n{sym}]\n");
+        let corpus = [SAMPLE, sym, embedded.as_str()];
+        let alphabet: Vec<char> = "{}[]\\\" \n\r\t0123456789.-eCNTLBPAKSGVEFv#x=\u{e9}\u{1f600}"
+            .chars()
+            .collect();
+        let mut rng = crate::xschem::test_rng(0x5c4e_f11e);
+        for case in 0..3000 {
+            let text: String = match case % 3 {
+                0 => {
+                    let base = corpus[case % corpus.len()];
+                    let cut = rng.below(base.len() + 1);
+                    let cut = (0..=cut)
+                        .rev()
+                        .find(|i| base.is_char_boundary(*i))
+                        .unwrap_or(0);
+                    base[..cut].to_string()
+                }
+                1 => {
+                    let mut chars: Vec<char> = corpus[case % corpus.len()].chars().collect();
+                    for _ in 0..1 + rng.below(6) {
+                        let at = rng.below(chars.len());
+                        chars[at] = alphabet[rng.below(alphabet.len())];
+                    }
+                    chars.into_iter().collect()
+                }
+                _ => (0..rng.below(300))
+                    .map(|_| alphabet[rng.below(alphabet.len())])
+                    .collect(),
+            };
+            if let Ok(f) = parse(&text) {
+                assert_eq!(parse(&write(&f)).as_ref(), Ok(&f), "{text:?}");
+            }
+        }
+    }
 }
