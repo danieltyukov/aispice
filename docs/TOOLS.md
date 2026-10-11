@@ -1597,3 +1597,30 @@ Size a PDK transistor with the gm/Id method. Give the device, the gm/Id you want
 
 </details>
 
+## `check_macro`
+
+Check a macro package before a chip places it. A macro package (macro/v1) is the format aispice and ChipLeap use to hand hardened blocks to each other: macro.toml plus GDS, LEF, liberty, a Verilog model, a SPICE netlist, a measured spec table for analog blocks, and DRC and LVS evidence. The check covers macro.toml against its schema, the files each kind needs, every pin across the GDS, LEF, liberty, Verilog and SPICE views with its direction, the size, timing arcs of digital outputs, measured specs against their limits, and evidence that passes, matches the package files and names the same PDK. Returns every finding with its rule id, severity, file and message; the package passes when there are no errors. ChipLeap's `chipleap macro check` reports the same findings.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "path": {
+      "description": "The package folder relative to the project folder, e.g.\n`macros/tiny_ota.macro`.",
+      "type": "string"
+    },
+    "pdk": {
+      "description": "The PDK of the chip that will place the block: `NAME` or\n`NAME@COMMIT`, e.g. `ihp-sg13g2`. A different PDK is an error, a\ndifferent commit a warning.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+

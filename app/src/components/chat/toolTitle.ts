@@ -36,6 +36,7 @@ const RUNNING: Record<string, (c: string | null) => string> = {
   symbols: () => "Searching symbols",
   pdk: () => "Reading the PDK",
   gm_id: () => "Sizing by gm/Id",
+  check_macro: () => "Checking the macro package",
 };
 
 function humanName(name: string): string {
