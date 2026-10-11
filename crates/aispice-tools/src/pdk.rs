@@ -72,8 +72,12 @@ pub fn valid_name(name: &str) -> bool {
 }
 
 impl Registry {
-    /// `<config dir>/aispice/pdks.toml`.
+    /// `<config dir>/aispice/pdks.toml`, or the file `AISPICE_PDK_REGISTRY`
+    /// names (for CI, and tests that must not touch the user's file).
     pub fn default_path() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("AISPICE_PDK_REGISTRY").filter(|p| !p.is_empty()) {
+            return Some(PathBuf::from(p));
+        }
         aispice_agent::Config::default_path()
             .and_then(|p| p.parent().map(|d| d.join(REGISTRY_FILE)))
     }

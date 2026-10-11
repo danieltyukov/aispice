@@ -229,6 +229,24 @@ impl Pdk {
         out
     }
 
+    /// The sections a corner library defines (`mos_tt`, `mos_ss_mismatch`,
+    /// ...), in file order, for a simulator's copy of it.
+    pub fn sections(&self, file: &str, target: Target) -> Vec<String> {
+        let path = self.models_dir(target).join(file);
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Vec::new();
+        };
+        let (text, _) = aispice_core::encoding::decode(&bytes);
+        text.lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                let kw = w.next()?;
+                let name = w.next()?;
+                (kw.eq_ignore_ascii_case(".lib") && w.next().is_none()).then(|| name.to_string())
+            })
+            .collect()
+    }
+
     /// Subcircuit names the PDK defines, for model resolution: these come
     /// from the header, not from a model library aispice looks things up in.
     pub fn defined_names(&self) -> Vec<String> {
@@ -571,6 +589,14 @@ mod tests {
             "{x}"
         );
         assert_eq!(write(&pdk.retarget(&n, Target::Ngspice)), write(&n));
+    }
+
+    #[test]
+    fn sections_are_listed_from_the_library() {
+        let (_d, pdk) = fake();
+        assert_eq!(pdk.sections("cornerMOSlv.lib", Target::Ngspice), ["mos_tt"]);
+        assert_eq!(pdk.sections("cornerHBT.lib", Target::Xyce), ["hbt_typ"]);
+        assert!(pdk.sections("none.lib", Target::Ngspice).is_empty());
     }
 
     #[test]
