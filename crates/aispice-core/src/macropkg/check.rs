@@ -3,17 +3,20 @@
 //! with the same rule ids and messages; `tests/fixtures/macro/expected.json`
 //! pins both.
 
-use super::evidence::sha256_file;
-use super::gds::{GdsLibrary, read_gds};
-use super::lef::{LefMacro, parse_lef};
-use super::liberty::parse_liberty;
+use super::evidence::sha256_capped;
+use super::gds::{GdsError, GdsLibrary, parse_gds_with};
+use super::lef::{LefError, LefMacro, parse_lef_with};
+use super::liberty::{LibertyError, parse_liberty_with};
+use super::limits::{Limits, ReadError, json_depth, read_capped, toml_depth};
 use super::manifest::{
-    Direction, MANIFEST, MacroError, MacroKind, Manifest, OPENADA_SCHEMA, PinKind, SCHEMA_VERSION,
+    Direction, MANIFEST, MacroError, MacroKind, Manifest, OPENADA_SCHEMA, Pin, PinKind,
+    SCHEMA_VERSION,
 };
 use super::schema::{Val, validate_def};
-use super::spice::spice_subckt;
-use super::text::{fmt_g, plural, quote};
-use super::verilog::verilog_ports;
+use super::spice::spice_subckt_with;
+use super::text::{fmt_g, names, plural, quote};
+use super::toml10::toml11_syntax;
+use super::verilog::verilog_ports_with;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -101,6 +104,8 @@ impl Report {
 pub struct CheckOptions {
     /// The placing chip's PDK: `NAME` or `NAME@COMMIT`.
     pub pdk: Option<String>,
+    /// For tests; the spec fixes the values of [`Limits::DEFAULT`].
+    pub limits: Limits,
 }
 
 fn pdk_name_ok(s: &str) -> bool {
@@ -159,10 +164,6 @@ pub fn required_files(m: &Manifest) -> Vec<String> {
     files
 }
 
-fn read_text(path: &Path) -> std::io::Result<String> {
-    Ok(String::from_utf8_lossy(&std::fs::read(path)?).into_owned())
-}
-
 /// The first line of a parser's message.
 fn first_line(msg: &str) -> String {
     msg.lines().next().unwrap_or("").to_string()
@@ -172,7 +173,12 @@ fn first_line(msg: &str) -> String {
 fn toml_error(text: &str, e: &toml::de::Error) -> String {
     match e.span() {
         Some(span) => {
-            let before = &text[..span.start.min(text.len())];
+            // The span is a byte offset; back off to a character boundary.
+            let mut end = span.start.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let before = &text[..end];
             let line = before.matches('\n').count() + 1;
             let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
             format!("{} (at line {line}, column {column})", e.message())
@@ -181,21 +187,45 @@ fn toml_error(text: &str, e: &toml::de::Error) -> String {
     }
 }
 
-fn read_toml(path: &Path) -> Result<toml::Value, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
-    toml::from_str::<toml::Table>(&text)
+fn parse_toml(text: &str) -> Result<toml::Value, String> {
+    if let Some(e) = toml11_syntax(text) {
+        return Err(e);
+    }
+    toml::from_str::<toml::Table>(text)
         .map(toml::Value::Table)
-        .map_err(|e| toml_error(&text, &e))
+        .map_err(|e| toml_error(text, &e))
+}
+
+fn nesting(limit: usize, what: &str) -> String {
+    format!("{what} nest more than {limit} deep")
 }
 
 fn ascii_lower(s: &str) -> String {
     s.to_ascii_lowercase()
 }
 
+/// Why the LEF could not be used, reported at the LEF's place in the order.
+enum LefProblem {
+    Read(ReadError),
+    Parse(LefError),
+}
+
 struct Checker<'a> {
     root: &'a Path,
+    limits: Limits,
     findings: Vec<Finding>,
+    /// Findings past `Limits::findings` are counted, not listed; a
+    /// `check.limit` warning at the end of the list says how many.
+    unlisted_errors: usize,
+    unlisted_warnings: usize,
+    /// Files reported as too large, once each.
+    too_large: HashSet<String>,
+    /// Package files hashed for evidence.
+    digests: HashMap<String, Option<String>>,
+    hash_limit_reported: bool,
+    /// From macro.toml, once it follows the schema.
+    name: Option<String>,
+    kind: Option<MacroKind>,
 }
 
 impl Checker<'_> {
@@ -208,16 +238,50 @@ impl Checker<'_> {
     }
 
     fn push(&mut self, rule: &str, file: &str, message: String, severity: Severity) {
-        self.findings.push(Finding {
-            rule: rule.into(),
-            severity,
-            file: file.into(),
-            message,
-        });
+        if self.findings.len() < self.limits.findings {
+            self.findings.push(Finding {
+                rule: rule.into(),
+                severity,
+                file: file.into(),
+                message,
+            });
+        } else if severity == Severity::Error {
+            self.unlisted_errors += 1;
+        } else {
+            self.unlisted_warnings += 1;
+        }
     }
 
     fn is_file(&self, name: &str) -> bool {
         self.root.join(name).is_file()
+    }
+
+    /// A package file's bytes, or None after reporting why it cannot be read.
+    fn read(&mut self, rel: &str, limit: u64) -> Option<Vec<u8>> {
+        match read_capped(&self.root.join(rel), limit) {
+            Ok(data) => Some(data),
+            Err(e) => {
+                self.unreadable(rel, e);
+                None
+            }
+        }
+    }
+
+    fn unreadable(&mut self, rel: &str, e: ReadError) {
+        match e {
+            ReadError::TooLarge(m) => self.report_too_large(rel, m),
+            ReadError::Io(e) => self.add(
+                "file.unreadable",
+                rel,
+                format!("cannot read the file: {}", first_line(&e.to_string())),
+            ),
+        }
+    }
+
+    fn report_too_large(&mut self, rel: &str, message: String) {
+        if self.too_large.insert(rel.to_string()) {
+            self.add("file.too_large", rel, message);
+        }
     }
 
     fn manifest(&mut self) -> Option<Manifest> {
@@ -226,7 +290,24 @@ impl Checker<'_> {
             self.add("file.missing", MANIFEST, "required file is missing".into());
             return None;
         }
-        let value = match read_toml(&path) {
+        let bytes = self.read(MANIFEST, self.limits.manifest_bytes)?;
+        let text = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                self.add(
+                    "manifest.syntax",
+                    MANIFEST,
+                    format!("not valid TOML: {}", first_line(&e.to_string())),
+                );
+                return None;
+            }
+        };
+        if toml_depth(&text) > self.limits.nesting {
+            let message = nesting(self.limits.nesting, "tables and arrays");
+            self.add("manifest.limit", MANIFEST, message);
+            return None;
+        }
+        let value = match parse_toml(&text) {
             Ok(v) => v,
             Err(e) => {
                 self.add(
@@ -259,13 +340,28 @@ impl Checker<'_> {
             }
             return None;
         }
-        match value.try_into::<Manifest>() {
-            Ok(m) => Some(m),
+        let m = match value.try_into::<Manifest>() {
+            Ok(m) => m,
             Err(e) => {
                 self.add("manifest.schema", MANIFEST, e.message().to_string());
-                None
+                return None;
             }
+        };
+        self.name = Some(m.name.clone());
+        self.kind = Some(m.kind);
+        // Every view check walks every pin bit, so a huge bus would stall them all.
+        let mut too_big = false;
+        if m.pin_bits() > self.limits.pins as u64 {
+            let message = format!("the pins have more than {} bits", self.limits.pins);
+            self.add("manifest.limit", MANIFEST, message);
+            too_big = true;
         }
+        if m.corners.len() > self.limits.corners {
+            let message = format!("more than {} corners", self.limits.corners);
+            self.add("manifest.limit", MANIFEST, message);
+            too_big = true;
+        }
+        (!too_big).then_some(m)
     }
 
     fn semantics(&mut self, m: &Manifest) {
@@ -279,6 +375,13 @@ impl Checker<'_> {
                 );
             }
         }
+        // Lookups by name: a long pin or domain list must not cost its square.
+        let mut by_name: HashMap<&str, &Pin> = HashMap::new();
+        for p in &m.pins {
+            by_name.entry(p.name.as_str()).or_insert(p);
+        }
+        let mut power: HashSet<&str> = HashSet::new();
+        let mut ground: HashSet<&str> = HashSet::new();
         let mut domains = HashSet::new();
         for d in &m.domains {
             if !domains.insert(d.name.as_str()) {
@@ -288,9 +391,11 @@ impl Checker<'_> {
                     format!("domain {} is declared twice", quote(&d.name)),
                 );
             }
-            for (role, names) in [(PinKind::Power, &d.power), (PinKind::Ground, &d.ground)] {
-                for n in names {
-                    let message = match m.pin(n) {
+            power.extend(d.power.iter().map(String::as_str));
+            ground.extend(d.ground.iter().map(String::as_str));
+            for (role, pin_names) in [(PinKind::Power, &d.power), (PinKind::Ground, &d.ground)] {
+                for n in pin_names {
+                    let message = match by_name.get(n.as_str()) {
                         None => format!(
                             "domain {} lists {} as {}, but there is no such pin",
                             quote(&d.name),
@@ -312,15 +417,12 @@ impl Checker<'_> {
         }
         for p in &m.pins {
             if p.is_supply() {
-                let listed = m.domains.iter().any(|d| {
-                    let list = if p.kind == PinKind::Power {
-                        &d.power
-                    } else {
-                        &d.ground
-                    };
-                    list.contains(&p.name)
-                });
-                if !listed {
+                let listed = if p.kind == PinKind::Power {
+                    &power
+                } else {
+                    &ground
+                };
+                if !listed.contains(p.name.as_str()) {
                     self.add(
                         "manifest.domain",
                         MANIFEST,
@@ -397,19 +499,32 @@ impl Checker<'_> {
         }
     }
 
+    fn gds_error(&mut self, f: &str, e: GdsError) {
+        match e {
+            GdsError::Syntax(m) => {
+                self.add(
+                    "gds.parse",
+                    f,
+                    format!("cannot read the GDS: {}", first_line(&m)),
+                );
+            }
+            GdsError::Cycle(m) => self.add("gds.cycle", f, m),
+            GdsError::Limit(m) => self.add("gds.limit", f, m.0),
+        }
+    }
+
     fn gds(&mut self, m: &Manifest, lef: Option<&LefMacro>) {
         let f = m.file("gds");
         if !self.is_file(&f) {
             return;
         }
-        let lib = match read_gds(&self.root.join(&f)) {
+        let Some(data) = self.read(&f, self.limits.gds_bytes) else {
+            return;
+        };
+        let lib = match parse_gds_with(&data, &self.limits) {
             Ok(lib) => lib,
             Err(e) => {
-                self.add(
-                    "gds.parse",
-                    &f,
-                    format!("cannot read the GDS: {}", first_line(&e.0)),
-                );
+                self.gds_error(&f, e);
                 return;
             }
         };
@@ -418,15 +533,10 @@ impl Checker<'_> {
             let message = if lib.has_cell(&m.name) {
                 format!("cell {} is placed inside another cell", quote(&m.name))
             } else {
-                let found: Vec<String> = tops.iter().map(|t| quote(t)).collect();
-                let found = if found.is_empty() {
-                    "none".to_string()
-                } else {
-                    found.join(", ")
-                };
                 format!(
-                    "no top cell is named {}; top cells: {found}",
-                    quote(&m.name)
+                    "no top cell is named {}; top cells: {}",
+                    quote(&m.name),
+                    names(&tops)
                 )
             };
             self.add("gds.top_cell", &f, message);
@@ -465,11 +575,7 @@ impl Checker<'_> {
                 return;
             }
             Err(e) => {
-                self.add(
-                    "gds.parse",
-                    f,
-                    format!("cannot read the GDS: {}", first_line(&e.0)),
-                );
+                self.gds_error(f, e);
                 return;
             }
         };
@@ -496,21 +602,23 @@ impl Checker<'_> {
         }
     }
 
-    /// (macro, parse error, macro names) without reporting anything.
-    fn read_lef(&self, m: &Manifest) -> (Option<LefMacro>, Option<String>, Vec<String>) {
+    /// (macro, problem, macro names), reporting nothing: the GDS check needs
+    /// the LEF origin, and the LEF's own findings come after the GDS's.
+    fn read_lef(&self, m: &Manifest) -> (Option<LefMacro>, Option<LefProblem>, Vec<String>) {
         let path = self.root.join(m.file("lef"));
         if !path.is_file() {
             return (None, None, Vec::new());
         }
-        let parsed = read_text(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| parse_lef(&t).map_err(|e| e.0));
-        match parsed {
+        let data = match read_capped(&path, self.limits.view_bytes) {
+            Ok(d) => d,
+            Err(e) => return (None, Some(LefProblem::Read(e)), Vec::new()),
+        };
+        match parse_lef_with(&String::from_utf8_lossy(&data), &self.limits) {
             Ok(mut macros) => {
                 let names = macros.keys().cloned().collect();
                 (macros.remove(&m.name), None, names)
             }
-            Err(e) => (None, Some(first_line(&e)), Vec::new()),
+            Err(e) => (None, Some(LefProblem::Parse(e)), Vec::new()),
         }
     }
 
@@ -518,28 +626,31 @@ impl Checker<'_> {
         &mut self,
         m: &Manifest,
         lef: Option<&LefMacro>,
-        error: Option<String>,
-        names: &[String],
+        problem: Option<LefProblem>,
+        macro_names: &[String],
     ) {
         let f = m.file("lef");
         if !self.is_file(&f) {
             return;
         }
-        if let Some(e) = error {
-            self.add("lef.parse", &f, format!("cannot read the LEF: {e}"));
-            return;
+        match problem {
+            Some(LefProblem::Read(e)) => return self.unreadable(&f, e),
+            Some(LefProblem::Parse(LefError::Limit(e))) => return self.add("lef.limit", &f, e.0),
+            Some(LefProblem::Parse(LefError::Syntax(e))) => {
+                let message = format!("cannot read the LEF: {}", first_line(&e));
+                return self.add("lef.parse", &f, message);
+            }
+            None => {}
         }
         let Some(lef) = lef else {
-            let others: Vec<String> = names.iter().map(|n| quote(n)).collect();
-            let others = if others.is_empty() {
-                "none".to_string()
-            } else {
-                others.join(", ")
-            };
             self.add(
                 "lef.macro",
                 &f,
-                format!("no MACRO {}; macros in the file: {others}", quote(&m.name)),
+                format!(
+                    "no MACRO {}; macros in the file: {}",
+                    quote(&m.name),
+                    names(macro_names)
+                ),
             );
             return;
         };
@@ -662,16 +773,20 @@ impl Checker<'_> {
     }
 
     fn liberty(&mut self, m: &Manifest, f: &str) {
-        let path = self.root.join(f);
-        if !path.is_file() {
+        if !self.is_file(f) {
             return;
         }
-        let parsed = read_text(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|t| parse_liberty(&t).map_err(|e| e.0));
-        let cells = match parsed {
+        let Some(data) = self.read(f, self.limits.liberty_bytes) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&data);
+        let cells = match parse_liberty_with(&text, &self.limits, Some(&m.name)) {
             Ok(c) => c,
-            Err(e) => {
+            Err(LibertyError::Limit(e)) => {
+                self.add("lib.limit", f, e.0);
+                return;
+            }
+            Err(LibertyError::Syntax(e)) => {
                 self.add(
                     "lib.parse",
                     f,
@@ -768,16 +883,27 @@ impl Checker<'_> {
 
     fn verilog(&mut self, m: &Manifest) {
         let f = m.file("v");
-        let Ok(text) = read_text(&self.root.join(&f)) else {
+        if !self.is_file(&f) {
+            return;
+        }
+        let Some(data) = self.read(&f, self.limits.view_bytes) else {
             return;
         };
-        let Some(ports) = verilog_ports(&text, &m.name) else {
-            self.add(
-                "verilog.module",
-                &f,
-                format!("no module {}", quote(&m.name)),
-            );
-            return;
+        let ports = match verilog_ports_with(&String::from_utf8_lossy(&data), &m.name, &self.limits)
+        {
+            Ok(Some(ports)) => ports,
+            Ok(None) => {
+                self.add(
+                    "verilog.module",
+                    &f,
+                    format!("no module {}", quote(&m.name)),
+                );
+                return;
+            }
+            Err(e) => {
+                self.add("verilog.limit", &f, e.0);
+                return;
+            }
         };
         // A later port of the same name wins, as in a Python dict.
         let by_name: HashMap<&str, _> = ports.iter().map(|p| (p.name.as_str(), p)).collect();
@@ -829,7 +955,7 @@ impl Checker<'_> {
             if p.is_supply() || vp.width == Some(0) {
                 continue;
             }
-            let message = match (p.width, vp.width) {
+            let message = match (p.width.map(u64::from), vp.width) {
                 (None, Some(w)) => format!(
                     "port {} is a bus of width {w}, macro.toml says a scalar",
                     quote(&p.name)
@@ -863,12 +989,22 @@ impl Checker<'_> {
 
     fn spice(&mut self, m: &Manifest) {
         let f = m.file("spice");
-        let Ok(text) = read_text(&self.root.join(&f)) else {
+        if !self.is_file(&f) {
+            return;
+        }
+        let Some(data) = self.read(&f, self.limits.view_bytes) else {
             return;
         };
-        let Some(sub) = spice_subckt(&text, &m.name) else {
-            self.add("spice.subckt", &f, format!("no .subckt {}", quote(&m.name)));
-            return;
+        let sub = match spice_subckt_with(&String::from_utf8_lossy(&data), &m.name, &self.limits) {
+            Ok(Some(sub)) => sub,
+            Ok(None) => {
+                self.add("spice.subckt", &f, format!("no .subckt {}", quote(&m.name)));
+                return;
+            }
+            Err(e) => {
+                self.add("spice.limit", &f, e.0);
+                return;
+            }
         };
         let ports: HashSet<String> = sub.ports.iter().map(|p| ascii_lower(p)).collect();
         let mut bits = HashSet::new();
@@ -922,11 +1058,29 @@ impl Checker<'_> {
 
     fn specs(&mut self, m: &Manifest) {
         let f = m.file("specs.toml");
-        let path = self.root.join(&f);
-        if !path.is_file() {
+        if !self.is_file(&f) {
             return;
         }
-        let data = match read_toml(&path) {
+        let Some(bytes) = self.read(&f, self.limits.specs_bytes) else {
+            return;
+        };
+        let text = match String::from_utf8(bytes) {
+            Ok(t) => t,
+            Err(e) => {
+                self.add(
+                    "specs.parse",
+                    &f,
+                    format!("not valid TOML: {}", first_line(&e.to_string())),
+                );
+                return;
+            }
+        };
+        if toml_depth(&text) > self.limits.nesting {
+            let message = nesting(self.limits.nesting, "tables and arrays");
+            self.add("specs.limit", &f, message);
+            return;
+        }
+        let data = match parse_toml(&text) {
             Ok(v) => Val::from(&v),
             Err(e) => {
                 self.add(
@@ -1045,28 +1199,90 @@ impl Checker<'_> {
         }
     }
 
+    /// Names of the summaries in evidence/, sorted; None when there are too
+    /// many. Names that are not UTF-8 are skipped.
+    fn summaries(&self, folder: &Path) -> Option<Vec<String>> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Some(Vec::new());
+        };
+        let mut found = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.ends_with(".json") || !entry.path().is_file() {
+                continue;
+            }
+            found.push(name);
+            if found.len() > self.limits.evidence_files {
+                return None;
+            }
+        }
+        found.sort();
+        Some(found)
+    }
+
+    /// The SHA-256 of package file `base`, hashed once per check. A file
+    /// already found too large for its own check is not read here either.
+    fn digest(&mut self, f: &str, base: &str) -> Option<String> {
+        if let Some(d) = self.digests.get(base) {
+            return d.clone();
+        }
+        if self.too_large.contains(base) {
+            return None;
+        }
+        if self.digests.len() >= self.limits.hashed_files {
+            if !self.hash_limit_reported {
+                self.hash_limit_reported = true;
+                let message = format!(
+                    "the summaries name more than {} package files as inputs",
+                    self.limits.hashed_files
+                );
+                self.add("evidence.limit", f, message);
+            }
+            return None;
+        }
+        let digest = match sha256_capped(&self.root.join(base), self.limits.gds_bytes) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                self.unreadable(base, e);
+                None
+            }
+        };
+        self.digests.insert(base.to_string(), digest.clone());
+        digest
+    }
+
     fn evidence(&mut self, m: &Manifest) {
-        let folder = self.root.join("evidence");
-        let mut files: Vec<String> = std::fs::read_dir(&folder)
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().is_file())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .filter(|n| n.ends_with(".json"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        files.sort();
+        let Some(files) = self.summaries(&self.root.join("evidence")) else {
+            let message = format!("more than {} summaries", self.limits.evidence_files);
+            self.add("evidence.limit", "evidence", message);
+            return;
+        };
         let mut seen = HashSet::new();
         for name in files {
             let f = format!("evidence/{name}");
-            let parsed = std::fs::read(folder.join(&name))
-                .map_err(|e| e.to_string())
-                .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
-                .and_then(|t| {
-                    serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())
-                });
+            let Some(bytes) = self.read(&f, self.limits.evidence_bytes) else {
+                continue;
+            };
+            let text = match String::from_utf8(bytes) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.add(
+                        "evidence.parse",
+                        &f,
+                        format!("not valid JSON: {}", first_line(&e.to_string())),
+                    );
+                    continue;
+                }
+            };
+            if json_depth(&text) > self.limits.nesting {
+                let message = nesting(self.limits.nesting, "objects and arrays");
+                self.add("evidence.limit", &f, message);
+                continue;
+            }
+            let parsed =
+                serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string());
             let doc = match parsed {
                 Ok(v) => Val::from(&v),
                 Err(e) => {
@@ -1126,11 +1342,10 @@ impl Checker<'_> {
                     };
                     let normal = path.replace('\\', "/");
                     let base = normal.rsplit('/').next().unwrap_or("");
-                    let target = self.root.join(base);
-                    if base.is_empty() || base == "." || base == ".." || !target.is_file() {
+                    if base.is_empty() || base == "." || base == ".." || !self.is_file(base) {
                         continue;
                     }
-                    let Ok(actual) = sha256_file(&target) else {
+                    let Some(actual) = self.digest(&f, base) else {
                         continue;
                     };
                     if actual != digest {
@@ -1141,7 +1356,7 @@ impl Checker<'_> {
                                 "input {} has sha256 {}, the package file has {}",
                                 quote(base),
                                 digest.chars().take(12).collect::<String>(),
-                                &actual[..12]
+                                actual.chars().take(12).collect::<String>()
                             ),
                         );
                     }
@@ -1225,7 +1440,15 @@ pub fn check_package(dir: &Path, opts: &CheckOptions) -> Result<Report, MacroErr
     }
     let mut c = Checker {
         root: dir,
+        limits: opts.limits,
         findings: Vec::new(),
+        unlisted_errors: 0,
+        unlisted_warnings: 0,
+        too_large: HashSet::new(),
+        digests: HashMap::new(),
+        hash_limit_reported: false,
+        name: None,
+        kind: None,
     };
     let manifest = c.manifest();
     if let Some(m) = &manifest {
@@ -1254,17 +1477,32 @@ pub fn check_package(dir: &Path, opts: &CheckOptions) -> Result<Report, MacroErr
             c.expected_pdk(m, name, commit.as_deref());
         }
     }
-    let errors = c
+    let unlisted = c.unlisted_errors + c.unlisted_warnings;
+    if unlisted > 0 {
+        c.findings.push(Finding {
+            rule: "check.limit".into(),
+            severity: Severity::Warning,
+            file: ".".into(),
+            message: format!(
+                "{} not listed: {}, {}",
+                plural(unlisted, "more finding", None),
+                plural(c.unlisted_errors, "error", None),
+                plural(c.unlisted_warnings, "warning", None)
+            ),
+        });
+    }
+    let listed_errors = c
         .findings
         .iter()
         .filter(|f| f.severity == Severity::Error)
         .count();
-    let warnings = c.findings.len() - errors;
+    let errors = listed_errors + c.unlisted_errors;
+    let warnings = c.findings.len() - listed_errors + c.unlisted_warnings;
     Ok(Report {
         schema: REPORT_SCHEMA,
         package: dir.display().to_string(),
-        name: manifest.as_ref().map(|m| m.name.clone()),
-        kind: manifest.as_ref().map(|m| m.kind),
+        name: c.name,
+        kind: c.kind,
         passed: errors == 0,
         errors,
         warnings,

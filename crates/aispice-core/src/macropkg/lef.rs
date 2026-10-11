@@ -2,11 +2,21 @@
 //! ChipLeap's `chipleap.macro.views.parse_lef` reads it the same way.
 
 use super::is_ws;
+use super::limits::{LimitError, Limits};
+use super::text::quote;
 use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct LefError(pub String);
+pub enum LefError {
+    #[error("{0}")]
+    Syntax(String),
+    #[error(transparent)]
+    Limit(#[from] LimitError),
+}
+
+fn syntax<T>(msg: impl Into<String>) -> Result<T, LefError> {
+    Err(LefError::Syntax(msg.into()))
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LefPin {
@@ -28,7 +38,7 @@ pub struct LefMacro {
     pub pins: BTreeMap<String, LefPin>,
 }
 
-fn tokens(text: &str) -> Vec<String> {
+fn tokens(text: &str, limits: &Limits) -> Result<Vec<String>, LimitError> {
     let s: Vec<char> = text.chars().collect();
     let n = s.len();
     let mut toks = Vec::new();
@@ -37,11 +47,18 @@ fn tokens(text: &str) -> Vec<String> {
         let c = s[i];
         if is_ws(c) {
             i += 1;
-        } else if c == '#' {
+            continue;
+        }
+        if c == '#' {
             while i < n && s[i] != '\n' {
                 i += 1;
             }
-        } else if c == '"' {
+            continue;
+        }
+        if toks.len() >= limits.tokens {
+            return Err(too_many_tokens("LEF", limits));
+        }
+        if c == '"' {
             let j = (i + 1..n).find(|&j| s[j] == '"').unwrap_or(n);
             toks.push(s[i + 1..j].iter().collect());
             i = j + 1;
@@ -57,7 +74,11 @@ fn tokens(text: &str) -> Vec<String> {
             i = j;
         }
     }
-    toks
+    Ok(toks)
+}
+
+pub(crate) fn too_many_tokens(what: &str, limits: &Limits) -> LimitError {
+    LimitError(format!("the {what} has more than {} tokens", limits.tokens))
 }
 
 struct Tokens<'a> {
@@ -69,7 +90,7 @@ struct Tokens<'a> {
 impl Tokens<'_> {
     fn next(&mut self) -> Result<&str, LefError> {
         let Some(t) = self.toks.get(self.i) else {
-            return Err(LefError(format!("unexpected end of file in {}", self.what)));
+            return syntax(format!("unexpected end of file in {}", self.what));
         };
         self.i += 1;
         Ok(t)
@@ -118,16 +139,21 @@ fn is_number(s: &str) -> bool {
 }
 
 fn number(s: &str) -> Result<f64, LefError> {
-    if !is_number(s) {
-        return Err(LefError(format!("expected a number, found {s:?}")));
+    match s.parse() {
+        Ok(v) if is_number(s) => Ok(v),
+        _ => syntax(format!("expected a number, found {s:?}")),
     }
-    s.parse()
-        .map_err(|_| LefError(format!("expected a number, found {s:?}")))
 }
 
-/// Every MACRO in a LEF file, by name.
+/// Every MACRO in a LEF file, by name, with the default limits.
 pub fn parse_lef(text: &str) -> Result<BTreeMap<String, LefMacro>, LefError> {
-    let toks = tokens(text);
+    parse_lef_with(text, &Limits::DEFAULT)
+}
+
+/// Every MACRO in a LEF file, by name. Fails when it is malformed, has too
+/// many tokens or a macro has too many pins.
+pub fn parse_lef_with(text: &str, limits: &Limits) -> Result<BTreeMap<String, LefMacro>, LefError> {
+    let toks = tokens(text, limits)?;
     let mut macros = BTreeMap::new();
     let mut i = 0;
     while i < toks.len() {
@@ -137,7 +163,7 @@ pub fn parse_lef(text: &str) -> Result<BTreeMap<String, LefMacro>, LefError> {
                 i: i + 2,
                 what: format!("MACRO {}", toks[i + 1]),
             };
-            let m = parse_macro(&mut t, &toks[i + 1])?;
+            let m = parse_macro(&mut t, &toks[i + 1], limits)?;
             macros.entry(m.name.clone()).or_insert(m);
             i = t.i;
         } else {
@@ -147,36 +173,49 @@ pub fn parse_lef(text: &str) -> Result<BTreeMap<String, LefMacro>, LefError> {
     Ok(macros)
 }
 
-fn parse_macro(t: &mut Tokens, name: &str) -> Result<LefMacro, LefError> {
+fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, LefError> {
     let mut m = LefMacro {
         name: name.to_string(),
         ..LefMacro::default()
     };
+    let mut pins = 0usize;
     loop {
         let kw = t.next()?.to_string();
         match kw.as_str() {
             "END" => {
                 if t.next()? != name {
-                    return Err(LefError(format!("MACRO {name} ends with the wrong name")));
+                    return syntax(format!("MACRO {name} ends with the wrong name"));
                 }
                 return Ok(m);
             }
             "CLASS" => m.class = t.statement()?.join(" "),
             "ORIGIN" => {
                 let args = t.statement()?;
-                if args.len() < 2 {
-                    return Err(LefError(format!("ORIGIN of {name} needs two numbers")));
-                }
-                m.origin = (number(&args[0])?, number(&args[1])?);
+                let [x, y, ..] = &args[..] else {
+                    return syntax(format!("ORIGIN of {name} needs two numbers"));
+                };
+                m.origin = (number(x)?, number(y)?);
             }
             "SIZE" => {
                 let args = t.statement()?;
-                if args.len() != 3 || args[1] != "BY" {
-                    return Err(LefError(format!("SIZE of {name} is not 'SIZE w BY h'")));
+                let [w, by, h] = &args[..] else {
+                    return syntax(format!("SIZE of {name} is not 'SIZE w BY h'"));
+                };
+                if by != "BY" {
+                    return syntax(format!("SIZE of {name} is not 'SIZE w BY h'"));
                 }
-                m.size = Some((number(&args[0])?, number(&args[2])?));
+                m.size = Some((number(w)?, number(h)?));
             }
             "PIN" => {
+                pins += 1;
+                if pins > limits.pins {
+                    return Err(LimitError(format!(
+                        "MACRO {} has more than {} pins",
+                        quote(name),
+                        limits.pins
+                    ))
+                    .into());
+                }
                 let pin_name = t.next()?.to_string();
                 let pin = parse_pin(t, &pin_name)?;
                 m.pins.entry(pin.name.clone()).or_insert(pin);
@@ -203,7 +242,7 @@ fn parse_pin(t: &mut Tokens, name: &str) -> Result<LefPin, LefError> {
         match kw.as_str() {
             "END" => {
                 if t.next()? != name {
-                    return Err(LefError(format!("PIN {name} ends with the wrong name")));
+                    return syntax(format!("PIN {name} ends with the wrong name"));
                 }
                 return Ok(p);
             }
@@ -287,9 +326,9 @@ mod tests {
         assert_eq!(blk.pins["VPWR"].use_, "POWER");
         assert_eq!(blk.pins["VPWR"].shapes, 0);
         let e = parse_lef("MACRO x\n PIN a\n DIRECTION INPUT ;\n").unwrap_err();
-        assert!(e.0.contains("end of file"), "{e}");
+        assert!(e.to_string().contains("end of file"), "{e}");
         let e = parse_lef("MACRO x\nEND y\n").unwrap_err();
-        assert!(e.0.contains("wrong name"), "{e}");
+        assert!(e.to_string().contains("wrong name"), "{e}");
         assert!(parse_lef("MACRO x\nSIZE 1_0 BY 2 ;\nEND x\n").is_err());
     }
 }

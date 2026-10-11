@@ -1,7 +1,11 @@
 //! Verilog, far enough to list a module's ports with direction and width.
 //! ChipLeap's `chipleap.macro.views.verilog_ports` reads it the same way.
 
+use super::lef::too_many_tokens;
+use super::limits::{LimitError, Limits};
+use super::text::quote;
 use super::{is_ws, parse_int};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerilogPort {
@@ -9,7 +13,7 @@ pub struct VerilogPort {
     /// input, output, inout; empty when the module never declares it.
     pub direction: String,
     /// None for a scalar; Some(0) when the range is not a literal.
-    pub width: Option<u32>,
+    pub width: Option<u64>,
 }
 
 const DIRECTIONS: [&str; 3] = ["input", "output", "inout"];
@@ -94,7 +98,7 @@ fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || "_$`'".contains(c)
 }
 
-fn tokens(text: &str) -> Vec<String> {
+fn tokens(text: &str, limits: &Limits) -> Result<Vec<String>, LimitError> {
     let s: Vec<char> = text.chars().collect();
     let n = s.len();
     let mut toks = Vec::new();
@@ -103,7 +107,12 @@ fn tokens(text: &str) -> Vec<String> {
         let c = s[i];
         if is_ws(c) {
             i += 1;
-        } else if is_word(c) {
+            continue;
+        }
+        if toks.len() >= limits.tokens {
+            return Err(too_many_tokens("Verilog file", limits));
+        }
+        if is_word(c) {
             let mut j = i;
             while j < n && is_word(s[j]) {
                 j += 1;
@@ -122,26 +131,27 @@ fn tokens(text: &str) -> Vec<String> {
             i += 1;
         }
     }
-    toks
+    Ok(toks)
 }
 
 /// Width of `[ msb : lsb ]` given the tokens between the brackets; 0 if unknown.
-fn range_width(toks: &[String]) -> u32 {
-    if toks.len() == 3 && toks[1] == ":" {
-        let unsigned = |t: &str| !t.starts_with(['+', '-']);
-        if let (Some(msb), Some(lsb)) = (parse_int(&toks[0]), parse_int(&toks[2]))
-            && unsigned(&toks[0])
-            && unsigned(&toks[2])
-        {
-            return ((msb - lsb).unsigned_abs() + 1) as u32;
-        }
+fn range_width(toks: &[String]) -> u64 {
+    if let [msb, colon, lsb] = toks
+        && colon == ":"
+        && !msb.starts_with(['+', '-'])
+        && !lsb.starts_with(['+', '-'])
+        && let (Some(msb), Some(lsb)) = (parse_int(msb), parse_int(lsb))
+    {
+        // Both are at least 0, so the difference fits and so does one more.
+        return msb.abs_diff(lsb) + 1;
     }
     0
 }
 
-/// Skip net and data type words and one packed range from `toks[k]`. Returns
-/// the index of the name and the range's width (None without a range).
-fn types_and_range(toks: &[String], mut k: usize) -> (usize, Option<u32>) {
+/// Skip net and data type words and one packed range from `toks[k]`, looking
+/// no further than the end of `toks`, the end of the declaration. Returns the
+/// index of the name and the range's width (None without a range).
+fn types_and_range(toks: &[String], mut k: usize) -> (usize, Option<u64>) {
     let mut width = None;
     while k < toks.len() {
         if TYPE_WORDS.contains(&toks[k].as_str()) {
@@ -172,8 +182,8 @@ fn split(toks: &[String]) -> Vec<Vec<String>> {
         }
         if depth == 0 && t == "," {
             items.push(Vec::new());
-        } else {
-            items.last_mut().expect("never empty").push(t.clone());
+        } else if let Some(last) = items.last_mut() {
+            last.push(t.clone());
         }
     }
     items.retain(|x| !x.is_empty());
@@ -200,11 +210,26 @@ fn skip_parens(toks: &[String], mut i: usize) -> usize {
     i
 }
 
-/// The ports of `module` in declaration order, or None if the module is absent.
-pub fn verilog_ports(text: &str, module: &str) -> Option<Vec<VerilogPort>> {
-    let toks = tokens(&clean(text));
-    let start = (0..toks.len().saturating_sub(1))
-        .find(|&k| (toks[k] == "module" || toks[k] == "macromodule") && toks[k + 1] == module)?;
+/// The ports of `module` in declaration order, or None if the module is
+/// absent, with the default limits.
+pub fn verilog_ports(text: &str, module: &str) -> Result<Option<Vec<VerilogPort>>, LimitError> {
+    verilog_ports_with(text, module, &Limits::DEFAULT)
+}
+
+/// The ports of `module` in declaration order, or None if the module is
+/// absent. Fails when the file has too many tokens or the module too many
+/// ports.
+pub fn verilog_ports_with(
+    text: &str,
+    module: &str,
+    limits: &Limits,
+) -> Result<Option<Vec<VerilogPort>>, LimitError> {
+    let toks = tokens(&clean(text), limits)?;
+    let Some(start) = (0..toks.len().saturating_sub(1))
+        .find(|&k| (toks[k] == "module" || toks[k] == "macromodule") && toks[k + 1] == module)
+    else {
+        return Ok(None);
+    };
     let mut i = start + 2;
     if i < toks.len() && toks[i] == "#" {
         i = skip_parens(&toks, i + 1);
@@ -217,7 +242,7 @@ pub fn verilog_ports(text: &str, module: &str) -> Option<Vec<VerilogPort>> {
         i = end;
         ansi = items.first().is_some_and(|it| is_direction(&it[0]));
         let mut direction = String::new();
-        let mut width: Option<u32> = None;
+        let mut width: Option<u64> = None;
         for item in &items {
             if ansi {
                 let k;
@@ -253,9 +278,23 @@ pub fn verilog_ports(text: &str, module: &str) -> Option<Vec<VerilogPort>> {
             }
         }
     }
-    if ansi {
-        return Some(ports);
+    if ports.len() > limits.pins {
+        return Err(LimitError(format!(
+            "module {} has more than {} ports",
+            quote(module),
+            limits.pins
+        )));
     }
+    if ansi {
+        return Ok(Some(ports));
+    }
+    // The last port of each name, as a Python dict keeps it: a later
+    // declaration updates that one, found without scanning every port.
+    let by_name: HashMap<String, usize> = ports
+        .iter()
+        .enumerate()
+        .map(|(k, p)| (p.name.clone(), k))
+        .collect();
     while i < toks.len() && toks[i] != "endmodule" {
         let t = toks[i].as_str();
         if t == "function" || t == "task" {
@@ -268,10 +307,9 @@ pub fn verilog_ports(text: &str, module: &str) -> Option<Vec<VerilogPort>> {
             let j = (i..toks.len())
                 .find(|&j| toks[j] == ";")
                 .unwrap_or(toks.len());
-            let (k, width) = types_and_range(&toks, i + 1);
+            let (k, width) = types_and_range(&toks[..j], i + 1);
             for item in split(&toks[k.min(j)..j]) {
-                // A later declaration of the same name wins, as a dict does.
-                for p in ports.iter_mut().filter(|p| p.name == item[0]) {
+                if let Some(p) = by_name.get(&item[0]).and_then(|&k| ports.get_mut(k)) {
                     p.direction = t.to_string();
                     p.width = width;
                 }
@@ -280,21 +318,21 @@ pub fn verilog_ports(text: &str, module: &str) -> Option<Vec<VerilogPort>> {
         }
         i += 1;
     }
-    Some(ports)
+    Ok(Some(ports))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn by_name(ports: Vec<VerilogPort>) -> Vec<(String, String, Option<u32>)> {
+    fn by_name(ports: Vec<VerilogPort>) -> Vec<(String, String, Option<u64>)> {
         ports
             .into_iter()
             .map(|p| (p.name, p.direction, p.width))
             .collect()
     }
 
-    fn row(n: &str, d: &str, w: Option<u32>) -> (String, String, Option<u32>) {
+    fn row(n: &str, d: &str, w: Option<u64>) -> (String, String, Option<u64>) {
         (n.into(), d.into(), w)
     }
 
@@ -314,7 +352,7 @@ mod tests {
     endmodule
     "#;
         assert_eq!(
-            by_name(verilog_ports(non_ansi, "blk").unwrap()),
+            by_name(verilog_ports(non_ansi, "blk").unwrap().unwrap()),
             [
                 row("clk", "input", None),
                 row("d", "input", Some(0)),
@@ -334,7 +372,7 @@ mod tests {
     endmodule
     "#;
         assert_eq!(
-            by_name(verilog_ports(ansi, "blk").unwrap()),
+            by_name(verilog_ports(ansi, "blk").unwrap().unwrap()),
             [
                 row("clk", "input", None),
                 row("rst", "input", None),
@@ -344,7 +382,10 @@ mod tests {
                 row("vin", "inout", None),
             ]
         );
-        assert_eq!(verilog_ports("module x; endmodule", "blk"), None);
-        assert_eq!(verilog_ports("module blk; endmodule", "blk"), Some(vec![]));
+        assert_eq!(verilog_ports("module x; endmodule", "blk"), Ok(None));
+        assert_eq!(
+            verilog_ports("module blk; endmodule", "blk"),
+            Ok(Some(vec![]))
+        );
     }
 }

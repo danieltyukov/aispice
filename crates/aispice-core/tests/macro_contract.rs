@@ -3,7 +3,7 @@
 //! says, and the spec, schema and fixtures must not drift from ChipLeap's
 //! copies.
 
-use aispice_core::macropkg::gds::parse_gds;
+use aispice_core::macropkg::gds::{GdsError, parse_gds};
 use aispice_core::macropkg::{
     CheckOptions, Evidence, Manifest, Status, check_package, parse_pdk_option,
 };
@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 // The contract both repositories share. ChipLeap pins the same hashes in
 // tests/test_macro.py; change both together (CONTRIBUTING.md).
-const SPEC_SHA256: &str = "d578097f64823e93045f8575e3d12f25b79e55ee98323f9885f61fbd1b59d705";
+const SPEC_SHA256: &str = "b163157047ac18658b59d2bf2aec91a61823cd4056a9bb8d0427d31eb953069c";
 const SCHEMA_SHA256: &str = "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327";
-const FIXTURES_SHA256: &str = "5d3514d5526a26ac23f0cd56710b5fc6bcd8b323361dcf2047b71fa797eaae4a";
+const FIXTURES_SHA256: &str = "62a75b14e98a40a72df85162862e2cb980be2afd8692aec6b6d42917338b0074";
 
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -71,6 +71,7 @@ fn every_case_reports_exactly_what_expected_json_says() {
         let package = case["package"].as_str().unwrap();
         let opts = CheckOptions {
             pdk: case["pdk"].as_str().map(str::to_string),
+            ..Default::default()
         };
         let id = format!("{package} {:?}", opts.pdk);
         let report = check_package(&fixtures().join(package), &opts).unwrap();
@@ -213,18 +214,20 @@ fn gds_bbox_through_the_hierarchy_matches_klayout() {
 #[test]
 fn gds_rejects_broken_streams() {
     let good = std::fs::read(fixtures().join("tiny_ota.macro/tiny_ota.gds")).unwrap();
-    let e = parse_gds(&good[..good.len() - 4]).unwrap_err().0;
+    let e = parse_gds(&good[..good.len() - 4]).unwrap_err().to_string();
     assert!(e.contains("truncated") || e.contains("ENDLIB"), "{e}");
-    let e = parse_gds(&[0, 2, 0, 2]).unwrap_err().0;
+    let e = parse_gds(&[0, 2, 0, 2]).unwrap_err().to_string();
     assert!(e.contains("record length"), "{e}");
     let mut short = good[..6].to_vec();
     short.extend([0, 6, 0x0F, 3, 0, 0]);
     short.extend(&good[6..]);
-    let e = parse_gds(&short).unwrap_err().0;
+    let e = parse_gds(&short).unwrap_err().to_string();
     assert!(e.contains("too short"), "{e}");
-    let looped = parse_gds(&std::fs::read(fixtures().join("gds/loop.gds")).unwrap()).unwrap();
-    let e = looped.bbox("a").unwrap_err().0;
-    assert!(e.contains("contains itself"), "{e}");
+    let looped = parse_gds(&std::fs::read(fixtures().join("gds/loop.gds")).unwrap());
+    assert!(
+        matches!(&looped, Err(GdsError::Cycle(m)) if m == r#"cell "a" contains itself: "a" -> "b" -> "a""#),
+        "{looped:?}"
+    );
 }
 
 #[test]
@@ -302,6 +305,7 @@ fn package_level_problems() {
     );
     let bad = CheckOptions {
         pdk: Some("bad name".into()),
+        ..Default::default()
     };
     assert!(check_package(&pkg, &bad).is_err());
 }

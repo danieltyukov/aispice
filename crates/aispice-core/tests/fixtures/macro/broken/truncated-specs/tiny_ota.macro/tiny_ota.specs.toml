@@ -1,0 +1,11 @@
+schema = "macro.specs/v1"
+
+# Synthetic test fixture: the values are invented, not simulated.
+
+[[specs]]
+name = "dc_gain"
+description = "Open-loop gain at 1 kHz into 100 fF"
+unit = "dB"
+min = 30
+typ = 36
+measured = { tt = 36.2,

@@ -1,0 +1,26 @@
+{
+  "schema": "macro.evidence/v1",
+  "operation": "lvs",
+  "tool": {
+    "name": "synthetic",
+    "version": "1"
+  },
+  "pdk": {
+    "name": "ihp-sg13g2",
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081"
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "Synthetic test fixture: no LVS was run."
+  },
+  "inputs": [
+    {
+      "path": "tiny_counter.gds",
+      "sha256": "ea398149f704cc0e520c8e3c066c61afa97390c4a038d746032d1ba8f731dafd"
+    },
+    {
+      "path": "tiny_counter.spice",
+      "sha256": "175ab196ff75eab674e1bfc257be1b0208a6c93bac6c846b91f36121eea52ea8"
+    }
+  ]
+}

@@ -462,7 +462,9 @@ measured = {{ tt = 20.1e-6, ss = 18.7e-6, ff = 22.4e-6 }}
 # The digital macro: a 2-bit counter with enable and active-low reset, 20 x 10 um.
 
 
-def counter_gds(top: str = "tiny_counter") -> bytes:
+def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
+    """The counter's layout; ``hierarchy`` adds references the validators must refuse
+    or measure without visiting every instance."""
     tap = Cell("tiny_counter_tap")
     tap.rect(ACTIV, 0, 0, 300, 300)
     cell = Cell(top)
@@ -483,7 +485,29 @@ def counter_gds(top: str = "tiny_counter") -> bytes:
         cell.rect(METAL2, x0, y0, x0 + 400, y0 + 800)
         cell.rect(METAL2_PIN, x0, y0, x0 + 400, y0 + 800)
         cell.text(METAL2_TEXT, x0 + 200, y0 + 400, name)
-    return gds("tiny_counter", [tap, cell])
+    cells = [tap, cell]
+    if hierarchy == "self-reference":
+        cell.sref("tiny_counter_loop", 1000, 1000)
+        loop = Cell("tiny_counter_loop").rect(METAL1, 0, 0, 100, 100)
+        cells.append(loop.sref("tiny_counter_loop", 0, 0))
+    elif hierarchy == "cycle":
+        cell.sref("tiny_counter_a", 1000, 1000)
+        cells.append(Cell("tiny_counter_a").sref("tiny_counter_b", 0, 0))
+        cells.append(
+            Cell("tiny_counter_b").rect(METAL1, 0, 0, 100, 100).sref("tiny_counter_a", 0, 0)
+        )
+    elif hierarchy == "huge-array":
+        # 32767 x 32767 instances, 1 nm apart: the box comes from the corner instances.
+        cell.aref("tiny_counter_dot", 32767, 32767, 0, 0, 1, 1)
+        cells.append(Cell("tiny_counter_dot").rect(METAL1, 0, 0, 10, 10))
+    elif hierarchy == "deep":
+        # 65 levels of references below the top cell, one more than the limit.
+        cell.sref("tiny_counter_d0", 1000, 1000)
+        cells += [
+            Cell(f"tiny_counter_d{i}").sref(f"tiny_counter_d{i + 1}", 0, 0) for i in range(64)
+        ]
+        cells.append(Cell("tiny_counter_d64").rect(METAL1, 0, 0, 100, 100))
+    return gds("tiny_counter", cells)
 
 
 def counter_toml(width_um: str = "20.0") -> str:
@@ -832,6 +856,24 @@ def _openada(files: Files) -> Files:
     return files
 
 
+def _cut(files: Files, name: str, marker: str) -> Files:
+    """The file up to the end of ``marker``, as if a copy had stopped there."""
+    text = files[name].decode()
+    assert marker in text, (name, marker)
+    files[name] = text[: text.index(marker) + len(marker)].encode()
+    return files
+
+
+def _counter_layout(hierarchy: str) -> Callable[[Files], Files]:
+    return lambda f: with_evidence(
+        {**f, "tiny_counter.gds": counter_gds(hierarchy=hierarchy)}, "tiny_counter"
+    )
+
+
+# Nested 70 deep, past the limit of 64 both validators check before parsing.
+DEEP = 70
+
+
 # Broken and edge-case variants: (case, base, directory name, change). Each keeps
 # its evidence hashes fresh unless the change is about the evidence.
 VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] = [
@@ -950,6 +992,103 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
     ),
     ("openada-evidence", counter, "tiny_counter.macro", _openada),
     ("dirname", counter, "counter_v2", lambda f: f),
+    # Files built to stall or crash a validator: each must end in a finding.
+    ("gds-self-reference", counter, "tiny_counter.macro", _counter_layout("self-reference")),
+    ("gds-cycle", counter, "tiny_counter.macro", _counter_layout("cycle")),
+    ("gds-huge-array", counter, "tiny_counter.macro", _counter_layout("huge-array")),
+    ("gds-deep", counter, "tiny_counter.macro", _counter_layout("deep")),
+    (
+        "manifest-nesting",
+        counter,
+        "tiny_counter.macro",
+        lambda f: {
+            **f,
+            "macro.toml": f["macro.toml"] + f"\n[extra]\nx = {'[' * DEEP}{']' * DEEP}\n".encode(),
+        },
+    ),
+    (
+        "manifest-pins",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(f, "macro.toml", "width = 2\n", "width = 1000000000\n"),
+    ),
+    (
+        "liberty-nesting",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lib",
+            "  delay_model : table_lookup ;\n",
+            "  delay_model : table_lookup ;\n  " + "g () { " * DEEP + "}" * DEEP + "\n",
+        ),
+    ),
+    (
+        "evidence-nesting",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "evidence/drc.json",
+            '"inputs": [',
+            f'"data": {"[" * DEEP}{"]" * DEEP},\n  "inputs": [',
+        ),
+    ),
+    # Files that end early, one per format.
+    (
+        "truncated-manifest",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _cut(f, "macro.toml", 'name = "q"\ndirection = "out'),
+    ),
+    (
+        "truncated-gds",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            {**f, "tiny_counter.gds": f["tiny_counter.gds"][: len(f["tiny_counter.gds"]) // 2]},
+            "tiny_counter",
+        ),
+    ),
+    (
+        "truncated-lef",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _cut(f, "tiny_counter.lef", "PIN rst_n\n    DIRECTION INPUT ;"),
+    ),
+    (
+        "truncated-liberty",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _cut(f, "tiny_counter.lib", "pin (en) {"),
+    ),
+    (
+        "truncated-verilog",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _cut(f, "tiny_counter.v", "input rst_n,"),
+    ),
+    (
+        "truncated-spice",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            _cut(f, "tiny_counter.spice", ".SUBCKT tiny_counter clk rst_n en q[0]"),
+            "tiny_counter",
+        ),
+    ),
+    (
+        "truncated-specs",
+        ota,
+        "tiny_ota.macro",
+        lambda f: _cut(f, "tiny_ota.specs.toml", "measured = { tt = 36.2,"),
+    ),
+    (
+        "truncated-evidence",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _cut(f, "evidence/drc.json", '"operation": "drc",'),
+    ),
 ]
 
 

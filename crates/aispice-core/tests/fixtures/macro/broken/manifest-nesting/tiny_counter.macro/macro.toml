@@ -1,0 +1,78 @@
+schema = "macro/v1"
+name = "tiny_counter"
+kind = "digital"
+description = "2-bit counter with enable and active-low reset. Synthetic test fixture."
+
+[pdk]
+name = "ihp-sg13g2"
+commit = "22f2a25f1734796de3debbbf29cf697cbbc54081"
+
+[producer]
+tool = "chipleap"
+version = "0.3.0"
+
+[size]
+width_um = 20.0
+height_um = 10.0
+
+[[domains]]
+name = "core"
+voltage = 1.2
+power = ["VDD"]
+ground = ["VSS"]
+
+[[pins]]
+name = "clk"
+direction = "input"
+kind = "clock"
+domain = "core"
+layer = "Metal2"
+
+[[pins]]
+name = "rst_n"
+direction = "input"
+kind = "signal"
+domain = "core"
+layer = "Metal2"
+
+[[pins]]
+name = "en"
+direction = "input"
+kind = "signal"
+domain = "core"
+
+[[pins]]
+name = "q"
+direction = "output"
+kind = "signal"
+domain = "core"
+width = 2
+layer = "Metal2"
+
+[[pins]]
+name = "VDD"
+direction = "inout"
+kind = "power"
+
+[[pins]]
+name = "VSS"
+direction = "inout"
+kind = "ground"
+
+[[corners]]
+name = "tt"
+process = "tt"
+temperature = 27
+
+[[corners]]
+name = "ss"
+process = "ss"
+temperature = 125
+voltages = { core = 1.08 }
+liberty = "tiny_counter__ss.lib"
+
+[extra.chipleap]
+clock_period_ns = 10.0
+
+[extra]
+x = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]

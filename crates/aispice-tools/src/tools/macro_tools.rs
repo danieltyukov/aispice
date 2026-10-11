@@ -74,7 +74,10 @@ impl Tool for CheckMacro {
                 return Err(format!("{} is not a folder", input.path));
             }
             confined(&dir, p.root())?;
-            let opts = CheckOptions { pdk: input.pdk };
+            let opts = CheckOptions {
+                pdk: input.pdk,
+                ..Default::default()
+            };
             let mut report = check_package(&dir, &opts).map_err(|e| e.to_string())?;
             report.package = input.path.clone();
             let mut text = report.to_text();

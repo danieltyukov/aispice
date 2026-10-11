@@ -382,6 +382,308 @@
           "message": "SIZE is 20 x 10 um, macro.toml says 30 x 10 um"
         }
       ]
+    },
+    {
+      "package": "broken/gds-self-reference/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.cycle",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "cell \"tiny_counter_loop\" contains itself: \"tiny_counter_loop\" -> \"tiny_counter_loop\""
+        }
+      ]
+    },
+    {
+      "package": "broken/gds-cycle/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.cycle",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "cell \"tiny_counter_a\" contains itself: \"tiny_counter_a\" -> \"tiny_counter_b\" -> \"tiny_counter_a\""
+        }
+      ]
+    },
+    {
+      "package": "broken/gds-huge-array/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.bbox",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "the top cell spans (0, 0) to (32.776, 32.776) um, outside the 20 x 10 um boundary"
+        }
+      ]
+    },
+    {
+      "package": "broken/gds-deep/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.limit",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "references nest more than 64 deep below cell \"tiny_counter\""
+        }
+      ]
+    },
+    {
+      "package": "broken/manifest-nesting/tiny_counter.macro",
+      "pdk": null,
+      "name": null,
+      "kind": null,
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "manifest.limit",
+          "severity": "error",
+          "file": "macro.toml",
+          "message": "tables and arrays nest more than 64 deep"
+        }
+      ]
+    },
+    {
+      "package": "broken/manifest-pins/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "manifest.limit",
+          "severity": "error",
+          "file": "macro.toml",
+          "message": "the pins have more than 10000 bits"
+        }
+      ]
+    },
+    {
+      "package": "broken/liberty-nesting/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lib.limit",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "groups nest more than 64 deep"
+        }
+      ]
+    },
+    {
+      "package": "broken/evidence-nesting/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "evidence.limit",
+          "severity": "error",
+          "file": "evidence/drc.json",
+          "message": "objects and arrays nest more than 64 deep"
+        },
+        {
+          "rule": "evidence.missing",
+          "severity": "error",
+          "file": "evidence",
+          "message": "no summary for drc"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-manifest/tiny_counter.macro",
+      "pdk": null,
+      "name": null,
+      "kind": null,
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "manifest.syntax",
+          "severity": "error",
+          "file": "macro.toml",
+          "message_prefix": "not valid TOML: "
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-gds/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.parse",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "cannot read the GDS: bad record length 44 at byte 772"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-lef/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lef.parse",
+          "severity": "error",
+          "file": "tiny_counter.lef",
+          "message": "cannot read the LEF: unexpected end of file in MACRO tiny_counter"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-liberty/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lib.parse",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "cannot read the liberty file: unexpected end of file inside a group"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-verilog/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "verilog.missing_pin",
+          "severity": "error",
+          "file": "tiny_counter.v",
+          "message": "port \"en\" from macro.toml is missing"
+        },
+        {
+          "rule": "verilog.missing_pin",
+          "severity": "error",
+          "file": "tiny_counter.v",
+          "message": "port \"q\" from macro.toml is missing"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-spice/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 3,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "spice.missing_pin",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "port \"q[1]\" from macro.toml is missing"
+        },
+        {
+          "rule": "spice.missing_pin",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "port \"VDD\" from macro.toml is missing"
+        },
+        {
+          "rule": "spice.missing_pin",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "port \"VSS\" from macro.toml is missing"
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-specs/tiny_ota.macro",
+      "pdk": null,
+      "name": "tiny_ota",
+      "kind": "analog",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "specs.parse",
+          "severity": "error",
+          "file": "tiny_ota.specs.toml",
+          "message_prefix": "not valid TOML: "
+        }
+      ]
+    },
+    {
+      "package": "broken/truncated-evidence/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "evidence.parse",
+          "severity": "error",
+          "file": "evidence/drc.json",
+          "message_prefix": "not valid JSON: "
+        },
+        {
+          "rule": "evidence.missing",
+          "severity": "error",
+          "file": "evidence",
+          "message": "no summary for drc"
+        }
+      ]
     }
   ]
 }

@@ -2,6 +2,8 @@
 //! directions. ChipLeap's `chipleap.macro.views.spice_subckt` reads it the
 //! same way. SPICE is case-insensitive; names are compared in ASCII lower case.
 
+use super::limits::{LimitError, Limits};
+use super::text::quote;
 use super::{is_ws, words};
 use std::collections::BTreeMap;
 
@@ -26,8 +28,28 @@ fn code(line: &str) -> &str {
     line
 }
 
-/// `.subckt name` with its ports and `*.PININFO` directions, or None if absent.
-pub fn spice_subckt(text: &str, name: &str) -> Option<SpiceSubckt> {
+/// `.subckt name` with its ports and `*.PININFO` directions, or None if
+/// absent, with the default limits.
+pub fn spice_subckt(text: &str, name: &str) -> Result<Option<SpiceSubckt>, LimitError> {
+    spice_subckt_with(text, name, &Limits::DEFAULT)
+}
+
+/// `.subckt name` with its ports and `*.PININFO` directions, or None if
+/// absent. Fails when the file has too many lines or the subcircuit too many
+/// ports.
+pub fn spice_subckt_with(
+    text: &str,
+    name: &str,
+    limits: &Limits,
+) -> Result<Option<SpiceSubckt>, LimitError> {
+    let count = |b: u8| text.bytes().filter(|&c| c == b).count();
+    let lines = count(b'\n') + count(b'\r') - text.matches("\r\n").count() + 1;
+    if lines > limits.tokens {
+        return Err(LimitError(format!(
+            "the SPICE file has more than {} lines",
+            limits.tokens
+        )));
+    }
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -48,11 +70,18 @@ pub fn spice_subckt(text: &str, name: &str) -> Option<SpiceSubckt> {
         {
             continue;
         }
-        let ports = ws[2..]
+        let ports: Vec<String> = ws[2..]
             .iter()
             .take_while(|w| !w.eq_ignore_ascii_case("params:") && !w.contains('='))
             .map(|w| w.to_string())
             .collect();
+        if ports.len() > limits.pins {
+            return Err(LimitError(format!(
+                ".subckt {} has more than {} ports",
+                quote(ws[1]),
+                limits.pins
+            )));
+        }
         let mut pininfo = BTreeMap::new();
         for later in &lines[k + 1..] {
             let lower = later.to_ascii_lowercase();
@@ -69,13 +98,13 @@ pub fn spice_subckt(text: &str, name: &str) -> Option<SpiceSubckt> {
                 }
             }
         }
-        return Some(SpiceSubckt {
+        return Ok(Some(SpiceSubckt {
             name: ws[1].to_string(),
             ports,
             pininfo,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -86,7 +115,7 @@ mod tests {
     fn reads_what_chipleap_reads() {
         // The same input as ChipLeap's test_spice_reader.
         let text = "* header\n.SUBCKT other a b\n.ends\n.subckt BLK in out\n+ vdd vss params: w=1u\n*.pininfo in:I out:O\n+ vdd:B\nX1 out in vdd vss inv ; inline comment\n.ends BLK\n";
-        let sub = spice_subckt(text, "blk").unwrap();
+        let sub = spice_subckt(text, "blk").unwrap().unwrap();
         assert_eq!(sub.ports, ["in", "out", "vdd", "vss"]);
         let info: Vec<(&str, &str)> = sub
             .pininfo
@@ -97,9 +126,10 @@ mod tests {
         assert!(
             spice_subckt(".subckt x a=1\n.ends\n", "x")
                 .unwrap()
+                .unwrap()
                 .ports
                 .is_empty()
         );
-        assert!(spice_subckt(text, "missing").is_none());
+        assert_eq!(spice_subckt(text, "missing"), Ok(None));
     }
 }

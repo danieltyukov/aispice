@@ -1,7 +1,9 @@
 //! `macro.toml`: what a macro package says about its block, and reading and
 //! writing it.
 
+use super::limits::{Limits, ReadError, read_capped, toml_depth};
 use super::schema::{Val, validate_def};
+use super::toml10::toml11_syntax;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -193,6 +195,19 @@ pub struct Manifest {
 impl Manifest {
     /// Parse `macro.toml` text and check it against the schema.
     pub fn from_toml_str(text: &str) -> Result<Manifest, MacroError> {
+        let most = Limits::DEFAULT.nesting;
+        if toml_depth(text) > most {
+            return Err(MacroError::Read {
+                path: MANIFEST.into(),
+                message: format!("tables and arrays nest more than {most} deep"),
+            });
+        }
+        if let Some(message) = toml11_syntax(text) {
+            return Err(MacroError::Read {
+                path: MANIFEST.into(),
+                message,
+            });
+        }
         let table: toml::Table = toml::from_str(text).map_err(|e| MacroError::Read {
             path: MANIFEST.into(),
             message: e.message().to_string(),
@@ -217,10 +232,15 @@ impl Manifest {
         } else {
             path.to_path_buf()
         };
-        let text = std::fs::read_to_string(&file).map_err(|e| MacroError::Read {
+        let read = |message: String| MacroError::Read {
             path: file.display().to_string(),
-            message: e.to_string(),
+            message,
+        };
+        let bytes = read_capped(&file, Limits::DEFAULT.manifest_bytes).map_err(|e| match e {
+            ReadError::TooLarge(m) => read(m),
+            ReadError::Io(e) => read(e.to_string()),
         })?;
+        let text = String::from_utf8(bytes).map_err(|e| read(e.to_string()))?;
         Manifest::from_toml_str(&text)
     }
 
@@ -244,6 +264,11 @@ impl Manifest {
 
     pub fn pin(&self, name: &str) -> Option<&Pin> {
         self.pins.iter().find(|p| p.name == name)
+    }
+
+    /// How many bits the pins have: a bus's width, one for a scalar.
+    pub fn pin_bits(&self) -> u64 {
+        self.pins.iter().map(|p| p.width.map_or(1, u64::from)).sum()
     }
 }
 

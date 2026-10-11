@@ -1,0 +1,3 @@
+* tiny_counter: 2-bit counter with enable and active-low reset. Synthetic test fixture.
+* Cell-level netlist; the cells are the IHP SG13G2 standard cells, defined in the PDK.
+.SUBCKT tiny_counter clk rst_n en q[0]

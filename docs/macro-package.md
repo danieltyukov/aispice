@@ -122,7 +122,7 @@ Fields:
   - `width` (an integer of at least 1) makes a pin a bus with bits `name[0]` to `name[width-1]`. LEF, liberty and SPICE name the bits that way; Verilog declares the bus with a range of the same width. Without `width` the pin is a scalar. Supply pins cannot be buses.
   - `kind` `clock` marks a clock input or output, `analog` a pin that carries an analog value, `signal` any other digital pin.
 - `corners` lists the conditions the block was characterized at. Analog macros need at least one, since the measured specs refer to them. `<name>.lib` is characterized at the first corner. A corner with a `liberty` file has a liberty of its own, checked like `<name>.lib`.
-- `macro.toml` and the spec table are TOML 1.0, which every TOML reader understands (Python's `tomllib` reads nothing newer). Text files are UTF-8; the view formats are read as ASCII, so names, keywords and numbers in them must be ASCII.
+- `macro.toml` and the spec table are TOML 1.0, which every TOML reader understands (Python's `tomllib` reads nothing newer). What TOML 1.1 added (the `\e` and `\xHH` escapes, line breaks and trailing commas in inline tables, times without seconds) is a syntax error, and so are an integer that does not fit in 64 bits and a float too large for a double. Text files are UTF-8; the view formats are read as ASCII, so names, keywords and numbers in them must be ASCII.
 - File names in `macro.toml` are bare names inside the package; paths are not allowed.
 - Unknown fields are errors, so a typo does not pass silently. Put tool-specific data under `[extra]`.
 
@@ -132,7 +132,7 @@ The JSON schema `macro-v1.schema.json` (in ChipLeap at `src/chipleap/macro/`, in
 
 All names are case-sensitive except in SPICE, which is case-insensitive. Each view must declare exactly the pins of `macro.toml`: a missing pin and an extra pin are both errors.
 
-**GDS.** A cell named `<name>` must be a top cell. Other top cells are a warning, since they would be merged into the chip. Subcells should carry the macro name as a prefix (`tiny_ota_pair`), so two macros merged into one chip never share a cell name; the validator does not check this. The bounding box of the top cell, through its whole hierarchy and ignoring text, must lie inside the boundary from `macro.toml`, placed by the LEF `ORIGIN`. Each pin bit should have a text label of the same name in the top cell, as LVS finds pins by their labels; a missing label is a warning.
+**GDS.** A cell named `<name>` must be a top cell. Other top cells are a warning, since they would be merged into the chip. Subcells should carry the macro name as a prefix (`tiny_ota_pair`), so two macros merged into one chip never share a cell name; the validator does not check this. No cell may contain itself, directly or through other cells. The bounding box of the top cell, through its whole hierarchy and ignoring text, must lie inside the boundary from `macro.toml`, placed by the LEF `ORIGIN`. Each pin bit should have a text label of the same name in the top cell, as LVS finds pins by their labels; a missing label is a warning.
 
 **LEF.** The file must contain `MACRO <name>` with `CLASS BLOCK` (another class is a warning) and a `SIZE` equal to `macro.toml` within 0.0005 um. Every pin bit has a `PIN` with at least one `PORT` shape. Signal, clock and analog pins have a `DIRECTION` equal to `macro.toml`'s (`OUTPUT TRISTATE` counts as output). Power pins have `USE POWER`, ground pins `USE GROUND`, and no other pin may use either; a `USE` that does not match a signal, clock or analog pin is a warning. If `macro.toml` gives a pin `layer`, the LEF pin has a shape on that layer. Bus bits use square brackets (`BUSBITCHARS "[]"`).
 
@@ -191,26 +191,64 @@ Known operations: `drc`, `lvs`, `antenna`, `erc`, `density`, `sta`, `pex`, `sim`
 
 The tool that places a macro passes its own PDK: `macro check DIR --pdk ihp-sg13g2` or `--pdk ihp-sg13g2@22f2a25`. A different PDK name is an error; a different commit is a warning, because a PDK update often leaves a block valid but should be looked at.
 
+## Limits
+
+A package can come from anyone, so a validator reads it within limits that no real macro comes near. A file or a structure past a limit gives a finding, never a hang, a crash or a machine out of memory, and both tools use the same values. A MiB is 1,048,576 bytes.
+
+| What | Limit | Finding |
+|---|---|---|
+| `macro.toml` | 4 MiB | `file.too_large` |
+| `<name>.specs.toml` | 1 MiB | `file.too_large` |
+| an evidence summary | 4 MiB | `file.too_large` |
+| a liberty file | 16 MiB | `file.too_large` |
+| the LEF, Verilog and SPICE files | 64 MiB each | `file.too_large` |
+| the GDS, and a package file an evidence input names | 256 MiB | `file.too_large` |
+| tables and arrays nested in `macro.toml` or the spec table | 64 deep | `manifest.limit`, `specs.limit` |
+| objects and arrays nested in a summary | 64 deep | `evidence.limit` |
+| liberty groups nested | 64 deep | `lib.limit` |
+| pin bits in `macro.toml` | 10,000 | `manifest.limit` |
+| corners in `macro.toml` | 64 | `manifest.limit` |
+| pins of a LEF macro, of the macro's liberty cell (bus bits included), Verilog module or SPICE subcircuit | 10,000 | `lef.limit`, `lib.limit`, `verilog.limit`, `spice.limit` |
+| tokens of the LEF, a liberty or the Verilog file; lines of the SPICE file | 8,000,000 | `lef.limit`, `lib.limit`, `verilog.limit`, `spice.limit` |
+| GDS records, elements and cells | 32,000,000, 8,000,000 and 100,000 | `gds.limit` |
+| GDS references nested below a cell | 64 deep | `gds.limit` |
+| points measured for GDS references at angles other than quarter turns | 4,000,000 | `gds.limit` |
+| summaries in `evidence/` | 64 | `evidence.limit` |
+| package files the evidence inputs name | 32 | `evidence.limit` |
+| findings listed in a report | 1,000 | `check.limit` |
+
+- A file's size is checked before it is read. A file past its limit is not read, and the checks that need it are skipped.
+- Nesting is checked before a file is parsed: in TOML it is bounded from brackets, braces, table headers and dotted keys, in JSON counted from the brackets outside strings. Past the limit the file is not parsed.
+- A GDS with a cell that contains itself (`gds.cycle`) or with references nested too deep is not measured. Each cell is measured once, and an array reference is measured from its four corner instances, so a 32767 x 32767 array costs no more than one instance. Measuring also stops with `gds.limit` when a reference's magnification takes coordinates out of floating-point range.
+- Each package file an evidence input names is hashed once per check, however many summaries name it.
+- After 1,000 findings a report lists no more. It still counts them in `errors` and `warnings`, and ends with a `check.limit` warning that says how many it left out.
+
 ## Rules
 
-Every finding has a rule id, a severity, the file it concerns (relative to the package, with forward slashes) and a message. A package passes when it has no errors; `--strict` also fails it on warnings. The validators check in the order of this table, pin by pin in `macro.toml` order and bit by bit, then extra pins by name.
+Every finding has a rule id, a severity, the file it concerns (relative to the package, with forward slashes) and a message. A package passes when it has no errors; `--strict` also fails it on warnings. The validators check in the order of this table, pin by pin in `macro.toml` order and bit by bit, then extra pins by name. For each file, `file.too_large`, `file.unreadable` and a `*.limit` finding about the whole file come before anything else about it.
 
 | Rule | Severity | Meaning |
 |---|---|---|
 | `manifest.syntax` | error | `macro.toml` is not valid TOML |
 | `manifest.version` | error | `schema` names another `macro/` version |
 | `manifest.schema` | error | `macro.toml` does not follow the schema |
+| `manifest.limit` | error | `macro.toml` nests too deep, or has too many pin bits or corners (see Limits) |
 | `manifest.duplicate_pin` | error | two pins share a name |
 | `manifest.domain` | error | two domains share a name, a domain lists a pin that does not exist or is not a supply pin of that kind, a supply pin is in no domain, or a pin names an unknown domain |
 | `manifest.corner` | error | two corners share a name, or a corner sets the voltage of an unknown domain |
 | `package.dirname` | warning | the directory is not called `<name>.macro` |
 | `file.missing` | error | a required file is missing |
+| `file.too_large` | error | a file is larger than its limit, so it is not read |
+| `file.unreadable` | error | a file is there but cannot be read |
 | `gds.parse` | error | the GDS cannot be read |
+| `gds.cycle` | error | a cell contains itself, directly or through other cells |
+| `gds.limit` | error | the GDS goes past a limit |
 | `gds.top_cell` | error | no top cell is called `<name>` |
 | `gds.extra_top_cell` | warning | the GDS has more top cells |
 | `gds.bbox` | error | the top cell is empty or reaches outside the boundary |
 | `gds.label` | warning | a pin bit has no text label in the top cell |
 | `lef.parse` | error | the LEF cannot be read |
+| `lef.limit` | error | the LEF goes past a limit |
 | `lef.macro` | error | no `MACRO <name>` |
 | `lef.class` | warning | the macro's class is not `BLOCK` |
 | `lef.size` | error | `SIZE` differs from `macro.toml` |
@@ -220,23 +258,28 @@ Every finding has a rule id, a severity, the file it concerns (relative to the p
 | `lef.port` | error | a pin has no `PORT` shape |
 | `lef.pin_layer` | error | a pin has no shape on the layer `macro.toml` names |
 | `lib.parse` | error | the liberty file cannot be read |
+| `lib.limit` | error | the liberty file goes past a limit |
 | `lib.cell` | error | no `cell(<name>)` |
 | `lib.missing_pin`, `lib.extra_pin` | error | pin sets differ |
 | `lib.direction` | error | a direction differs |
 | `lib.pg_pin` | error | a supply pin is not a `pg_pin` of the right type |
 | `lib.timing` | error | a digital output pin has no timing arc |
+| `verilog.limit` | error | the Verilog file goes past a limit |
 | `verilog.module` | error | no `module <name>` |
 | `verilog.missing_pin`, `verilog.extra_pin` | error | port sets differ |
 | `verilog.direction` | error | a direction differs |
 | `verilog.width` | error | a bus width differs, or a bus is declared as a scalar or the other way round |
+| `spice.limit` | error | the SPICE file goes past a limit |
 | `spice.subckt` | error | no `.subckt <name>` |
 | `spice.missing_pin`, `spice.extra_pin` | error | port sets differ |
 | `spice.direction` | error | a `*.PININFO` direction differs |
+| `specs.limit` | error | the spec table nests too deep |
 | `specs.parse` | error | the spec table is not valid TOML |
 | `specs.schema` | error | the spec table does not follow `#/$defs/specs_file` |
 | `specs.duplicate` | error | two specs share a name |
 | `specs.corner` | error or warning | a value is for an unknown corner (error), or a corner has no value (warning) |
 | `specs.fail` | error | a measured value is outside its limits |
+| `evidence.limit` | error | too many summaries, a summary nested too deep, or too many package files named as inputs |
 | `evidence.parse` | error | a summary is not valid JSON |
 | `evidence.schema` | error | a summary does not follow `#/$defs/evidence` (or the OpenADA subset) |
 | `evidence.missing` | error | no summary for `drc` or for `lvs` |
@@ -244,8 +287,9 @@ Every finding has a rule id, a severity, the file it concerns (relative to the p
 | `evidence.stale` | error | an input's SHA-256 differs from the package file |
 | `pdk.mismatch` | error | a summary names another PDK or commit than `macro.toml` |
 | `pdk.expected` | error or warning | the package is for another PDK (error) or commit (warning) than `--pdk` |
+| `check.limit` | warning | the report leaves out findings past the first 1,000 |
 
-Messages are identical in both tools, except the detail after `: ` in `*.parse` and `*.syntax` messages, which comes from each tool's parser. The shared fixtures pin every message.
+Messages are identical in both tools, except the detail after `: ` in `*.parse`, `*.syntax` and `file.unreadable` messages, which comes from each tool's parser or operating system. The shared fixtures pin every message.
 
 Report format (`--json`):
 
@@ -262,7 +306,7 @@ Report format (`--json`):
 }
 ```
 
-`name` and `kind` are null when `macro.toml` cannot be read. The command exits with 0 when the package passes, 1 when it does not, and 2 when the directory does not exist or the arguments are wrong.
+`name` and `kind` are null when `macro.toml` cannot be read or does not follow the schema. `errors` and `warnings` count every finding, also those a report leaves out past its limit. The command exits with 0 when the package passes, 1 when it does not, and 2 when the directory does not exist or the arguments are wrong.
 
 ## Versioning
 
@@ -270,4 +314,4 @@ Report format (`--json`):
 
 ## Shared fixtures
 
-Both repositories carry the same fixtures (ChipLeap: `tests/fixtures/macro/`, aispice: `crates/aispice-core/tests/fixtures/macro/`): a tiny analog macro, a tiny digital macro, broken variants of each, and `expected.json` with the exact findings each validator must report for each case. Their content is synthetic and written for the tests: a few rectangles on documented IHP SG13G2 layer numbers, hand-written LEF, liberty, Verilog and SPICE, invented spec values, and evidence that says so. No PDK file is copied. `generate.py` in that folder writes them all; `SHA256SUMS` lists every file's hash.
+Both repositories carry the same fixtures (ChipLeap: `tests/fixtures/macro/`, aispice: `crates/aispice-core/tests/fixtures/macro/`): a tiny analog macro, a tiny digital macro, broken variants of each (among them files built to stall a validator and files cut short in every format), and `expected.json` with the exact findings each validator must report for each case. Their content is synthetic and written for the tests: a few rectangles on documented IHP SG13G2 layer numbers, hand-written LEF, liberty, Verilog and SPICE, invented spec values, and evidence that says so. No PDK file is copied. `generate.py` in that folder writes them all; `SHA256SUMS` lists every file's hash.

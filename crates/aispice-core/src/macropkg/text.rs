@@ -78,6 +78,26 @@ pub fn join(path: &str, key: &str) -> String {
     }
 }
 
+/// Quoted names for a message: `none` for no names, and after the first ten
+/// only how many more there are, so a file with a million cells gives a
+/// short line.
+pub fn names(items: &[String]) -> String {
+    const SHOWN: usize = 10;
+    if items.is_empty() {
+        return "none".into();
+    }
+    let text = items
+        .iter()
+        .take(SHOWN)
+        .map(|s| quote(s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match items.len().checked_sub(SHOWN) {
+        Some(rest) if rest > 0 => format!("{text} and {rest} more"),
+        _ => text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -13,8 +13,8 @@
 use super::text::{describe, fmt_g, join, plural, quote};
 use regex::Regex;
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// `macro-v1.schema.json`, identical to ChipLeap's copy.
 pub const SCHEMA_JSON: &str = include_str!("macro-v1.schema.json");
@@ -136,6 +136,19 @@ fn equals(v: &Val, c: &Value) -> bool {
     }
 }
 
+/// Whether `s` matches a pattern of the bundled schema. Each pattern is
+/// compiled once: a manifest with ten thousand pins checks as many names.
+fn matches(pattern: &str, s: &str) -> bool {
+    static COMPILED: OnceLock<Mutex<HashMap<String, Option<Regex>>>> = OnceLock::new();
+    let cache = COMPILED.get_or_init(Default::default);
+    let mut cache = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| Regex::new(pattern).ok())
+        .as_ref()
+        .is_some_and(|re| re.is_match(s))
+}
+
 fn label(path: &str) -> &str {
     if path.is_empty() {
         "the document"
@@ -225,7 +238,7 @@ pub fn validate(node: &Value, value: &Val, path: &str) -> Vec<String> {
             ));
         }
         if let Some(p) = obj.get("pattern").and_then(Value::as_str)
-            && !Regex::new(p).is_ok_and(|re| re.is_match(s))
+            && !matches(p, s)
         {
             errs.push(format!(
                 "{} is {}, which does not match {p}",

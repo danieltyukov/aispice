@@ -9,7 +9,13 @@ use std::process::ExitCode;
 /// warnings with `strict`), 2 when the directory or `--pdk` is wrong, the same
 /// as `chipleap macro check`.
 pub fn check(dir: &Path, pdk: Option<String>, strict: bool, json: bool) -> Result<ExitCode> {
-    let report = match check_package(dir, &CheckOptions { pdk }) {
+    let report = match check_package(
+        dir,
+        &CheckOptions {
+            pdk,
+            ..Default::default()
+        },
+    ) {
         Ok(r) => r,
         Err(e @ (MacroError::NotADirectory(_) | MacroError::Invalid(_))) => {
             eprintln!("aispice: {e}");

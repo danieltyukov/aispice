@@ -3,10 +3,12 @@
 //! The fields follow OpenADA's `openada.result/v0alpha1` envelope where the
 //! two overlap, plus the PDK the check ran on.
 
+use super::limits::{ReadError, too_large};
 use super::manifest::{EVIDENCE_SCHEMA, MacroError, Pdk};
 use super::schema::{Val, validate_def};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,9 +53,39 @@ pub struct Evidence {
     pub data: Option<serde_json::Value>,
 }
 
+/// A file's SHA-256, read in chunks.
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let data = std::fs::read(path)?;
-    Ok(Sha256::digest(&data)
+    match sha256_capped(path, u64::MAX) {
+        Ok(digest) => Ok(digest),
+        Err(ReadError::Io(e)) => Err(e),
+        Err(ReadError::TooLarge(m)) => Err(std::io::Error::other(m)),
+    }
+}
+
+/// A file's SHA-256, after its size says it is within `limit`.
+pub fn sha256_capped(path: &Path, limit: u64) -> Result<String, ReadError> {
+    let size = std::fs::metadata(path)?.len();
+    if size > limit {
+        return Err(ReadError::TooLarge(too_large(size, limit)));
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut read = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        read = read.saturating_add(n as u64);
+        if read > limit {
+            // It grew after the stat.
+            return Err(ReadError::TooLarge(too_large(read, limit)));
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
