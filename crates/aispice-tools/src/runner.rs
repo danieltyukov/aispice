@@ -410,6 +410,15 @@ impl Runner {
         }
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         let lib_dirs = self.model_lib_dirs();
+        let circuit_path = project.resolve(circuit)?;
+        let base = circuit_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project.root().to_path_buf());
+        // Model resolution keeps only includes it can find, and the simulator
+        // runs in a private folder, so files beside the circuit are named by
+        // their full path from here on. The policy checks those paths below.
+        let netlist = &absolutize_netlist_includes(netlist, &base);
         let mut notes = Vec::new();
         let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, pdk.as_ref());
         if let Some(t) = &text.1 {
@@ -438,11 +447,6 @@ impl Runner {
         }
         let deck = text.0;
 
-        let circuit_path = project.resolve(circuit)?;
-        let base = circuit_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| project.root().to_path_buf());
         let mut allowed = project.allowed_dirs();
         allowed.extend(lib_dirs.iter().cloned());
         // Every registered PDK folder may be included from, so a hand-written
@@ -788,6 +792,18 @@ pub fn absolutize_includes(deck: &str, base: &Path) -> String {
         }
         out.push_str(line);
         out.push('\n');
+    }
+    out
+}
+
+/// [`absolutize_includes`] on the top-level directives of a netlist.
+fn absolutize_netlist_includes(netlist: &Netlist, base: &Path) -> Netlist {
+    let mut out = netlist.clone();
+    for item in &mut out.items {
+        if let aispice_core::netlist::Line::Directive { text } = item {
+            let fixed = absolutize_includes(text, base);
+            *text = fixed.trim_end_matches('\n').to_string();
+        }
     }
     out
 }
