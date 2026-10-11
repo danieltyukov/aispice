@@ -89,9 +89,11 @@ fn setup() -> Setup {
 
 const PADS: &str = "[[pads]]\nnet = \"clk\"\nside = \"south\"\nkind = \"input\"\n[[pads]]\nnet = \"rst_n\"\nside = \"south\"\nkind = \"input\"\n[[pads]]\nnet = \"en\"\nside = \"west\"\nkind = \"input\"\n[[pads]]\nnet = \"q0\"\nside = \"east\"\nkind = \"output\"\n[[pads]]\nnet = \"q1\"\nside = \"east\"\nkind = \"output\"\n[[pads]]\nnet = \"vdd\"\nside = \"north\"\nkind = \"vdd\"\n[[pads]]\nnet = \"vss\"\nside = \"north\"\nkind = \"vss\"\n[[pads]]\nnet = \"iovdd\"\nside = \"north\"\nkind = \"iovdd\"\n[[pads]]\nnet = \"iovss\"\nside = \"north\"\nkind = \"iovss\"\n";
 
+/// A chip of the counter. The package path is a TOML literal string, so a
+/// Windows path's backslashes stay as they are.
 fn chip(package: &str) -> String {
     format!(
-        "name = \"t\"\n[[macros]]\ninstance = \"cnt\"\npackage = \"{package}\"\nnets = {{ VDD = \"vdd\", VSS = \"vss\", \"q[0]\" = \"q0\", \"q[1]\" = \"q1\" }}\n{PADS}"
+        "name = \"t\"\n[[macros]]\ninstance = \"cnt\"\npackage = '{package}'\nnets = {{ VDD = \"vdd\", VSS = \"vss\", \"q[0]\" = \"q0\", \"q[1]\" = \"q1\" }}\n{PADS}"
     )
 }
 
