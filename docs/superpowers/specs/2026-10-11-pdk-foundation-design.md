@@ -130,10 +130,10 @@ Checked on this machine on 2026-10-11 against the pinned PDK commit, ngspice 42 
 
 Tolerances between ngspice and Xyce (same PSP 103.6 Verilog-A, two compilers and two solvers):
 
-- Inverter DC transfer, VDD 1.2 V: |V(out)| difference at most 10 mV at every point of a 10 mV sweep, and switching threshold (V(out) = VDD/2) within 2 mV.
-- 5T OTA AC: DC gain within 0.2 dB and unity-gain frequency within 2 %.
+- Inverter DC transfer, VDD 1.2 V: V(out) differs by at most 5 mV at every point of a 10 mV input sweep, and the switching threshold (V(out) = VDD/2) by at most 1 mV.
+- 5T OTA AC: DC gain within 0.1 dB and unity-gain frequency within 1 %.
 
-These are set from the agreement measured when the tests were written, with margin; the measured numbers are in the plan.
+Measured when the tests were written: 0.26 mV largest V(out) difference and the same threshold (0.6183 V) to 0.1 mV; the same DC gain (25.060 dB) and unity-gain frequency (113.725 MHz) to the printed digits. The limits leave margin for other compiler and solver versions.
 
 ## CI
 

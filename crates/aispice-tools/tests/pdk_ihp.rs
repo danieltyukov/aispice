@@ -1,0 +1,312 @@
+//! IHP SG13G2 circuits drawn with aispice's own device symbols, simulated on
+//! ngspice and Xyce through the normal runner, with the results compared.
+//!
+//! Needs the PDK: `AISPICE_PDK_IHP=<path to IHP-Open-PDK/ihp-sg13g2>` with
+//! its OSDI files compiled. The Xyce half also needs the PDK's Xyce plugins
+//! and a Xyce built with plugin support (`AISPICE_XYCE`, else `Xyce` on
+//! PATH); without them it is skipped. Every test passes, with a note on
+//! stderr, when the PDK is not there.
+
+use aispice_sim::backend::SimId;
+use aispice_sim::dataset::{AnalysisKind, Dataset};
+use aispice_tools::pdk::{PROJECT_FILE, Registry};
+use aispice_tools::{Project, RunMods, Runner, RunnerConfig, StoredRun};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
+fn ihp() -> Option<PathBuf> {
+    let p = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from);
+    if p.is_none() {
+        eprintln!("skipped: AISPICE_PDK_IHP is not set");
+    }
+    p
+}
+
+fn xyce_exe() -> Option<PathBuf> {
+    std::env::var_os("AISPICE_XYCE")
+        .map(PathBuf::from)
+        .or_else(|| aispice_sim::backend::which("Xyce"))
+}
+
+/// A project folder with `aispice.toml` naming the PDK, and a runner with the
+/// PDK registered, using aispice's own symbols and models only.
+fn setup(pdk: &Path, files: &[(&str, &str)]) -> (tempfile::TempDir, Runner, Project) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut pdks = Registry::default();
+    pdks.add("ihp-sg13g2", pdk).unwrap();
+    std::fs::write(dir.path().join(PROJECT_FILE), "pdk = \"ihp-sg13g2\"\n").unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.path().join(name), text).unwrap();
+    }
+    let runner = Runner::new(RunnerConfig {
+        pdks,
+        xyce_exe: xyce_exe(),
+        embedded_models_only: true,
+        ..RunnerConfig::default()
+    });
+    let project = Project::open(dir.path(), Default::default()).unwrap();
+    (dir, runner, project)
+}
+
+async fn run(runner: &Runner, project: &Project, circuit: &str, sim: SimId) -> Arc<StoredRun> {
+    runner
+        .run_circuit(
+            project,
+            circuit,
+            Some(sim.name()),
+            &RunMods::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{circuit} on {}: {e}", sim.name()))
+}
+
+/// Whether Xyce can run the PDK here; says why not when it cannot.
+fn xyce_ready(runner: &Runner) -> bool {
+    let pdk = runner.config().pdks.open("ihp-sg13g2").unwrap();
+    if pdk.xyce_plugins.is_empty() {
+        eprintln!("Xyce half skipped: the PDK has no Xyce plugins (libs.tech/xyce/plugins)");
+        return false;
+    }
+    if xyce_exe().is_none() {
+        eprintln!("Xyce half skipped: no Xyce");
+        return false;
+    }
+    true
+}
+
+fn real(ds: &Dataset, name: &str) -> Vec<f64> {
+    ds.vector(name)
+        .unwrap_or_else(|| panic!("no {name} in {:?}", ds.names()))
+        .data
+        .real()
+}
+
+/// A CMOS inverter, VDD 1.2 V, input swept 0 to 1.2 V in 10 mV steps.
+const INVERTER: &str = "Version 4
+SHEET 1 880 680
+FLAG 48 0 out
+FLAG 0 48 in
+FLAG 48 96 0
+FLAG 48 48 0
+FLAG 208 0 vdd
+FLAG 160 48 in
+FLAG 208 96 out
+FLAG 208 48 vdd
+FLAG 320 16 vdd
+FLAG 320 96 0
+FLAG 400 16 in
+FLAG 400 96 0
+SYMBOL sg13g2\\sg13_lv_nmos 0 0 R0
+SYMATTR InstName M1
+SYMATTR SpiceLine w=1u l=0.13u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_pmos 160 0 R0
+SYMATTR InstName M2
+SYMATTR SpiceLine w=2u l=0.13u ng=1 m=1
+SYMBOL voltage 320 0 R0
+SYMATTR InstName VDD
+SYMATTR Value 1.2
+SYMBOL voltage 400 0 R0
+SYMATTR InstName VIN
+SYMATTR Value 0
+TEXT 0 160 Left 2 !.dc VIN 0 1.2 10m
+";
+
+/// A five-transistor OTA: NMOS pair, PMOS mirror load, NMOS tail biased from
+/// a 20 uA diode, a MIM load capacitor. Open loop, inputs at 0.6 V, AC on
+/// the non-inverting input.
+const OTA: &str = "Version 4
+SHEET 1 1200 900
+FLAG 48 0 d1
+FLAG 0 48 inp
+FLAG 48 96 tail
+FLAG 48 48 0
+FLAG 208 0 out
+FLAG 160 48 inm
+FLAG 208 96 tail
+FLAG 208 48 0
+FLAG 48 -200 vdd
+FLAG 0 -152 d1
+FLAG 48 -104 d1
+FLAG 48 -152 vdd
+FLAG 208 -200 vdd
+FLAG 160 -152 d1
+FLAG 208 -104 out
+FLAG 208 -152 vdd
+FLAG 128 200 tail
+FLAG 80 248 vbn
+FLAG 128 296 0
+FLAG 128 248 0
+FLAG 348 200 vbn
+FLAG 300 248 vbn
+FLAG 348 296 0
+FLAG 348 248 0
+FLAG 480 0 vdd
+FLAG 480 80 vbn
+FLAG 576 0 out
+FLAG 576 64 0
+FLAG 700 16 vdd
+FLAG 700 96 0
+FLAG 800 16 inp
+FLAG 800 96 0
+FLAG 900 16 inm
+FLAG 900 96 0
+SYMBOL sg13g2\\sg13_lv_nmos 0 0 R0
+SYMATTR InstName M1
+SYMATTR SpiceLine w=2u l=0.5u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_nmos 160 0 R0
+SYMATTR InstName M2
+SYMATTR SpiceLine w=2u l=0.5u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_pmos 0 -200 R0
+SYMATTR InstName M3
+SYMATTR SpiceLine w=4u l=0.5u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_pmos 160 -200 R0
+SYMATTR InstName M4
+SYMATTR SpiceLine w=4u l=0.5u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_nmos 80 200 R0
+SYMATTR InstName M5
+SYMATTR SpiceLine w=4u l=1u ng=1 m=1
+SYMBOL sg13g2\\sg13_lv_nmos 300 200 R0
+SYMATTR InstName M6
+SYMATTR SpiceLine w=4u l=1u ng=1 m=1
+SYMBOL current 480 0 R0
+SYMATTR InstName IB
+SYMATTR Value 20u
+SYMBOL sg13g2\\cap_cmim 560 0 R0
+SYMATTR InstName C1
+SYMATTR SpiceLine w=10u l=10u m=1
+SYMBOL voltage 700 0 R0
+SYMATTR InstName VDD
+SYMATTR Value 1.2
+SYMBOL voltage 800 0 R0
+SYMATTR InstName VINP
+SYMATTR Value 0.6
+SYMATTR SpiceLine AC 1
+SYMBOL voltage 900 0 R0
+SYMATTR InstName VINM
+SYMATTR Value 0.6
+TEXT 0 400 Left 2 !.ac dec 20 1 10G
+";
+
+/// The input where the output crosses half the supply, interpolated.
+fn threshold(vin: &[f64], vout: &[f64], half: f64) -> f64 {
+    for i in 1..vin.len() {
+        if (vout[i - 1] - half) * (vout[i] - half) <= 0.0 {
+            let t = (half - vout[i - 1]) / (vout[i] - vout[i - 1]);
+            return vin[i - 1] + t * (vin[i] - vin[i - 1]);
+        }
+    }
+    panic!("the output never crosses {half} V");
+}
+
+#[tokio::test]
+async fn inverter_dc_transfer_on_ngspice_and_xyce() {
+    let Some(pdk) = ihp() else { return };
+    let (_dir, runner, project) = setup(&pdk, &[("inv.asc", INVERTER)]);
+    let ng = run(&runner, &project, "inv.asc", SimId::Ngspice).await;
+    assert!(
+        ng.deck.contains("cornerMOSlv.lib mos_tt"),
+        "header missing: {}",
+        ng.deck
+    );
+    assert!(
+        ng.notes
+            .iter()
+            .any(|n| n.starts_with("PDK ihp-sg13g2") && n.contains("native mode")),
+        "{:?}",
+        ng.notes
+    );
+    let ds = ng.output.dataset(AnalysisKind::Dc).expect("a DC sweep");
+    let (vin, vout) = (real(ds, "V(in)"), real(ds, "V(out)"));
+    assert_eq!(vin.len(), 121);
+    assert!(
+        vout[0] > 1.19 && vout[120] < 0.01,
+        "not an inverter: {vout:?}"
+    );
+    let vm_ng = threshold(&vin, &vout, 0.6);
+    assert!((0.45..0.75).contains(&vm_ng), "threshold {vm_ng}");
+
+    if !xyce_ready(&runner) {
+        return;
+    }
+    let xy = run(&runner, &project, "inv.asc", SimId::Xyce).await;
+    assert_eq!(xy.simulator, SimId::Xyce);
+    assert!(
+        xy.deck
+            .contains("libs.tech/xyce/models/cornerMOSlv.lib mos_tt")
+    );
+    assert!(
+        xy.notes
+            .iter()
+            .any(|n| n.contains("Xyce with the PDK's plugins")),
+        "{:?}",
+        xy.notes
+    );
+    let ds = xy.output.dataset(AnalysisKind::Dc).expect("a DC sweep");
+    let (vin_x, vout_x) = (real(ds, "V(in)"), real(ds, "V(out)"));
+    assert_eq!(vin_x.len(), vin.len());
+    let worst = vout
+        .iter()
+        .zip(&vout_x)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
+    let vm_x = threshold(&vin_x, &vout_x, 0.6);
+    eprintln!(
+        "inverter: largest V(out) difference {:.3} mV, threshold ngspice {:.4} V, Xyce {:.4} V",
+        worst * 1e3,
+        vm_ng,
+        vm_x
+    );
+    assert!(worst < 5e-3, "V(out) differs by {worst} V");
+    assert!((vm_ng - vm_x).abs() < 1e-3, "{vm_ng} vs {vm_x}");
+}
+
+/// DC gain in dB and the unity-gain frequency of an AC result.
+fn gain_and_ugf(ds: &Dataset) -> (f64, f64) {
+    let f = ds.axis_vector().expect("frequency axis").data.real();
+    let v = ds.vector("V(out)").unwrap().data.as_complex();
+    let mag: Vec<f64> = v.iter().map(|c| c.abs()).collect();
+    let dc_db = 20.0 * mag[0].log10();
+    let i = mag
+        .windows(2)
+        .position(|w| w[0] >= 1.0 && w[1] < 1.0)
+        .expect("gain crosses 0 dB");
+    // Interpolate in log-log between the two points around the crossing.
+    let (f0, f1) = (f[i].ln(), f[i + 1].ln());
+    let (m0, m1) = (mag[i].ln(), mag[i + 1].ln());
+    let ugf = (f0 + (0.0 - m0) * (f1 - f0) / (m1 - m0)).exp();
+    (dc_db, ugf)
+}
+
+#[tokio::test]
+async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
+    let Some(pdk) = ihp() else { return };
+    let (_dir, runner, project) = setup(&pdk, &[("ota.asc", OTA)]);
+    let ng = run(&runner, &project, "ota.asc", SimId::Ngspice).await;
+    assert!(ng.deck.contains("cornerCAP.lib cap_typ"), "{}", ng.deck);
+    let (gain_ng, ugf_ng) = gain_and_ugf(ng.output.dataset(AnalysisKind::Ac).unwrap());
+    assert!(gain_ng > 20.0, "gain {gain_ng} dB");
+    assert!((1e6..1e10).contains(&ugf_ng), "unity gain at {ugf_ng} Hz");
+
+    if !xyce_ready(&runner) {
+        return;
+    }
+    let xy = run(&runner, &project, "ota.asc", SimId::Xyce).await;
+    assert_eq!(xy.simulator, SimId::Xyce);
+    assert!(
+        xy.deck
+            .contains("libs.tech/xyce/models/cornerCAP.lib cap_typ")
+    );
+    let (gain_x, ugf_x) = gain_and_ugf(xy.output.dataset(AnalysisKind::Ac).unwrap());
+    eprintln!(
+        "OTA: DC gain ngspice {gain_ng:.3} dB, Xyce {gain_x:.3} dB; unity gain ngspice {:.4} MHz, Xyce {:.4} MHz",
+        ugf_ng / 1e6,
+        ugf_x / 1e6
+    );
+    assert!((gain_ng - gain_x).abs() < 0.1, "{gain_ng} vs {gain_x} dB");
+    assert!(
+        (ugf_ng / ugf_x - 1.0).abs() < 0.01,
+        "{ugf_ng} vs {ugf_x} Hz"
+    );
+}

@@ -24,6 +24,15 @@ Spec: `docs/superpowers/specs/2026-10-11-pdk-foundation-design.md`. Branch `feat
 
 A plugin-capable Xyce 7.10 and ADMS 2.3.7 are built under `~/.local/xyce-plugin` against the existing Trilinos in `~/.local/trilinos-xyce` (script `~/.local/src/xyce-plugin-build.sh`), and IHP's Verilog-A models are compiled into `ihp-sg13g2/libs.tech/xyce/plugins` the way IHP's `adms-compile-va.sh` does. `/usr/local/bin/Xyce` is left as it is. The gated tests use it through `AISPICE_XYCE=~/.local/xyce-plugin/bin/Xyce`.
 
-## Measured agreement (filled in when task 12 ran)
+## Measured agreement (task 12, 2026-10-11)
 
-See the end of this file.
+ngspice 42 with OSDI from OpenVAF 23.5.0, against Xyce 7.10 (shared build) with ADMS 2.3.7 plugins, IHP-Open-PDK `22f2a25`:
+
+| Circuit | Quantity | ngspice | Xyce |
+|---|---|---|---|
+| Inverter (W 1u/2u, L 0.13u, VDD 1.2 V) | switching threshold | 0.6183 V | 0.6183 V |
+| | largest V(out) difference over the sweep | 0.26 mV | |
+| 5T OTA (20 uA tail, 150 fF MIM load) | DC gain | 25.060 dB | 25.060 dB |
+| | unity-gain frequency | 113.725 MHz | 113.725 MHz |
+
+The `mosvar` plugin does not build with ADMS 2.3.7 (the MOS varactor only); PSP 103 and R3 do.
