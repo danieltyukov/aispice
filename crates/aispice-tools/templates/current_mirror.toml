@@ -1,0 +1,32 @@
+id = "current_mirror"
+title = "NMOS current mirror bias (IHP SG13G2)"
+category = "ic"
+pdk = "ihp-sg13g2"
+description = "Two matched low-voltage NMOS transistors on IHP SG13G2: IREF forces 10 uA through the diode-connected M1, and M2 copies it into its drain. The drain voltage is swept from 0 to 1.2 V to show how far down the copy holds (compliance) and how flat it stays (output resistance). Long channels, L = 4 um, give the output resistance: at 27 C the copy is 9.7 uA at 0.3 V, 10.3 uA at 0.6 V and 11.1 uA at 1.2 V. The specs hold at every process corner from -40 C to 125 C."
+analysis = ".dc VOUT 0 1.2 10m"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
+simulators = ["ngspice", "xyce"]
+specs = """
+iout = value_at(-I(VOUT), 0.6) in 9u..11.5u
+ilow = value_at(-I(VOUT), 0.25) >= 8.5u
+flat = pp(-I(VOUT), 0.3, 1.2) <= 2u
+"""
+
+[layout]
+generator = "current_mirror"
+roles = { ref = "M1", out = "M2" }
+
+[[parameters]]
+part = "IREF"
+controls = "The reference current, and so the copy"
+equation = "Iout = IREF (W2/L2) / (W1/L1)"
+
+[[parameters]]
+part = "M2"
+controls = "The ratio of the copy (its width, or m for whole multiples) and its output resistance (its length)"
+equation = "Iout = IREF (W2/L2) / (W1/L1); rout = 1 / gds2, which grows with L; the copy holds while VDS2 > VGS - Vth"
+
+[[parameters]]
+part = "M1"
+controls = "The gate voltage the reference sets, with M2's length kept equal for matching"
+equation = "VGS1 = Vth + sqrt(2 IREF / (k' W1/L1)) in strong inversion; mismatch falls as 1 / sqrt(W L)"

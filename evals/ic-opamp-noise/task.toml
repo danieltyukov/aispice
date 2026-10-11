@@ -1,0 +1,14 @@
+id = "ic-opamp-noise"
+title = "Find the input-referred noise of a two-stage op-amp"
+difficulty = "medium"
+pdk = "ihp-sg13g2"
+prompt = """
+What is the input-referred noise voltage density of the two-stage op-amp in opamp.asc on IHP SG13G2, referred to its input source VINM, at 1 kHz and at 1 MHz at the typical corner and 27 C? Give both in nV/√Hz and say which noise dominates at each frequency. Do not change the circuit.
+"""
+circuit = "opamp.asc"
+max_steps = 8
+constraints = [
+  { kind = "answer_number", value = "425n", tol_pct = 10 },
+  { kind = "answer_number", value = "29.2n", tol_pct = 10 },
+  { kind = "files_unchanged" },
+]

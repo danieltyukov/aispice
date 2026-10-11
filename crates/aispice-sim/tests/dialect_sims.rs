@@ -1,6 +1,6 @@
 //! Translated decks on the real simulators: an LTspice-flavoured deck must
-//! run cleanly on ngspice and Xyce after translation, and give the numbers
-//! LTspice gives for the original. Skips per simulator when it is missing;
+//! run cleanly on ngspice, Xyce and Spectre after translation, and give the
+//! numbers LTspice gives for the original, `.meas` results included. Skips per simulator when it is missing;
 //! LTspice needs `AISPICE_LTSPICE_TESTS=1`.
 
 mod common;
@@ -56,9 +56,6 @@ fn meas(id: SimId, out: &SimOutput, name: &str) -> f64 {
 fn check(name: &str, runs: &[(SimId, SimOutput)], tol: f64) -> Vec<f64> {
     let values: Vec<(SimId, f64)> = runs
         .iter()
-        // Spectre 19 has no `.meas` in SPICE mode; its results are compared
-        // through aispice's own measurements in `spectre_matches_ngspice`.
-        .filter(|(id, o)| *id != SimId::Spectre || !o.measurements.is_empty())
         .map(|(id, o)| (*id, meas(*id, o, name)))
         .collect();
     for (id, v) in &values {

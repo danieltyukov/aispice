@@ -1,11 +1,13 @@
 //! The design task suite and its runner, with scripted models in place of a
-//! provider. Tests that simulate skip when ngspice is missing.
+//! provider. Tests that simulate skip when ngspice is missing; the IC tasks
+//! also need IHP SG13G2 (`AISPICE_PDK_IHP`) and are skipped without it.
 
 use aispice_agent::provider::{ChatResponse, ProviderError};
 use aispice_agent::testing::{ScriptedProvider, Step, text_reply, tool_reply};
 use aispice_tools::eval::{
     EvalOptions, ModelUnderTest, Patient, Task, TaskRun, load_suite, run_suite, run_task,
 };
+use aispice_tools::pdk::Registry;
 use aispice_tools::{Project, ProjectOptions};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -95,9 +97,20 @@ fn solution(task: &Task) -> Vec<Turn> {
         .collect()
 }
 
+/// IHP SG13G2, registered when `AISPICE_PDK_IHP` points at it, for the IC
+/// tasks.
+fn ihp() -> Registry {
+    let mut pdks = Registry::default();
+    if let Some(path) = std::env::var_os("AISPICE_PDK_IHP") {
+        pdks.add("ihp", std::path::Path::new(&path)).unwrap();
+    }
+    pdks
+}
+
 fn options() -> EvalOptions {
     EvalOptions {
         thinking: None,
+        pdks: ihp(),
         ..EvalOptions::default()
     }
 }
@@ -115,9 +128,13 @@ fn tools(calls: &[(&str, Value)]) -> Turn {
 fn every_task_in_the_suite_is_valid() {
     let tasks = suite();
     assert!(
-        (10..=15).contains(&tasks.len()),
-        "{} tasks; the suite should have 10 to 15",
+        (10..=20).contains(&tasks.len()),
+        "{} tasks; the suite should have 10 to 20",
         tasks.len()
+    );
+    assert!(
+        tasks.iter().filter(|t| t.pdk.is_some()).count() >= 3,
+        "IC tasks on a PDK"
     );
     let mut ids: Vec<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     ids.sort_unstable();
@@ -196,9 +213,19 @@ async fn every_reference_solution_passes() {
         async move { run_task(t, &model, &opts, 1).await }
     }))
     .await;
+    // Without the PDK, exactly the IC tasks are skipped.
+    for (t, r) in tasks.iter().zip(&runs) {
+        assert_eq!(
+            r.skipped,
+            t.pdk.is_some() && opts.pdks.pdks.is_empty(),
+            "{}: {}",
+            t.id,
+            r.reason
+        );
+    }
     let failed: Vec<String> = runs
         .iter()
-        .filter(|r| !r.pass || r.tool_errors > 0)
+        .filter(|r| !r.skipped && (!r.pass || r.tool_errors > 0))
         .map(|r| format!("{} ({} tool errors): {}", r.task, r.tool_errors, r.reason))
         .collect();
     assert!(
@@ -314,6 +341,60 @@ async fn the_judge_checks_every_corner() {
     let r = run_task(&t, &model, &options(), 1).await;
     assert!(!r.pass);
     assert!(r.reason.contains("worst at 125C"), "{}", r.reason);
+}
+
+/// A task drawn in a PDK's devices is skipped, not failed, where no PDK of
+/// its kind is registered, and says what is missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ic_task_is_skipped_without_its_pdk() {
+    let t = suite()
+        .into_iter()
+        .find(|t| t.pdk.is_some())
+        .expect("an IC task");
+    let opts = EvalOptions {
+        thinking: None,
+        ..EvalOptions::default()
+    };
+    let model = scripted(&[Turn::Answer("Done.".into())]);
+    let r = run_task(&t, &model, &opts, 1).await;
+    assert!(r.skipped && !r.pass, "{}", r.reason);
+    assert!(
+        r.reason
+            .contains("drawn in the ihp-sg13g2 PDK, and none of that kind is registered"),
+        "{}",
+        r.reason
+    );
+    assert_eq!(r.steps, 0);
+}
+
+/// With a PDK of the task's kind registered, under any name, the project
+/// uses it from the first step.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ic_task_runs_on_the_registered_pdk() {
+    let dir = tempfile::tempdir().unwrap();
+    aispice_sim::pdk::fake_ihp(dir.path());
+    let mut pdks = Registry::default();
+    pdks.add("sg13", &dir.path().join("IHP-Open-PDK")).unwrap();
+    let opts = EvalOptions {
+        thinking: None,
+        pdks,
+        ..EvalOptions::default()
+    };
+    let t = suite()
+        .into_iter()
+        .find(|t| t.pdk.is_some())
+        .expect("an IC task");
+    let model = scripted(&[
+        tools(&[("pdk", json!({"action": "list"}))]),
+        Turn::Answer("Done.".into()),
+    ]);
+    let r = run_task(&t, &model, &opts, 1).await;
+    assert!(!r.skipped, "{}", r.reason);
+    assert!(
+        r.calls[0].output.contains("The open project uses `sg13`"),
+        "{}",
+        r.calls[0].output
+    );
 }
 
 /// Needs no simulator: the step budget fails the run whatever the judge

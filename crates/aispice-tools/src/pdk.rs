@@ -160,6 +160,19 @@ impl Registry {
         self.pdks.remove(name).is_some()
     }
 
+    /// The registered names whose folder holds a PDK of this kind
+    /// (`ihp-sg13g2`) and still checks out.
+    pub fn names_of_kind(&self, kind: &str) -> Vec<String> {
+        self.pdks
+            .keys()
+            .filter(|name| {
+                self.open(name)
+                    .is_ok_and(|p| p.kit.kind.eq_ignore_ascii_case(kind))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Open a registered PDK, checking its folder again (it may have been
     /// moved or rebuilt since it was added).
     pub fn open(&self, name: &str) -> Result<Pdk, RegistryError> {

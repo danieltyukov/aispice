@@ -1,0 +1,22 @@
+id = "ic-opamp-corners"
+title = "Size a two-stage op-amp for gain, bandwidth and phase margin at every corner"
+difficulty = "hard"
+pdk = "ihp-sg13g2"
+prompt = """
+opamp.asc is a two-stage Miller op-amp on IHP SG13G2 driving 1 pF from a 1.2 V supply, set up for an open-loop AC run (LFB and CFB bias the output and must stay as they are). Size its transistors, bias current and compensation capacitor so that at every process corner (tt, ss, ff, sf, fs) and at -40 C, 27 C and 125 C it has at least 50 dB of gain at 10 Hz, a unity-gain frequency of at least 20 MHz and at least 60 degrees of phase margin. Keep the 1 pF load and the 1.2 V supply, and show that it meets all three at every corner.
+"""
+circuit = "opamp.asc"
+analysis = ".ac dec 20 1 10G"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
+specs = """
+gain = gain_db_at(V(out), 10) >= 50
+gbw = unity_gain_freq(V(out)) >= 20Meg
+pm = phase_margin(V(out)) >= 60
+"""
+max_steps = 30
+constraints = [
+  { kind = "value", name = "CL", equals = "1p" },
+  { kind = "value", name = "VDD", equals = "1.2" },
+  { kind = "value", name = "LFB", equals = "1G" },
+  { kind = "value", name = "CFB", equals = "1" },
+]

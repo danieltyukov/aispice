@@ -1,7 +1,8 @@
 //! Corners and rejection on the real simulators: a temperature corner must
 //! reach every simulator (Xyce ignores `.temp`, so the dialect rewrites it),
 //! a process corner must select the right section of a corner library, which
-//! ngspice and LTspice can only do through aispice's inlining, and the
+//! ngspice and LTspice can only do through aispice's inlining and Spectre,
+//! on another machine, only with the library inlined in the deck, and the
 //! derived AC run of a PSRR measurement must give the known answer. Skips
 //! per simulator when it is missing; LTspice needs `AISPICE_LTSPICE_TESTS=1`
 //! and Spectre the variables described in `common`.
@@ -12,7 +13,7 @@ use aispice_core::netlist::{Policy, canonical_includes, parse};
 use aispice_sim::backend::{SimId, Simulator};
 use aispice_sim::corner::{self, CornerSet};
 use aispice_sim::dialect::translate;
-use aispice_sim::library::{LibraryFiles, expand_lib_sections};
+use aispice_sim::library::{LibraryFiles, expand_lib_sections, inline_includes};
 use aispice_sim::measure::{Measure, measure};
 use aispice_sim::stimulus;
 use common::*;
@@ -94,14 +95,21 @@ async fn process_corners_select_library_sections() {
     let files = LibraryFiles::new(policy.clone(), dir.path());
     let lookup = |file: &str| files.sections(file);
     let variants = corner::variants(&parse(deck), &set, &lookup).unwrap();
-    for (id, sim) in local_simulators().await {
+    let mut sims = local_simulators().await;
+    if let Some(sp) = spectre().await {
+        sims.push((SimId::Spectre, Box::new(sp)));
+    }
+    for (id, sim) in sims {
         for ((name, n), r) in variants.iter().zip([1e3, 1.2e3, 800.0]) {
             let mut text = aispice_core::netlist::write(n);
             // As the runner does: ngspice in its LTspice mode and LTspice
-            // cannot select a section themselves.
+            // cannot select a section themselves, and Spectre's server has
+            // none of the files.
+            let files = LibraryFiles::new(policy.clone(), dir.path());
             if matches!(id, SimId::Ngspice | SimId::Ltspice) {
-                let files = LibraryFiles::new(policy.clone(), dir.path());
                 text = expand_lib_sections(&text, &files).unwrap();
+            } else if id == SimId::Spectre {
+                text = inline_includes(&text, &files).unwrap().text;
             }
             // And the simulator runs elsewhere, so the library is named by
             // its full path.

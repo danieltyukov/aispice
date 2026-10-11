@@ -1,0 +1,47 @@
+id = "two_stage"
+title = "Two-stage Miller op-amp (IHP SG13G2)"
+category = "ic"
+pdk = "ihp-sg13g2"
+description = "Two-stage CMOS operational amplifier on IHP SG13G2: the 5T OTA as first stage (IB = 10 uA), a PMOS common-source second stage M6 with its NMOS sink M7 (60 uA), and a MIM capacitor C1 for Miller compensation, into 1 pF. LFB closes the loop at DC and CFB opens it for AC, so the run gives the open-loop response with the output biased at 0.7 V. About 53 dB of gain, 22 MHz and 62 degrees at 27 C; the specs hold at every process corner from -40 C to 125 C. Meeting 20 MHz and 60 degrees at every corner takes more first-stage current and a stronger second stage."
+analysis = ".ac dec 20 1 10G"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
+simulators = ["ngspice", "xyce"]
+specs = """
+gain = gain_db_at(V(out), 10) >= 48
+gbw = unity_gain_freq(V(out)) >= 13Meg
+pm = phase_margin(V(out)) >= 52
+"""
+
+[layout]
+generator = "two_stage"
+roles = { pair = ["M1", "M2"], load = ["M3", "M4"], tail = "M5", bias = "M8", cs = "M6", sink = "M7", cc = "C1" }
+
+[[parameters]]
+part = "C1"
+controls = "The Miller capacitor (w and l of the MIM plate): the dominant pole and the unity-gain frequency"
+equation = "GBW = gm1 / (2 pi C1); C1 about 1.5 fF per um^2 of MIM"
+
+[[parameters]]
+part = "M6"
+controls = "The second stage's transconductance (m, its multiplier, with M7 kept in step): the second pole and the right-half-plane zero, and so the phase margin"
+equation = "p2 = gm6 / (2 pi CL), z = gm6 / (2 pi C1); phase margin about 90 - atan(GBW / p2) - atan(GBW / z) degrees"
+
+[[parameters]]
+part = "M7"
+controls = "The second stage's current (m), which must match what M6 carries at the output's bias"
+equation = "I7 = IB (W7 m7 / L7) / (W8/L8)"
+
+[[parameters]]
+part = "M1"
+controls = "The first stage's transconductance (width, with M2 kept equal) and gain (length)"
+equation = "GBW = gm1 / (2 pi C1); A1 = gm1 / (gds2 + gds4)"
+
+[[parameters]]
+part = "IB"
+controls = "The bias current that both stages mirror"
+equation = "Itail = IB (W5/L5) / (W8/L8); I7 = IB (W7 m7 / L7) / (W8/L8)"
+
+[[parameters]]
+part = "M3"
+controls = "The first stage's load (with M4): a shorter length moves the mirror pole up for phase margin, a longer one adds gain"
+equation = "mirror pole about gm3 / (2 (Cgs3 + Cgs4))"

@@ -40,3 +40,26 @@ fn a_value_too_long_to_route_around_still_lays_out() {
     assert!(r.schematic.wires().count() == 0, "labels only");
     assert!(r.schematic.flags().count() >= 4);
 }
+
+/// Calls of a PDK's devices are drawn with the PDK's own symbols and their
+/// parameters in SpiceLine, and netlist back to the same lines, rather than
+/// being kept as SPICE text.
+#[test]
+fn pdk_devices_are_drawn_with_their_symbols() {
+    let r = lay("inverter\n\
+         XM1 out in 0 0 sg13_lv_nmos w=1u l=0.13u ng=1 m=1\n\
+         XM2 out in vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1\n\
+         XC1 out 0 cap_cmim w=10u l=10u m=1\n\
+         VDD vdd 0 1.2\nVIN in 0 0.6\n.op\n");
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let m1 = r.schematic.symbol("M1").unwrap();
+    assert_eq!(m1.name, "sg13g2\\sg13_lv_nmos");
+    assert_eq!(m1.attr("SpiceLine"), Some("w=1u l=0.13u ng=1 m=1"));
+    assert_eq!(
+        r.schematic.symbol("M2").unwrap().name,
+        "sg13g2\\sg13_lv_pmos"
+    );
+    let c1 = r.schematic.symbol("C1").unwrap();
+    assert_eq!(c1.name, "sg13g2\\cap_cmim");
+    assert_eq!(c1.attr("SpiceLine"), Some("w=10u l=10u m=1"));
+}
