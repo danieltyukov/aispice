@@ -1,0 +1,59 @@
+/* tiny_ota liberty. Synthetic test fixture: the numbers are invented. */
+library (tiny_ota) {
+  delay_model : table_lookup ;
+  time_unit : "1ns" ;
+  voltage_unit : "1V" ;
+  current_unit : "1uA" ;
+  capacitive_load_unit (1, pf) ;
+  leakage_power_unit : "1nW" ;
+  pulling_resistance_unit : "1kohm" ;
+  nom_process : 1 ;
+  nom_temperature : 27 ;
+  nom_voltage : 1.2 ;
+  voltage_map (vdd, 1.2) ;
+  voltage_map (vss, 0) ;
+  operating_conditions (tt) {
+    process : 1 ;
+    temperature : 27 ;
+    voltage : 1.2 ;
+  }
+  default_operating_conditions : tt ;
+  cell (tiny_ota) {
+    area : 96 ;
+    dont_touch : true ;
+    dont_use : true ;
+    cell_leakage_power : 12 ;
+    pg_pin (vdd) {
+      pg_type : primary_power ;
+      voltage_name : vdd ;
+    }
+    pg_pin (vss) {
+      pg_type : primary_ground ;
+      voltage_name : vss ;
+    }
+    pin (inp) {
+      direction : input ;
+      capacitance : 0.012 ;
+      related_power_pin : vdd ;
+      related_ground_pin : vss ;
+    }
+    pin (inn) {
+      direction : input ;
+      capacitance : 0.012 ;
+      related_power_pin : vdd ;
+      related_ground_pin : vss ;
+    }
+    pin (out) {
+      direction : output ;
+      max_capacitance : 0.5 ;
+      related_power_pin : vdd ;
+      related_ground_pin : vss ;
+    }
+    pin (ibias) {
+      direction : input ;
+      capacitance : 0.004 ;
+      related_power_pin : vdd ;
+      related_ground_pin : vss ;
+    }
+  }
+}

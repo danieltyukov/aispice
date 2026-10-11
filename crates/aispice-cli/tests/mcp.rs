@@ -114,6 +114,7 @@ fn mcp_session_builds_reads_and_renders_a_circuit() {
         "render_schematic",
         "symbols",
         "templates",
+        "check_macro",
     ] {
         assert!(names.contains(&want), "missing {want} in {names:?}");
     }
@@ -168,4 +169,47 @@ fn mcp_session_builds_reads_and_renders_a_circuit() {
 
     let unknown = c.call("no_such_tool", json!({}));
     assert_eq!(unknown["isError"], json!(true));
+}
+
+#[test]
+fn mcp_checks_a_macro_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../aispice-core/tests/fixtures/macro/broken/wrong-size/tiny_counter.macro");
+    let pkg = dir.path().join("tiny_counter.macro");
+    std::fs::create_dir_all(pkg.join("evidence")).unwrap();
+    for entry in walk(&fixture) {
+        let rel = entry.strip_prefix(&fixture).unwrap();
+        std::fs::copy(&entry, pkg.join(rel)).unwrap();
+    }
+    let mut c = Client::start(dir.path());
+    c.request(
+        "initialize",
+        json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1"}}),
+    );
+    c.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let out = c.call(
+        "check_macro",
+        json!({"path": "tiny_counter.macro", "pdk": "ihp-sg13g2"}),
+    );
+    assert_ne!(out["isError"], json!(true), "{out}");
+    assert!(
+        text(&out)
+            .contains("lef.size tiny_counter.lef: SIZE is 20 x 10 um, macro.toml says 30 x 10 um"),
+        "{}",
+        text(&out)
+    );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }

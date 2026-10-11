@@ -9,6 +9,7 @@ pub mod encoding;
 pub mod geometry;
 pub mod layout;
 pub mod lint;
+pub mod macropkg;
 pub mod netlist;
 pub mod pdk;
 pub mod render;

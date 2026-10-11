@@ -1,0 +1,25 @@
+schema = "macro.specs/v1"
+
+# Synthetic test fixture: the values are invented, not simulated.
+
+[[specs]]
+name = "dc_gain"
+description = "Open-loop gain at 1 kHz into 100 fF"
+unit = "dB"
+min = 30
+typ = 36
+measured = { tt = 36.2, ss = 28.4, ff = 37.1 }
+definition = "dc_gain = gain_db_at(V(out)/V(inp), 1k) >= 30"
+
+[[specs]]
+name = "ugbw"
+description = "Unity-gain bandwidth into 100 fF"
+unit = "Hz"
+min = 10e6
+measured = { tt = 42.0e6, ss = 28.5e6, ff = 55.3e6 }
+
+[[specs]]
+name = "supply_current"
+unit = "A"
+max = 25e-6
+measured = { tt = 20.1e-6, ss = 18.7e-6, ff = 22.4e-6 }

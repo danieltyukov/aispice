@@ -3,6 +3,7 @@
 mod cmd_agent;
 mod cmd_eval;
 mod cmd_files;
+mod cmd_macro;
 mod cmd_pdk;
 mod cmd_sim;
 mod mcp;
@@ -189,6 +190,12 @@ enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Macro packages shared with ChipLeap (macro/v1): hardened blocks with
+    /// GDS, LEF, liberty, Verilog, SPICE, measured specs and evidence.
+    Macro {
+        #[command(subcommand)]
+        action: MacroAction,
+    },
     /// Check simulators, LTspice's library and model provider keys.
     Doctor,
     /// Manage model provider API keys (kept in the OS keychain).
@@ -226,6 +233,24 @@ enum PdkAction {
     Show { name: String },
     /// Unregister a PDK (its files are left alone).
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum MacroAction {
+    /// Check a macro package against macro/v1 (exit code 1 when it fails).
+    Check {
+        /// The package directory, e.g. tiny_ota.macro.
+        dir: PathBuf,
+        /// The PDK of the chip that places it: NAME or NAME@COMMIT, e.g.
+        /// ihp-sg13g2.
+        #[arg(long)]
+        pdk: Option<String>,
+        /// Also fail on warnings.
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Print the JSON schema of macro.toml.
+    Schema,
 }
 
 #[derive(Subcommand)]
@@ -352,6 +377,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }),
             cli.json,
         ),
+        Command::Macro { action } => match action {
+            MacroAction::Check { dir, pdk, strict } => {
+                cmd_macro::check(&dir, pdk, strict, cli.json)
+            }
+            MacroAction::Schema => cmd_macro::schema(),
+        },
         Command::Doctor => cmd_agent::doctor(cli.json),
         Command::Keys { action } => match action {
             KeysAction::Set { provider } => cmd_agent::keys_set(&provider),

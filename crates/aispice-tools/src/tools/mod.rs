@@ -6,6 +6,7 @@
 
 pub(crate) mod analysis;
 mod gmid_tools;
+mod macro_tools;
 mod pdk_tools;
 mod render_tools;
 mod schematic_tools;
@@ -17,6 +18,7 @@ use aispice_agent::{Registry, ToolOutput};
 use std::sync::Arc;
 
 pub use gmid_tools::*;
+pub use macro_tools::*;
 pub use pdk_tools::*;
 pub use render_tools::*;
 pub use schematic_tools::*;
@@ -48,7 +50,8 @@ pub fn registry(ws: Arc<Workspace>) -> Registry {
     r.register(Optimize { ws: ws.clone() });
     r.register(Templates { ws: ws.clone() });
     r.register(PdkTool { ws: ws.clone() });
-    r.register(GmIdTool { ws });
+    r.register(GmIdTool { ws: ws.clone() });
+    r.register(CheckMacro { ws });
     r
 }
 

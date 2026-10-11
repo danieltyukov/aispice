@@ -1,0 +1,56 @@
+# tiny_ota abstract. Synthetic test fixture.
+VERSION 5.8 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+MACRO tiny_ota
+  CLASS BLOCK ;
+  ORIGIN 0 0 ;
+  FOREIGN tiny_ota 0 0 ;
+  SIZE 12 BY 8 ;
+  SYMMETRY X Y ;
+  PIN inp
+    DIRECTION INPUT ;
+    USE ANALOG ;
+    PORT
+      LAYER Metal2 ;
+        RECT 1 3 1.4 4 ;
+    END
+  END inp
+  PIN out
+    DIRECTION OUTPUT ;
+    USE ANALOG ;
+    PORT
+      LAYER Metal2 ;
+        RECT 10.6 3.5 11 4.5 ;
+    END
+  END out
+  PIN ibias
+    DIRECTION INPUT ;
+    USE ANALOG ;
+    PORT
+      LAYER Metal2 ;
+        RECT 1 1.5 1.4 2.5 ;
+    END
+  END ibias
+  PIN vdd
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0 7.4 12 8 ;
+    END
+  END vdd
+  PIN vss
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0 0 12 0.6 ;
+    END
+  END vss
+  OBS
+    LAYER Metal1 ;
+      RECT 0.5 1 11.5 7 ;
+  END
+END tiny_ota
+END LIBRARY
