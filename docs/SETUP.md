@@ -76,13 +76,19 @@ ssh_host = "user@cadence.example.edu"
 remote_dir = "/home/user/aispice-runs"
 # Optional: a command that sets up the Cadence environment first.
 setup_command = "source /opt/cadence/setup.sh"
+# Optional: folders outside your projects that the server has its own copy
+# of, as "local folder" = "folder on the server".
+[spectre.remote_folders]
+"/home/me/models/vendor" = "/cad/models/vendor"
 ```
 
 SSH runs with `BatchMode=yes`, so the host must accept your SSH key without a password prompt. Check with `ssh user@cadence.example.edu true`. aispice creates a private folder under `remote_dir` for every run.
 
 These settings come only from your config file. A model or a netlist can never change the host or the command. Keep process design kits and anything under an NDA out of your project folders if you share them.
 
-aispice sends Spectre the netlist in SPICE syntax (`simulator lang=spice`) with three changes Spectre needs: every file the circuit includes is copied into the netlist (the server has none of your project's files; corner library sections included), `{expression}` values are written in single quotes (Spectre reads `{rsh}` as an unknown parameter), and LTspice's `.meas` forms are normalized. Spectre writes `.meas` results to a `.measure` file rather than its log; aispice fetches it with the waveforms, so `.meas` results, noise, PSRR and CMRR specs and corner sets all work on Spectre. Tested with Spectre 19.1, 23.1 and 25.1 through an SSH jump host configured in `~/.ssh/config`.
+aispice sends Spectre the netlist in SPICE syntax (`simulator lang=spice`) with three changes Spectre needs: every project file the circuit includes is copied into the netlist (the server has none of your project's files; corner library sections included), `{expression}` values are written in single quotes (Spectre reads `{rsh}` as an unknown parameter), and LTspice's `.meas` forms are normalized. The run's notes list the files sent. Spectre writes `.meas` results to a `.measure` file rather than its log; aispice fetches it with the waveforms, so `.meas` results, noise, PSRR and CMRR specs and corner sets all work on Spectre. Tested with Spectre 19.1, 23.1 and 25.1 through an SSH jump host configured in `~/.ssh/config`.
+
+Nothing outside the project leaves your machine: a file under a registered PDK, in LTspice's library or anywhere else outside the project may be licensed. A circuit that includes one runs on Spectre only when `remote_folders` says where the server has its own copy of that folder; the include then names the server's copy. Otherwise the run is refused with the file's name. A model aispice would take from LTspice's library is refused on Spectre in the same way; put its definition in a project file. The netlist sent is at most 16 MiB.
 
 Spectre 24.1 and later need glibc 2.22 or newer and fail to start on CentOS 7 (`libmvec.so.1` missing); run them on a newer server. The remote command calls `spectre`, so when the Cadence setup puts an older release first on `PATH`, pick the one you want in `setup_command`; with a Bourne-style login shell a function does it, for example `spectre() { /opt/cadence/SPECTRE251/bin/spectre "$@"; }`.
 
@@ -267,7 +273,7 @@ base_url = "http://localhost:1234/v1"
 
 With `provider = "lmstudio"` (or `--provider lmstudio`) aispice talks to that endpoint.
 
-`embedded_models_only = true` makes results independent of the machine. Normally, when LTspice is installed, aispice offers its symbols and pulls the models a circuit names (a `2N3904`, a vendor op-amp) from LTspice's library when it runs ngspice, Xyce or Spectre, and switches to LTspice for a circuit ngspice cannot run. With this setting it uses only its own embedded models (the generic library behind `opamp`, `1N4148`, `2N3904` and the others) and the files in the project folder, never LTspice's symbols or models, and it does not switch simulators by itself. A run on LTspice chosen by name still reads LTspice's library, as LTspice always does. `aispice eval` always works this way.
+`embedded_models_only = true` makes results independent of the machine. Normally, when LTspice is installed, aispice offers its symbols and pulls the models a circuit names (a `2N3904`, a vendor op-amp) from LTspice's library when it runs ngspice or Xyce (never into a deck sent to a Spectre server), and switches to LTspice for a circuit ngspice cannot run. With this setting it uses only its own embedded models (the generic library behind `opamp`, `1N4148`, `2N3904` and the others) and the files in the project folder, never LTspice's symbols or models, and it does not switch simulators by itself. A run on LTspice chosen by name still reads LTspice's library, as LTspice always does. `aispice eval` always works this way.
 
 ## Using aispice from an MCP client
 

@@ -109,7 +109,7 @@ async fn process_corners_select_library_sections() {
             if matches!(id, SimId::Ngspice | SimId::Ltspice) {
                 text = expand_lib_sections(&text, &files).unwrap();
             } else if id == SimId::Spectre {
-                text = inline_includes(&text, &files).unwrap();
+                text = inline_includes(&text, &files).unwrap().text;
             }
             // And the simulator runs elsewhere, so the library is named by
             // its full path.

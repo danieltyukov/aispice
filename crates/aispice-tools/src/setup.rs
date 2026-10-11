@@ -34,6 +34,11 @@ pub fn runner_config(cfg: &Config) -> RunnerConfig {
             ],
             ssh: None,
             scp: None,
+            remote_folders: s
+                .remote_folders
+                .iter()
+                .map(|(local, server)| (PathBuf::from(local), server.clone()))
+                .collect(),
         }
     });
     let (pdks, pdks_error) = match crate::pdk::Registry::load() {
