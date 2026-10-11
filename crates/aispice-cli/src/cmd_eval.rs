@@ -91,6 +91,15 @@ pub fn eval(args: EvalArgs) -> Result<ExitCode> {
         })
         .collect();
 
+    // Tasks drawn in a PDK's devices run on the user's registered PDK of
+    // that kind, and are skipped without one.
+    let pdks = match aispice_tools::pdk::Registry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: {e}; tasks that need a PDK will be skipped");
+            Default::default()
+        }
+    };
     let opts = EvalOptions {
         repeat: args.repeat.max(1),
         jobs: args.jobs.max(1),
@@ -99,6 +108,7 @@ pub fn eval(args: EvalArgs) -> Result<ExitCode> {
         thinking: cfg.thinking_config(),
         max_tokens: cfg.agent.max_tokens,
         timeout: Duration::from_secs(args.timeout.max(1)),
+        pdks,
         ..EvalOptions::default()
     };
     let rt = tokio::runtime::Builder::new_multi_thread()

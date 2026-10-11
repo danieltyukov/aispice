@@ -4,6 +4,7 @@
 use super::judge::{FileState, OUTPUT_KEPT, ToolRecord, Transcript, Verdict, judge};
 use super::report::{Report, TaskRun, summarize};
 use super::task::Task;
+use crate::pdk::{PROJECT_FILE, Registry, with_pdk};
 use crate::project::{Project, ProjectOptions, now_ms};
 use crate::prompt::{PromptContext, system_prompt};
 use crate::runner::RunnerConfig;
@@ -51,6 +52,9 @@ pub struct EvalOptions {
     /// After this many runs in a row end in a provider error, the model's
     /// remaining runs are skipped.
     pub max_consecutive_errors: u32,
+    /// The registered PDKs, for tasks that name one. A task whose kind of
+    /// PDK is not here is skipped.
+    pub pdks: Registry,
 }
 
 impl Default for EvalOptions {
@@ -64,6 +68,7 @@ impl Default for EvalOptions {
             max_tokens: None,
             timeout: Duration::from_secs(15 * 60),
             max_consecutive_errors: 3,
+            pdks: Registry::default(),
         }
     }
 }
@@ -123,6 +128,15 @@ fn failed_setup(mut run: TaskRun, message: String) -> TaskRun {
     run
 }
 
+/// A run that never started because something the task needs is missing
+/// here; it says nothing about the model.
+fn skipped(mut run: TaskRun, reason: String) -> TaskRun {
+    run.skipped = true;
+    run.failures = vec![reason.clone()];
+    run.reason = reason;
+    run
+}
+
 fn stop_name(reason: &AgentStopReason) -> String {
     match reason {
         AgentStopReason::EndTurn => "end_turn".into(),
@@ -141,7 +155,23 @@ pub async fn run_task(
     opts: &EvalOptions,
     attempt: u32,
 ) -> TaskRun {
-    let mut run = blank_run(task, model, attempt);
+    let run = blank_run(task, model, attempt);
+    // The registered PDK of the kind the task is drawn in.
+    let pdk = match &task.pdk {
+        None => None,
+        Some(kind) => match opts.pdks.names_of_kind(kind).into_iter().next() {
+            Some(name) => Some(name),
+            None => {
+                return skipped(
+                    run,
+                    format!(
+                        "skipped: the task is drawn in the {kind} PDK, and none of that kind is registered (aispice pdk add)"
+                    ),
+                );
+            }
+        },
+    };
+    let mut run = run;
     let tmp = match tempfile::Builder::new().prefix("aispice-eval-").tempdir() {
         Ok(t) => t,
         Err(e) => return failed_setup(run, format!("could not make a temporary folder: {e}")),
@@ -153,6 +183,13 @@ pub async fn run_task(
     {
         return failed_setup(run, format!("could not copy the task files: {e}"));
     }
+    if let Some(name) = &pdk {
+        let written = with_pdk(None, name)
+            .and_then(|t| std::fs::write(root.join(PROJECT_FILE), t).map_err(|e| e.to_string()));
+        if let Err(e) = written {
+            return failed_setup(run, format!("could not write {PROJECT_FILE}: {e}"));
+        }
+    }
     let before = FileState::capture(&root);
     let ws = Workspace::new();
     ws.runner.set_config(RunnerConfig {
@@ -160,6 +197,7 @@ pub async fn run_task(
         // aispice's own models only, so results compare across machines
         // whatever LTspice library is installed.
         embedded_models_only: true,
+        pdks: opts.pdks.clone(),
         ..RunnerConfig::default()
     });
     // Built-in symbols only (plus --symbols), so results compare across
@@ -299,6 +337,7 @@ pub async fn run_task(
             &transcript,
             &opts.simulator,
             &opts.symbols,
+            &opts.pdks,
         )
         .await;
         run.judge_ms = judged.elapsed().as_millis() as u64;
