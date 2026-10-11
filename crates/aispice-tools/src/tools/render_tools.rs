@@ -36,6 +36,10 @@ pub struct RenderSchematic {
 
 #[async_trait]
 impl Tool for RenderSchematic {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<RenderInput>(
             "render_schematic",

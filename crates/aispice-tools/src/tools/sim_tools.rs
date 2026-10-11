@@ -85,7 +85,9 @@ async fn save_specs(ws: &Workspace, p: &crate::project::Project, circuit: &str, 
     {
         return;
     }
-    if let Ok(path) = p.resolve(&file) {
+    // The output resolver, not the reader's: a `.specs` that is a link to
+    // another file of the project must not get the specs written into it.
+    if let Ok(path) = p.resolve_output(&file) {
         let _ = crate::project::atomic_write(&path, text.as_bytes());
     }
 }
@@ -372,6 +374,10 @@ pub struct NoArgs {}
 
 #[async_trait]
 impl Tool for Simulators {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<NoArgs>(
             "simulators",
@@ -422,6 +428,10 @@ pub struct Simulate {
 
 #[async_trait]
 impl Tool for Simulate {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SimulateInput>(
             "simulate",
@@ -510,6 +520,10 @@ pub struct MeasureTool {
 
 #[async_trait]
 impl Tool for MeasureTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<MeasureInput>(
             "measure",
@@ -582,6 +596,11 @@ pub struct SpecsInput {
     /// 1.98]}]}`.
     #[serde(default)]
     pub corners: Option<CornerSet>,
+    /// Check the specs after layout too: the layout (a GDS from the layout
+    /// tool) is extracted and put in place of the schematic's devices, and
+    /// each spec is reported before and after layout.
+    #[serde(default)]
+    pub post_layout: Option<crate::layout::PostLayout>,
 }
 
 fn yes() -> bool {
@@ -610,6 +629,43 @@ fn corner_variants(
     corner::variants(netlist, set, &lookup).map_err(|e| format!("corners: {e}"))
 }
 
+/// Specs at every corner of a set, on a base netlist: the circuit's own,
+/// or the post-layout one, which corner rewrites treat the same way since
+/// its PDK model header is untouched.
+#[allow(clippy::too_many_arguments)]
+async fn corner_report(
+    ws: &Workspace,
+    p: &crate::project::Project,
+    circuit: &str,
+    base: Netlist,
+    std_libs: &[String],
+    specs: &[Spec],
+    set: &CornerSet,
+    simulator: Option<&str>,
+    ctx: &ToolContext,
+) -> Result<(corner::CornerReport, Option<SimId>), String> {
+    let netlist = analysis::as_simulator_reads_it(ws, p, base, simulator).await;
+    let sources = analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure))?;
+    let variants = corner_variants(ws, p, circuit, &netlist, set)?;
+    let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
+    let results = run_variants(ws, circuit, variants, std_libs, simulator, &sources, ctx).await;
+    let mut sim = None;
+    let reports: Vec<Result<SpecReport, String>> = results
+        .iter()
+        .map(|(_, r)| match r {
+            Ok(v) => {
+                sim.get_or_insert(v.run.simulator);
+                Ok(evaluate(specs, &v.datasets))
+            }
+            Err(e) => Err(e.clone()),
+        })
+        .collect();
+    Ok((
+        corner::summarize(specs, &names[..reports.len()], &reports),
+        sim,
+    ))
+}
+
 /// Check specs at every corner of a set.
 async fn check_corners(
     ws: &Workspace,
@@ -624,26 +680,13 @@ async fn check_corners(
         .runner
         .netlist_for(p, circuit)
         .map_err(|e| e.to_string())?;
-    let netlist = analysis::as_simulator_reads_it(ws, p, netlist, simulator).await;
-    let sources = analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure))?;
-    let variants = corner_variants(ws, p, circuit, &netlist, set)?;
-    let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
-    let results = run_variants(ws, circuit, variants, &std_libs, simulator, &sources, ctx).await;
-    let mut sim = None;
-    let reports: Vec<Result<SpecReport, String>> = results
-        .iter()
-        .map(|(_, r)| match r {
-            Ok(v) => {
-                sim.get_or_insert(v.run.simulator);
-                Ok(evaluate(specs, &v.datasets))
-            }
-            Err(e) => Err(e.clone()),
-        })
-        .collect();
-    let report = corner::summarize(specs, &names[..reports.len()], &reports);
+    let (report, sim) = corner_report(
+        ws, p, circuit, netlist, &std_libs, specs, set, simulator, ctx,
+    )
+    .await?;
     let t = format!(
         "{circuit} at {} corners{}\n{}",
-        reports.len(),
+        report.corners.len(),
         sim.map(|s| format!(" on {}", s.name())).unwrap_or_default(),
         analysis::corner_text(&report)
     );
@@ -652,6 +695,58 @@ async fn check_corners(
         "report": ui_spec_report(&report.worst),
         "corners": analysis::corner_json(&report),
     })))
+}
+
+/// A post-layout netlist, its standard libraries and the extraction.
+type PostLayoutRun = (Netlist, Vec<String>, aispice_layout::extract::Extracted);
+
+fn extracted_json(ex: &aispice_layout::extract::Extracted) -> Value {
+    json!({"devices": ex.devices, "capacitors": ex.capacitors, "resistors": ex.resistors, "total_cap_ff": ex.total_cap_ff})
+}
+
+/// Check specs at every corner, on the schematic and after layout: each
+/// spec's worst case before and after, then every corner after layout.
+#[allow(clippy::too_many_arguments)]
+async fn check_corners_post_layout(
+    ws: &Workspace,
+    p: &crate::project::Project,
+    circuit: &str,
+    specs: &[Spec],
+    set: &CornerSet,
+    simulator: Option<&str>,
+    ctx: &ToolContext,
+    layout: &str,
+    post: PostLayoutRun,
+) -> Result<ToolOutput, String> {
+    let (base, base_libs, _) = ws
+        .runner
+        .netlist_for(p, circuit)
+        .map_err(|e| e.to_string())?;
+    let (pre, sim) =
+        corner_report(ws, p, circuit, base, &base_libs, specs, set, simulator, ctx).await?;
+    let (netlist, std_libs, ex) = post;
+    let (after, _) = corner_report(
+        ws, p, circuit, netlist, &std_libs, specs, set, simulator, ctx,
+    )
+    .await?;
+    let t = format!(
+        "{circuit} before and after layout ({layout}) at {} corners{}, worst case of each spec\n{}{}After layout, every corner:\n{}",
+        pre.corners.len(),
+        sim.map(|s| format!(" on {}", s.name())).unwrap_or_default(),
+        ex.to_text(),
+        pre_post_text(&pre.worst, &after.worst),
+        analysis::corner_text(&after)
+    );
+    Ok(
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {
+            "pre": ui_spec_report(&pre.worst),
+            "post": ui_spec_report(&after.worst),
+            "corners_pre": analysis::corner_json(&pre),
+            "corners_post": analysis::corner_json(&after),
+            "layout": layout,
+            "extracted": extracted_json(&ex),
+        }})),
+    )
 }
 
 pub struct CheckSpecs {
@@ -672,11 +767,15 @@ fn spec_text(report: &SpecReport) -> String {
 
 #[async_trait]
 impl Tool for CheckSpecs {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SpecsInput>(
             "check_specs",
             &format!(
-                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. {CORNERS_HELP} {SPEC_SYNTAX} {MEASURE_SYNTAX}"
+                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. With post_layout (a layout from the layout tool), the layout is extracted and simulated in place of the schematic's devices, and each spec is reported before and after layout (at every corner when corners are given). {CORNERS_HELP} {SPEC_SYNTAX} {MEASURE_SYNTAX}"
             ),
         )
     }
@@ -694,18 +793,41 @@ impl Tool for CheckSpecs {
         if input.specs.is_some() && input.save {
             save_specs(&self.ws, &p, &input.circuit, &text).await;
         }
+        // The layout is extracted first, so a problem with it is reported
+        // before any simulation.
+        let post = match &input.post_layout {
+            None => None,
+            Some(pl) => {
+                match crate::layout::post_layout_netlist(&self.ws, &input.circuit, pl, &ctx.cancel)
+                    .await
+                {
+                    Ok(r) => Some((pl.layout.clone(), r)),
+                    Err(e) => return ToolOutput::error(format!("Post-layout: {e}")),
+                }
+            }
+        };
         if let Some(set) = &input.corners {
-            return check_corners(
-                &self.ws,
-                &p,
-                &input.circuit,
-                &specs,
-                set,
-                input.simulator.as_deref(),
-                ctx,
-            )
-            .await
-            .unwrap_or_else(ToolOutput::error);
+            let simulator = input.simulator.as_deref();
+            let out = match post {
+                None => {
+                    check_corners(&self.ws, &p, &input.circuit, &specs, set, simulator, ctx).await
+                }
+                Some((layout, run)) => {
+                    check_corners_post_layout(
+                        &self.ws,
+                        &p,
+                        &input.circuit,
+                        &specs,
+                        set,
+                        simulator,
+                        ctx,
+                        &layout,
+                        run,
+                    )
+                    .await
+                }
+            };
+            return out.unwrap_or_else(ToolOutput::error);
         }
         let run = match self
             .ws
@@ -745,8 +867,87 @@ impl Tool for CheckSpecs {
             run.simulator.name(),
             spec_text(&report)
         );
-        ToolOutput::text(t).with_data(json!({"kind": "specs", "report": ui_spec_report(&report)}))
+        let Some((layout, (netlist, std_libs, ex))) = post else {
+            return ToolOutput::text(t)
+                .with_data(json!({"kind": "specs", "report": ui_spec_report(&report)}));
+        };
+        // One more variant: the post-layout netlist, with the derived runs
+        // its measurements need, as for any variant of the circuit.
+        let sources = match analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure)) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("{t}Post-layout: {e}")),
+        };
+        let mut runs = run_variants(
+            &self.ws,
+            &input.circuit,
+            vec![("after layout".into(), netlist)],
+            &std_libs,
+            input.simulator.as_deref(),
+            &sources,
+            ctx,
+        )
+        .await;
+        let after = match runs.pop() {
+            Some((_, Ok(v))) => v,
+            Some((_, Err(e))) => {
+                return ToolOutput::error(format!("{t}Post-layout simulation failed: {e}"));
+            }
+            None => return ToolOutput::error(format!("{t}Post-layout simulation cancelled")),
+        };
+        let post_report = evaluate(&specs, &after.datasets);
+        let t = format!(
+            "{} before and after layout ({layout}; schematic run {}, post-layout run on {})\n{}{}",
+            input.circuit,
+            run.id,
+            after.run.simulator.name(),
+            ex.to_text(),
+            pre_post_text(&report, &post_report)
+        );
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {
+            "pre": ui_spec_report(&report),
+            "post": ui_spec_report(&post_report),
+            "layout": layout,
+            "extracted": extracted_json(&ex),
+        }}))
     }
+}
+
+/// Specs before and after layout side by side, with the change.
+pub fn pre_post_text(pre: &SpecReport, post: &SpecReport) -> String {
+    let mut t = format!(
+        "Schematic: {}\nAfter layout: {}\n",
+        pre.summary, post.summary
+    );
+    for a in &pre.rows {
+        let b = post.row(&a.name);
+        let show = |v: Option<f64>| {
+            v.map_or_else(
+                || "n/a".to_string(),
+                |v| aispice_sim::measure::spaced(v, &a.unit),
+            )
+        };
+        let after = b.and_then(|b| b.value);
+        let change = match (a.value, after) {
+            (Some(x), Some(y)) if x != 0.0 => format!(" ({:+.1}%)", (y - x) / x.abs() * 100.0),
+            (Some(x), Some(y)) => format!(" ({:+})", y - x),
+            _ => String::new(),
+        };
+        let verdict = |pass: Option<bool>| match pass {
+            Some(true) => "pass",
+            Some(false) => "FAIL",
+            None => "n/a",
+        };
+        t.push_str(&format!(
+            "  {}: {} {} -> {} {}{}\n",
+            a.name,
+            show(a.value),
+            verdict(Some(a.pass)),
+            show(after),
+            verdict(b.map(|b| b.pass)),
+            change
+        ));
+    }
+    t
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -770,6 +971,10 @@ pub struct Plot {
 
 #[async_trait]
 impl Tool for Plot {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<PlotInput>(
             "plot",
@@ -843,6 +1048,10 @@ pub struct ReadWaveform {
 
 #[async_trait]
 impl Tool for ReadWaveform {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<WaveInput>(
             "read_waveform",
@@ -957,6 +1166,10 @@ pub struct Sweep {
 
 #[async_trait]
 impl Tool for Sweep {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SweepInput>(
             "sweep",
@@ -1076,6 +1289,10 @@ const MAX_MC_RUNS: usize = 500;
 
 #[async_trait]
 impl Tool for MonteCarlo {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<MonteCarloInput>(
             "monte_carlo",
@@ -1351,6 +1568,10 @@ pub struct Optimize {
 
 #[async_trait]
 impl Tool for Optimize {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<OptimizeInput>(
             "optimize",
@@ -1802,6 +2023,10 @@ fn roots_json(roots: &[Root]) -> Vec<Value> {
 
 #[async_trait]
 impl Tool for PolesZeros {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<PolesZerosInput>(
             "poles_zeros",
@@ -2001,6 +2226,10 @@ impl OperatingPoint {
 
 #[async_trait]
 impl Tool for OperatingPoint {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<OperatingPointInput>(
             "operating_point",

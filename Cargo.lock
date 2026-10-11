@@ -38,6 +38,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "base64 0.23.1",
  "clap",
  "predicates",
  "rmcp",
@@ -110,6 +111,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aispice-layout"
+version = "0.2.0"
+dependencies = [
+ "aispice-core",
+ "aispice-sim",
+ "futures",
+ "roxmltree 0.21.1",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "aispice-sim"
 version = "0.2.0"
 dependencies = [
@@ -133,6 +151,7 @@ version = "0.2.0"
 dependencies = [
  "aispice-agent",
  "aispice-core",
+ "aispice-layout",
  "aispice-sim",
  "async-trait",
  "base64 0.23.1",

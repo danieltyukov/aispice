@@ -2,6 +2,7 @@
 //! app, the CLI and the MCP server all share.
 
 pub mod eval;
+pub mod layout;
 pub mod pdk;
 pub mod project;
 pub mod prompt;
@@ -14,4 +15,4 @@ pub mod workspace;
 pub use project::{CircuitEntry, Project, ProjectError, ProjectOptions, Snapshot};
 pub use runner::{RunMods, Runner, RunnerConfig, StoredRun};
 pub use tools::registry;
-pub use workspace::{Approver, Hooks, Workspace};
+pub use workspace::{Approver, FileWrite, Hooks, Workspace};

@@ -1,13 +1,13 @@
 //! `aispice mcp`: the tool set served over the Model Context Protocol on
 //! stdio, for Claude Code, Cursor, Codex, Claude Desktop and any other client.
 
-use aispice_agent::{ContentBlock, Registry, ToolContext};
+use aispice_agent::{Access, ContentBlock, Registry, ToolContext};
 use aispice_tools::registry;
 use anyhow::{Context, Result};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock as Content,
     Implementation, InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerConfig, Tool,
+    ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
@@ -55,14 +55,17 @@ impl ServerHandler for AispiceServer {
     ) -> Result<ListToolsResult, McpError> {
         let tools = self
             .registry
-            .specs()
+            .specs_with_access()
             .into_iter()
-            .map(|s| {
+            .map(|(s, access)| {
                 let schema = match s.input_schema {
                     Value::Object(map) => map,
                     _ => serde_json::Map::new(),
                 };
+                // Clients may run read-only tools without asking; every
+                // tool that writes the user's files says so.
                 Tool::new(s.name, s.description, Arc::new(schema))
+                    .with_annotations(ToolAnnotations::new().read_only(access == Access::ReadOnly))
             })
             .collect();
         Ok(ListToolsResult::with_all_items(tools))

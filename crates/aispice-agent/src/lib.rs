@@ -26,4 +26,4 @@ pub use provider::{
     ChatRequest, ChatResponse, Effort, ModelInfo, Provider, ProviderError, StopReason, StreamEvent,
     ThinkingConfig, Usage,
 };
-pub use tool::{Registry, Tool, ToolContext, ToolOutput, ToolSpec, schema_for};
+pub use tool::{Access, Registry, Tool, ToolContext, ToolOutput, ToolSpec, schema_for};

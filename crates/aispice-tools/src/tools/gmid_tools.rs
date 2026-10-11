@@ -73,6 +73,10 @@ pub struct GmIdTool {
 
 #[async_trait]
 impl Tool for GmIdTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<GmIdInput>("gm_id", DESCRIPTION)
     }

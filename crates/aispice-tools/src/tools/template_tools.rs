@@ -151,6 +151,10 @@ fn show(t: &Template) -> ToolOutput {
 
 #[async_trait]
 impl Tool for Templates {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<TemplatesInput>("templates", DESCRIPTION)
     }

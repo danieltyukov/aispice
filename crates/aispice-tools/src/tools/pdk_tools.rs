@@ -51,6 +51,10 @@ pub struct PdkTool {
 
 #[async_trait]
 impl Tool for PdkTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<PdkInput>("pdk", DESCRIPTION)
     }

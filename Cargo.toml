@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/aispice-core",
     "crates/aispice-sim",
+    "crates/aispice-layout",
     "crates/aispice-agent",
     "crates/aispice-tools",
     "crates/aispice-cli",
@@ -11,6 +12,7 @@ members = [
 default-members = [
     "crates/aispice-core",
     "crates/aispice-sim",
+    "crates/aispice-layout",
     "crates/aispice-agent",
     "crates/aispice-tools",
     "crates/aispice-cli",
@@ -28,6 +30,7 @@ homepage = "https://danieltyukov.github.io/aispice/"
 [workspace.dependencies]
 aispice-core = { path = "crates/aispice-core", version = "0.2.0" }
 aispice-sim = { path = "crates/aispice-sim", version = "0.2.0" }
+aispice-layout = { path = "crates/aispice-layout", version = "0.2.0" }
 aispice-agent = { path = "crates/aispice-agent", version = "0.2.0" }
 aispice-tools = { path = "crates/aispice-tools", version = "0.2.0" }
 

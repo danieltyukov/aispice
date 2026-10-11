@@ -31,6 +31,13 @@ pub struct Config {
     /// are Xyce plugins need a Xyce built with plugin support.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub xyce_path: Option<PathBuf>,
+    /// KLayout, for DRC, LVS, layout generation and pictures, when it is
+    /// not `klayout` on PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub klayout_path: Option<PathBuf>,
+    /// Magic, for parasitic extraction, when it is not `magic` on PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub magic_path: Option<PathBuf>,
     /// Simulate with aispice's embedded models and the project's own files
     /// only, never with models or symbols from an installed LTspice library,
     /// so results do not depend on the machine.
@@ -59,6 +66,8 @@ impl Default for Config {
             simulator: "auto".into(),
             ltspice_path: None,
             xyce_path: None,
+            klayout_path: None,
+            magic_path: None,
             embedded_models_only: false,
             edit_mode: EditMode::Apply,
             agent: AgentSettings::default(),

@@ -47,6 +47,7 @@ What the agent can do with your circuits:
 - sweep parameters, run Monte Carlo analysis over part tolerances and device mismatch with yield, and optimise part values to meet several specs at once, at every corner if asked
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
 - design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, and size transistors by gm/Id from tables aispice builds and caches
+- lay those blocks out with generators that draw the PDK's own pcells (current mirror, differential pair, five-transistor OTA, two-stage Miller op-amp with its MIM capacitor, StrongARM comparator) with common-centroid or interdigitated units, dummies and guard rings; check them with the PDK's KLayout DRC and LVS decks; extract parasitics with Magic; and report every spec before and after layout
 - undo any edit; every change is saved as a snapshot
 
 Things you can ask:
@@ -113,6 +114,11 @@ Measurements:
 | `aispice pdk add\|list\|show\|remove` | Register an installed PDK (IHP-Open-PDK's `ihp-sg13g2`), list and describe them |
 | `aispice gmid <device>` | Size a PDK transistor by gm/Id, for example `--gm-id 12 --l 0.5u --id 50u` |
 | `aispice macro check <dir>` | Check a macro package (a hardened block shared with ChipLeap); exits 1 when it fails |
+| `aispice layout generate <circuit> --template ota5t` | Lay a circuit out with the PDK's pcells, then run DRC and LVS; exits 1 when either fails |
+| `aispice layout render <gds> -o <out.png>` | Draw a layout |
+| `aispice drc <gds>`, `aispice lvs <gds> <circuit>` | The PDK's KLayout rule and LVS decks; exit 1 on violations or a mismatch |
+| `aispice extract <gds>` | Parasitic extraction with Magic (`--resistance` for resistor networks) |
+| `aispice check <file> --post-layout <gds>` | Specs before and after layout; exits 1 when a spec fails after layout |
 | `aispice mcp` | Serve the tools over MCP on stdio |
 | `aispice doctor` | Show simulators, LTspice's library, keys and the config file |
 | `aispice keys`, `aispice models` | Manage provider keys, list a provider's models |
@@ -140,6 +146,27 @@ aispice gmid sg13_lv_nmos --gm-id 12 --l 0.5u --id 50u
 
 Every netlist in that project then carries the PDK's model header (`.lib .../cornerMOSlv.lib mos_tt` and the like), and simulations load the PDK's compiled device models on ngspice or Xyce. [docs/SETUP.md](docs/SETUP.md#pdks-for-ic-design) covers building the models and what aispice checks.
 
+With KLayout and Magic installed, the same project goes on to layout:
+
+```console
+$ aispice layout generate ota.asc --template ota5t
+Wrote ota.gds and ota.layout.json.
+ota5t layout of ota (6 devices, 6 dummies), 14.46 x 26.02 um.
+  row tail: nmos fingers 2.0 um wide, L 1.0 um; order d M5 M6 d
+  row pair: nmos fingers 1.0 um wide, L 0.5 um; order d M1 M2 d
+  row load: pmos fingers 2.0 um wide, L 0.5 um; order d M3 M4 d
+  pins: 0, inm, inp, out, vbn, vdd
+DRC clean: cell ota, decks main, extra, antenna.
+LVS clean: the layout of ota matches the schematic.
+$ aispice check ota.asc --post-layout ota.gds
+...
+  gain: 25.06 dB pass -> 25.37 dB pass (+1.2%)
+  gbw: 113.7 MHz pass -> 105.2 MHz pass (-7.5%)
+  pm: 84.49 ° pass -> 82.54 ° pass (-2.3%)
+```
+
+Layouts come only from generators: when DRC or LVS fails, the agent changes the generator's parameters or role map and draws again, and never edits GDS. [docs/SETUP.md](docs/SETUP.md#layout) lists what layout needs.
+
 ## Blocks for mixed-signal chips
 
 Mixed-signal chips need blocks from both sides. aispice and its digital counterpart, [ChipLeap](https://github.com/danieltyukov/chipleap), hand hardened blocks to each other as macro packages: GDS, LEF, liberty, a Verilog model, a SPICE netlist, measured specs and DRC and LVS evidence, described by one `macro.toml`. Both tools check a package with the same rules before placing it:
@@ -159,6 +186,11 @@ The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-
 | Xyce | When `Xyce` is on `PATH`, or set by `xyce_path`. PDK models need a Xyce built with plugin support |
 | Spectre | On a remote licensed server over SSH, configured by you |
 
+| Layout tool | Notes |
+|---|---|
+| KLayout | 0.30 or newer, for DRC, LVS, drawing layouts with the PDK's pcells and pictures. Runs in batch mode only |
+| Magic | 8.3.573 or newer, for parasitic extraction with the PDK's tech file. Runs without graphics |
+
 | Provider | Notes |
 |---|---|
 | Anthropic | Claude models through the Messages API |
@@ -170,7 +202,7 @@ The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-
 
 ## Security
 
-aispice treats circuit files, simulator logs and model output as data. Tools only read and write inside the project folder. Every process runs from an argument vector, never a shell string, and every netlist is checked against an allowlist before a simulator sees it, so a schematic cannot run commands or read files outside the project. A netlist can never load compiled models; aispice loads those itself, only from a PDK folder you registered. In "ask before applying" mode every write waits for your approval. Keys stay in the OS keychain. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model) has the details, and [SECURITY.md](SECURITY.md) explains how to report a problem.
+aispice treats circuit files, simulator logs and model output as data. Tools only read and write inside the project folder. Every process runs from an argument vector, never a shell string, and every netlist is checked against an allowlist before a simulator sees it, so a schematic cannot run commands or read files outside the project. A netlist can never load compiled models; aispice loads those itself, only from a PDK folder you registered. KLayout and Magic run only aispice's own scripts, with names and paths passed as checked data, and the GDS and report readers are bounded against hostile files. In "ask before applying" mode every write waits for your approval. Keys stay in the OS keychain. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model) has the details, and [SECURITY.md](SECURITY.md) explains how to report a problem.
 
 ## Development
 

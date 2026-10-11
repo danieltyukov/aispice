@@ -13,6 +13,7 @@ homepage.workspace = true
 aispice-core.workspace = true
 aispice-agent.workspace = true
 aispice-sim.workspace = true
+aispice-layout.workspace = true
 async-trait = "0.1"
 schemars.workspace = true
 serde.workspace = true

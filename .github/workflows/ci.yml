@@ -79,17 +79,22 @@ jobs:
         run: cargo test --no-fail-fast
 
   # The IC path against the real IHP SG13G2 PDK, fetched at a pinned commit
-  # (only its ngspice models and Verilog-A sources; nothing is committed) with
-  # its OSDI models compiled by OpenVAF. Not a required check: it depends on
-  # two downloads. Xyce is not built here, so the Xyce half of these tests
-  # skips; it runs where a plugin-capable Xyce is installed.
+  # (only its ngspice models, Verilog-A sources, KLayout decks and pcells;
+  # nothing is committed) with its OSDI models compiled by OpenVAF. Not a
+  # required check: it depends on three downloads. Xyce is not built here, so
+  # the Xyce half of these tests skips; it runs where a plugin-capable Xyce is
+  # installed. Magic is not installed either (Ubuntu's is older than IHP's
+  # tech file needs), so extraction runs locally. The runner is pinned to
+  # 24.04 because the KLayout package is built for it.
   pdk:
     name: PDK (IHP SG13G2)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
       OPENVAF_URL: https://openva.fra1.cdn.digitaloceanspaces.com/openvaf_23_5_0_linux_amd64.tar.gz
       OPENVAF_SHA256: 79c0e08ad948a7a9f460dc87be88b261bbd99b63a4038db3c64680189f44e4f0
+      KLAYOUT_URL: https://www.klayout.org/downloads/Ubuntu-24/klayout_0.30.4-1_amd64.deb
+      KLAYOUT_SHA256: a25e750329921de81ea35f349194768fc925f5d1aacbacffc1856af733a7be25
     steps:
       - uses: actions/checkout@v7
 
@@ -116,7 +121,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/pdk
-          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0
+          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0-klayout
 
       - name: Fetch IHP-Open-PDK at the pinned commit
         if: steps.pdk-cache.outputs.cache-hit != 'true'
@@ -124,9 +129,17 @@ jobs:
           git init -q ~/pdk/IHP-Open-PDK
           cd ~/pdk/IHP-Open-PDK
           git remote add origin https://github.com/IHP-GmbH/IHP-Open-PDK.git
-          git sparse-checkout set --no-cone /ihp-sg13g2/libs.tech/ngspice/ /ihp-sg13g2/libs.tech/verilog-a/
+          git sparse-checkout set --no-cone /.gitmodules \
+            /ihp-sg13g2/libs.tech/ngspice/ /ihp-sg13g2/libs.tech/verilog-a/ \
+            /ihp-sg13g2/libs.tech/klayout/python/ /ihp-sg13g2/libs.tech/klayout/tech/sg13g2.lyp \
+            /ihp-sg13g2/libs.tech/klayout/tech/drc/ihp-sg13g2.drc /ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/ \
+            /ihp-sg13g2/libs.tech/klayout/tech/lvs/sg13g2.lvs /ihp-sg13g2/libs.tech/klayout/tech/lvs/rule_decks/
           git fetch -q --depth 1 --filter=blob:none origin "$IHP_PDK_COMMIT"
           git checkout -q FETCH_HEAD
+          # The pcells import these two submodules.
+          git submodule update -q --init --depth 1 -- \
+            ihp-sg13g2/libs.tech/klayout/python/pycell4klayout-api \
+            ihp-sg13g2/libs.tech/klayout/python/pypreprocessor
 
       - name: Compile the PDK's Verilog-A models to OSDI
         if: steps.pdk-cache.outputs.cache-hit != 'true'
@@ -139,11 +152,28 @@ jobs:
           PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh
           ls -l ../ngspice/osdi
 
+      - name: Install KLayout
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/klayout.deb" "$KLAYOUT_URL"
+          echo "$KLAYOUT_SHA256  $RUNNER_TEMP/klayout.deb" | sha256sum -c -
+          sudo apt-get install --no-install-recommends -y "$RUNNER_TEMP/klayout.deb"
+          klayout -b -v
+
       - name: PDK tests
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-sim --lib pdk::
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
+
+      # One DRC deck on a synthetic layout, then a generated current mirror
+      # through DRC and LVS, the broken-layout checks, and the files each
+      # layout tool writes on a generated OTA: about two minutes.
+      - name: Layout tests
+        run: |
+          export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
+          cargo test -p aispice-layout --test drc_ihp -- --nocapture
+          cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact
+          cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
 
   shell:
     name: Desktop shell

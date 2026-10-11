@@ -207,6 +207,78 @@ impl Project {
         Ok(real)
     }
 
+    /// Where a tool may write a new or replaced file: a path inside the
+    /// project and outside `.aispice/`, given without `..`, `~` or a drive,
+    /// whose folder exists (symlinks in it resolved, and still inside), and
+    /// whose final name is not a symbolic link, since aispice never writes
+    /// through one.
+    pub fn resolve_output(&self, rel: &str) -> Result<PathBuf, ProjectError> {
+        let rel = rel.trim();
+        let outside = || ProjectError::Outside(rel.to_string());
+        if rel.is_empty()
+            || rel.contains('\0')
+            || rel.starts_with('~')
+            || rel.contains("..")
+            || rel.chars().any(char::is_control)
+        {
+            return Err(outside());
+        }
+        let p = Path::new(rel);
+        // A path rooted without a drive (`\x` on Windows) is relative to the
+        // current drive, not the project.
+        if p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+            || (p.has_root() && !p.is_absolute())
+        {
+            return Err(outside());
+        }
+        let candidate = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.root.join(p)
+        };
+        let name = candidate.file_name().ok_or_else(outside)?.to_owned();
+        let parent = candidate.parent().ok_or_else(outside)?;
+        let real_parent =
+            std::fs::canonicalize(parent).map_err(|_| ProjectError::Missing(rel.to_string()))?;
+        if !real_parent.starts_with(&self.root)
+            || real_parent.starts_with(self.root.join(STATE_DIR))
+        {
+            return Err(outside());
+        }
+        let target = real_parent.join(name);
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(ProjectError::Other(format!(
+                "{rel} is a symbolic link; aispice does not write through links"
+            )));
+        }
+        Ok(target)
+    }
+
+    /// Write any file of the project (a layout, its record), recording the
+    /// previous and new contents in the history so it can be undone like a
+    /// schematic edit. Returns the snapshot ids before and after.
+    pub fn save_file_tracked(
+        &self,
+        rel: &str,
+        bytes: &[u8],
+        summary: &str,
+    ) -> Result<(Option<String>, String), ProjectError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| ProjectError::Other("project lock poisoned".into()))?;
+        let path = self.resolve_output(rel)?;
+        let rel = self.relative(&path);
+        let mut idx = self.read_index(&rel);
+        self.capture_external(&rel, &mut idx)?;
+        let before = idx.snapshots.get(idx.current).map(|s| s.id.clone());
+        atomic_write(&path, bytes)?;
+        let id = self.push_snapshot(&rel, &mut idx, bytes, summary)?;
+        self.write_index(&rel, &idx)?;
+        Ok((before, id))
+    }
+
     /// The project-relative form of an absolute path inside the project.
     pub fn relative(&self, abs: &Path) -> String {
         abs.strip_prefix(&self.root)
