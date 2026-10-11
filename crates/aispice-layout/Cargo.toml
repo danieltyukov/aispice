@@ -1,0 +1,28 @@
+[package]
+name = "aispice-layout"
+description = "Analog layout for aispice: DRC, LVS and extraction on a PDK's own decks, layout generators and rendering."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["layout", "drc", "lvs", "klayout", "magic"]
+categories = ["science", "simulation"]
+
+[dependencies]
+aispice-core.workspace = true
+aispice-sim.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+futures.workspace = true
+tokio-util = "0.7"
+tempfile.workspace = true
+roxmltree = "0.21"
+
+[lints]
+workspace = true

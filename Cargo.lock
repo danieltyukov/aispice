@@ -110,6 +110,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aispice-layout"
+version = "0.2.0"
+dependencies = [
+ "aispice-core",
+ "aispice-sim",
+ "futures",
+ "roxmltree 0.21.1",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "aispice-sim"
 version = "0.2.0"
 dependencies = [
