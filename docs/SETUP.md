@@ -64,7 +64,7 @@ After an edit, the desktop app opens the schematic in LTspice again, which bring
 
 ### Xyce
 
-Install Xyce from [xyce.sandia.gov](https://xyce.sandia.gov/) and make sure `Xyce` is on `PATH`. aispice translates LTspice-specific syntax where Xyce needs it.
+Install Xyce from [xyce.sandia.gov](https://xyce.sandia.gov/) and make sure `Xyce` is on `PATH`, or set `xyce_path` in the config file. aispice translates LTspice-specific syntax where Xyce needs it. Simulating a PDK on Xyce needs a Xyce built with plugin support (see [PDKs for IC design](#pdks-for-ic-design)).
 
 ### Spectre
 
@@ -83,6 +83,68 @@ SSH runs with `BatchMode=yes`, so the host must accept your SSH key without a pa
 These settings come only from your config file. A model or a netlist can never change the host or the command. Keep process design kits and anything under an NDA out of your project folders if you share them.
 
 Spectre 19 and older do not run `.meas` statements in SPICE syntax. aispice's own measurements, spec checks, sweeps and the optimizer work on Spectre's waveforms the same as on any other simulator, so use those. Tested with Spectre 19.1 on a remote CentOS 7 server, through an SSH jump host configured in `~/.ssh/config`.
+
+## PDKs for IC design
+
+aispice designs transistor-level circuits on a process design kit you install. It never ships or copies a PDK: it reads the models where they are. IHP SG13G2 (130 nm SiGe BiCMOS, from [IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK)) is the first one it knows.
+
+### Install IHP SG13G2
+
+```sh
+git clone https://github.com/IHP-GmbH/IHP-Open-PDK ~/IHP-Open-PDK
+cd ~/IHP-Open-PDK/ihp-sg13g2/libs.tech/verilog-a
+./openvaf-compile-va.sh          # needs OpenVAF 23.5 or OpenVAF-Reloaded on PATH
+```
+
+The last step compiles the PDK's Verilog-A transistor models (PSP 103) into OSDI files in `libs.tech/ngspice/osdi`, which ngspice 42 or newer loads. They are not in the PDK's repository. aispice's tests run against commit `22f2a25f1734796de3debbbf29cf697cbbc54081`.
+
+For Xyce, the same models must be built as Xyce plugins into `libs.tech/xyce/plugins`, with IHP's `adms-compile-va.sh` (or `buildxyceplugin.sh` from your Xyce installation, run in a copy of each model's folder). That needs ADMS and a Xyce built with shared libraries and plugin support (`-DBUILD_SHARED_LIBS=ON -DXyce_PLUGIN_SUPPORT=ON`); a statically linked Xyce cannot load plugins. Point `xyce_path` at that Xyce. Without plugins, PDK circuits still run on ngspice.
+
+### Register it
+
+```sh
+aispice pdk add ihp-sg13g2 ~/IHP-Open-PDK/ihp-sg13g2
+aispice pdk show ihp-sg13g2      # compiled models, corner libraries, devices
+```
+
+`add` checks the folder (every corner library, and at least `psp103.osdi`), resolves symlinks, and records it in `pdks.toml` beside `config.toml`. The path to the checkout itself works too. `aispice pdk list` and `aispice pdk remove` do the rest, and `aispice doctor` shows what is registered. Set `AISPICE_PDK_REGISTRY` to use another registry file.
+
+Only you register a PDK. A registered folder is trusted to supply compiled models that run inside the simulator, so neither a project nor the agent can add one: the `pdk` tool reads the registry and can opt a project in, nothing more.
+
+### Use it in a project
+
+Put an `aispice.toml` at the project's root:
+
+```toml
+pdk = "ihp-sg13g2"
+```
+
+It names a registered PDK and nothing else (never a path), so a project you clone cannot point aispice at code of its choosing. The agent can write it for you with the `pdk` tool's `use` action, through the usual approval.
+
+In such a project:
+
+- Place devices from the `sg13g2` symbol folder: `sg13g2\sg13_lv_nmos`, `sg13_lv_pmos` (1.2 V), `sg13_hv_nmos`, `sg13_hv_pmos` (3.3 V), the resistors `rsil`, `rppd`, `rhigh`, the MIM capacitor `cap_cmim`, and the HBTs `npn13G2`, `npn13G2l`, `npn13G2v`. Each netlists as the PDK's subcircuit with IHP's default sizes; set sizes in SpiceLine (`w=2u l=0.5u ng=2 m=1`). Resistors have a body pin (BN) and HBTs a substrate pin (BN): wire them, usually to ground.
+- Every netlist ends with the PDK's model header, one line per device class the circuit uses, as in IHP's own test benches:
+
+  ```text
+  .lib /home/me/IHP-Open-PDK/ihp-sg13g2/libs.tech/ngspice/models/cornerMOSlv.lib mos_tt
+  .lib /home/me/IHP-Open-PDK/ihp-sg13g2/libs.tech/ngspice/models/cornerRES.lib res_typ
+  ```
+
+  A netlist that already includes a corner library keeps its own line.
+- Simulations run on ngspice (the default) or Xyce. On ngspice aispice loads the PDK's OSDI files through the start-up file it writes for each run and runs ngspice in its native mode, because ngspice's LTspice and PSpice compatibility modes break the PDK's `.lib` sections and its PSP models. On Xyce it passes the PDK's plugins with `-plugin` and reads `libs.tech/xyce/models` (the HBT from the ngspice library, as IHP's Xyce test benches do). LTspice cannot load the models, so it is refused.
+- `gm_id` (and `aispice gmid`) sizes a transistor by gm/Id:
+
+  ```console
+  $ aispice gmid sg13_lv_nmos --gm-id 12 --l 0.5u --id 50u
+  sg13_lv_nmos at L = 500nm, VDS = 600mV, gm/Id = 12 S/A:
+    W = 8.185um, Id = 50.01uA
+    SpiceLine: w=8.185u l=500n ng=2 m=1
+    VGS = 393.1mV (Vth 275.7mV), current density 6.11uA per um of width
+    ...
+  ```
+
+  The first use of a device sweeps it on ngspice over L, VDS and VGS (a few seconds) and caches the table in `~/.cache/aispice/gmid/<pdk>/<device>.json`, rebuilt when the PDK's commit or model files change. The answer is then simulated at the size found and corrected, since the models do not scale exactly with finger width.
 
 ## Model providers
 
@@ -125,6 +187,7 @@ model = "claude-opus-5-5"       # default model for that provider
 simulator = "auto"              # auto, ngspice, ltspice, xyce or spectre
 edit_mode = "apply"             # apply (with undo) or ask (approve each edit)
 # ltspice_path = "/home/me/.wine/drive_c/Program Files/ADI/LTspice/LTspice.exe"
+# xyce_path = "/home/me/.local/xyce/bin/Xyce"   # a Xyce other than the one on PATH
 # embedded_models_only = true   # never use models or symbols from LTspice's library
 
 [agent]
@@ -168,6 +231,7 @@ Cursor, Claude Desktop, and other clients that take a JSON server list:
 | Path | Contents |
 |---|---|
 | `<circuit>.specs` | The spec table for a circuit, one spec per line. Commit it with the circuit. |
+| `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project. Written only when you (or the agent, with approval) choose a PDK. |
 | `.aispice/history/` | A snapshot before every edit, for undo |
 | `.aispice/runs/` | Recent simulation output |
 
@@ -194,6 +258,10 @@ Start with `aispice doctor`. It lists every simulator it found with its version,
 **A part is reported as an unknown symbol.** The schematic uses a symbol from LTspice's library or a custom `.asy` file. Install LTspice, set `AISPICE_LTSPICE_LIB`, or pass the folder with `--symbols <dir>`. Symbols next to the schematic are always found.
 
 **Keys are not saved on a Linux server.** Without a Secret Service (GNOME Keyring or KWallet), keys go to `keys.json` in the config folder. You can also use the environment variables above.
+
+**"this project uses PDK ... but no PDK is registered".** Register it with `aispice pdk add`, using the name in `aispice.toml`. The desktop app reads the registry when it starts and when settings are saved.
+
+**ngspice says "Unknown model type psp103va".** The PDK's OSDI files are missing or were not loaded. Run `aispice pdk show <name>` to see which were found, and compile them with IHP's `openvaf-compile-va.sh`. A netlist that includes the PDK's libraries by hand only works in a project whose `aispice.toml` names the PDK.
 
 **HTTP 429 from the provider.** Free tiers allow only a few requests per minute. aispice retries with backoff; for long agent runs, use a paid tier or a local model through Ollama.
 

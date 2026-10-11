@@ -16,6 +16,7 @@ In scope:
 - Command injection through file names, component values or directives reaching a shell. aispice never builds shell command strings; any case where it does is a bug.
 - The desktop app's IPC surface and content security policy.
 - The Spectre remote backend: anything that lets model output change the SSH host or the remote command.
+- Compiled device models: any way a netlist, a project file or model output gets a simulator to load an OSDI file, Xyce plugin or code model from anywhere but a PDK folder the user registered with `aispice pdk add`.
 - The release pipeline.
 
 Out of scope:

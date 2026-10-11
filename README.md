@@ -46,6 +46,7 @@ What the agent can do with your circuits:
 - check a spec table and report pass or fail with margins
 - sweep parameters, run Monte Carlo tolerance analysis with yield, and optimise part values to meet several specs at once
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
+- design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, and size transistors by gm/Id from tables aispice builds and caches
 - undo any edit; every change is saved as a snapshot
 
 Things you can ask:
@@ -108,6 +109,8 @@ Measurements:
 | `aispice render <file> -o <out.svg\|png>` | Draw a schematic |
 | `aispice draw <netlist> -o <out.asc>` | Lay a SPICE netlist out as a readable LTspice schematic |
 | `aispice eval` | Run the design task suite in `evals/` against one or more models and report pass rates |
+| `aispice pdk add\|list\|show\|remove` | Register an installed PDK (IHP-Open-PDK's `ihp-sg13g2`), list and describe them |
+| `aispice gmid <device>` | Size a PDK transistor by gm/Id, for example `--gm-id 12 --l 0.5u --id 50u` |
 | `aispice mcp` | Serve the tools over MCP on stdio |
 | `aispice doctor` | Show simulators, LTspice's library, keys and the config file |
 | `aispice keys`, `aispice models` | Manage provider keys, list a provider's models |
@@ -123,13 +126,25 @@ pm   = phase_margin(V(out)) >= 45
 
 `aispice check amp.asc` runs the simulation and fails the build when a spec does not pass, so circuits can be tested in CI like code.
 
+## IC design on a PDK
+
+aispice uses a PDK where you installed it and never ships one. Register it once, then name it in the project's `aispice.toml`:
+
+```sh
+aispice pdk add ihp-sg13g2 ~/IHP-Open-PDK/ihp-sg13g2
+echo 'pdk = "ihp-sg13g2"' > ~/my-ota/aispice.toml
+aispice gmid sg13_lv_nmos --gm-id 12 --l 0.5u --id 50u
+```
+
+Every netlist in that project then carries the PDK's model header (`.lib .../cornerMOSlv.lib mos_tt` and the like), and simulations load the PDK's compiled device models on ngspice or Xyce. [docs/SETUP.md](docs/SETUP.md#pdks-for-ic-design) covers building the models and what aispice checks.
+
 ## Simulators and models
 
 | Simulator | Notes |
 |---|---|
 | ngspice | Recommended default. Runs in LTspice compatibility mode |
 | LTspice | Native on Windows and macOS, under Wine on Linux, headless with `xvfb-run` |
-| Xyce | When `Xyce` is on `PATH` |
+| Xyce | When `Xyce` is on `PATH`, or set by `xyce_path`. PDK models need a Xyce built with plugin support |
 | Spectre | On a remote licensed server over SSH, configured by you |
 
 | Provider | Notes |
@@ -143,7 +158,7 @@ pm   = phase_margin(V(out)) >= 45
 
 ## Security
 
-aispice treats circuit files, simulator logs and model output as data. Tools only read and write inside the project folder. Every process runs from an argument vector, never a shell string, and every netlist is checked against an allowlist before a simulator sees it, so a schematic cannot run commands or read files outside the project. In "ask before applying" mode every write waits for your approval. Keys stay in the OS keychain. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model) has the details, and [SECURITY.md](SECURITY.md) explains how to report a problem.
+aispice treats circuit files, simulator logs and model output as data. Tools only read and write inside the project folder. Every process runs from an argument vector, never a shell string, and every netlist is checked against an allowlist before a simulator sees it, so a schematic cannot run commands or read files outside the project. A netlist can never load compiled models; aispice loads those itself, only from a PDK folder you registered. In "ask before applying" mode every write waits for your approval. Keys stay in the OS keychain. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#security-model) has the details, and [SECURITY.md](SECURITY.md) explains how to report a problem.
 
 ## Development
 
