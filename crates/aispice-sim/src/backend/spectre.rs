@@ -147,6 +147,7 @@ impl Spectre {
         let deck = format!("{stem}.scs");
         let raw = format!("{stem}.raw");
         let log = format!("{stem}.log");
+        let measure = format!("{stem}.measure");
         let ssh = c.ssh.clone().unwrap_or_else(|| PathBuf::from("ssh"));
         let scp = c.scp.clone().unwrap_or_else(|| PathBuf::from("scp"));
         let ssh_cmd = |remote: String| -> Vec<OsString> {
@@ -192,11 +193,14 @@ impl Spectre {
                 ],
             ),
             run: ssh_cmd(remote_command),
+            // `.meas` results go to their own file, which only a deck with
+            // `.meas` lines makes: last, so a missing one stops nothing.
             download: scp_cmd(
                 true,
                 vec![
                     format!("{}:{dir}/{raw}", c.host).into(),
                     format!("{}:{dir}/{log}", c.host).into(),
+                    format!("{}:{dir}/{measure}", c.host).into(),
                     download_to,
                 ],
             ),
@@ -317,7 +321,14 @@ impl Simulator for Spectre {
             log.push('\n');
             log.push_str(&String::from_utf8_lossy(&bytes));
         }
-        let report = crate::log::parse_spectre_output(&log);
+        let mut report = crate::log::parse_spectre_output(&log);
+        if let Some(bytes) = read_log_limited(&ws.file(&format!("{stem}.measure"))) {
+            report
+                .measurements
+                .extend(crate::log::parse_spectre_measure(&String::from_utf8_lossy(
+                    &bytes,
+                )));
+        }
         let raw = ws.file(&format!("{stem}.raw"));
         let datasets = if raw.exists() {
             read_raw_limited(&raw)?
@@ -330,6 +341,7 @@ impl Simulator for Spectre {
                 format!("{stem}.scs"),
                 format!("{stem}.raw"),
                 format!("{stem}.log"),
+                format!("{stem}.measure"),
             ],
         )?;
         let raw_path = files
@@ -416,6 +428,7 @@ mod tests {
                 "--",
                 &format!("me@eda.example.edu:{dir}/rc_low-pass.raw"),
                 &format!("me@eda.example.edu:{dir}/rc_low-pass.log"),
+                &format!("me@eda.example.edu:{dir}/rc_low-pass.measure"),
                 "/tmp/run/",
             ]
         );
