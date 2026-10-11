@@ -113,6 +113,11 @@ fn bad_names_and_folders_are_refused() {
         .failure()
         .stderr(predicate::str::contains("not an IHP SG13G2 PDK folder"));
     aispice(&reg)
+        .args(["pdk", "add", "everything", "/"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("too broad"));
+    aispice(&reg)
         .args(["pdk", "show", "ihp"])
         .assert()
         .failure()

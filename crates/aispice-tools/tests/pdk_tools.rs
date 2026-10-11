@@ -139,3 +139,32 @@ async fn the_netlist_tool_shows_the_model_header() {
         "{text}"
     );
 }
+
+/// Registering a PDK trusts its compiled code, so no tool can do it: the
+/// pdk tool only lists, shows, lists devices and opts a project in.
+#[tokio::test]
+async fn no_tool_can_register_a_pdk() {
+    let (d, ws) = workspace(false);
+    let reg = registry(ws.clone());
+    let spec = reg.get("pdk").unwrap().spec();
+    let actions = spec.input_schema.to_string();
+    for allowed in ["list", "show", "devices", "use"] {
+        assert!(actions.contains(&format!("\"{allowed}\"")), "{actions}");
+    }
+    for attempt in [
+        json!({"action": "add", "name": "evil", "path": d.path()}),
+        json!({"action": "register", "name": "evil", "path": d.path()}),
+        json!({"action": "use", "name": "evil", "path": d.path().join("IHP-Open-PDK")}),
+    ] {
+        let (text, err) = call(&ws, attempt.clone()).await;
+        assert!(err, "{attempt}: {text}");
+    }
+    assert!(ws.runner.config().pdks.pdks.is_empty());
+    for t in reg.specs() {
+        let name = t.name.to_ascii_lowercase();
+        assert!(
+            !(name.contains("register") || name.contains("pdk_add")),
+            "{name}"
+        );
+    }
+}
