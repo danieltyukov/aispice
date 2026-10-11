@@ -70,7 +70,9 @@ fn auto_named(n: &str) -> bool {
 
 /// xschem names unlabelled nets `net1`, `net2`, ...
 fn xschem_auto_named(n: &str) -> bool {
-    n.len() > 3 && n[..3].eq_ignore_ascii_case("net") && n[3..].bytes().all(|b| b.is_ascii_digit())
+    n.len() > 3
+        && n.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("net"))
+        && n[3..].bytes().all(|b| b.is_ascii_digit())
 }
 
 fn norm_value(s: &str) -> String {

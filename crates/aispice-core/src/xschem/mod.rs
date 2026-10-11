@@ -11,8 +11,11 @@
 //! of it ([`tcl`]), and decides with [`safety`] whether xschem itself may be
 //! run on a file.
 
+mod builtin;
 pub mod file;
+pub mod netlist;
 pub mod props;
+pub mod symbol;
 pub mod tcl;
 
 pub use file::{ParseError, XFile, XInstance, XShape, XText, XWire};
