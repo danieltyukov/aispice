@@ -5,7 +5,7 @@
 
 use super::blocking;
 use super::schematic_tools::spec;
-use crate::pdk::{PROJECT_FILE, ProjectConfig, Registry, with_pdk};
+use crate::pdk::{PROJECT_FILE, ProjectConfig, Registry, read_project_file, with_pdk};
 use crate::workspace::Workspace;
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
@@ -285,7 +285,12 @@ impl PdkTool {
             Ok(p) => p,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
-        let existing = std::fs::read_to_string(&path).ok();
+        // Refuses a link, so the write below cannot land on the file one
+        // points at.
+        let existing = match read_project_file(project.root()) {
+            Ok(t) => t,
+            Err(e) => return ToolOutput::error(e),
+        };
         let text = match with_pdk(existing.as_deref(), &name) {
             Ok(t) => t,
             Err(e) => return ToolOutput::error(e),
