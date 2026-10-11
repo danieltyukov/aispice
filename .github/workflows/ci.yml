@@ -116,12 +116,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ngspice
 
-      - name: Cache the PDK with its compiled models
+      # Only the PDK's sources are cached. The OSDI models are compiled on every
+      # run instead: OpenVAF builds for the runner's own CPU, a cache restored on
+      # another runner then holds code that stops ngspice before it writes any
+      # results, and OpenVAF 23.5.0 crashes on the runners when asked for a
+      # generic CPU. Compiling takes seconds.
+      - name: Cache the PDK sources
         id: pdk-cache
         uses: actions/cache@v6
         with:
           path: ~/pdk
-          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-openvaf-23.5.0-generic-klayout
+          key: ihp-sg13g2-${{ env.IHP_PDK_COMMIT }}-sources-klayout
 
       - name: Fetch IHP-Open-PDK at the pinned commit
         if: steps.pdk-cache.outputs.cache-hit != 'true'
@@ -142,18 +147,20 @@ jobs:
             ihp-sg13g2/libs.tech/klayout/python/pypreprocessor
 
       - name: Compile the PDK's Verilog-A models to OSDI
-        if: steps.pdk-cache.outputs.cache-hit != 'true'
         run: |
           curl -sSfL -o "$RUNNER_TEMP/openvaf.tar.gz" "$OPENVAF_URL"
           echo "$OPENVAF_SHA256  $RUNNER_TEMP/openvaf.tar.gz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/openvaf"
           tar -xzf "$RUNNER_TEMP/openvaf.tar.gz" -C "$RUNNER_TEMP/openvaf"
           cd ~/pdk/IHP-Open-PDK/ihp-sg13g2/libs.tech/verilog-a
-          # Generic CPU code: OpenVAF targets the build machine's CPU by
-          # default, and the cached models run on other runners, where
-          # native code can stop ngspice before it writes any results.
-          PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh --compile-model-generic
+          rm -f ../ngspice/osdi/*.osdi
+          PATH="$RUNNER_TEMP/openvaf:$PATH" ./openvaf-compile-va.sh
           ls -l ../ngspice/osdi
+          # The script reports compiler crashes without failing, so check the
+          # models it must produce.
+          for m in psp103 psp103_nqs r3_cmc mosvar; do
+            test -s "../ngspice/osdi/$m.osdi" || { echo "missing $m.osdi"; exit 1; }
+          done
 
       - name: Install KLayout
         run: |
