@@ -5,11 +5,7 @@ use crate::xschem::import::{ImportOptions, import};
 use crate::xschem::safety;
 
 fn builtins() -> Resolver {
-    Resolver {
-        library: Vec::new(),
-        roots: Vec::new(),
-        builtins: true,
-    }
+    Resolver::new(Vec::new(), Vec::new())
 }
 
 /// Quick layouts: these tests are about the conversion, not the drawing.
@@ -215,5 +211,114 @@ fn exports_import_back_to_the_same_circuit() {
         };
         let r = compare_with(&e.asc_netlist, &back.asc_netlist, &opts);
         assert_eq!(r, Ok(()), "{c}");
+    }
+}
+
+fn instance<'a>(e: &'a Exported, name: &str) -> Option<&'a XInstance> {
+    e.file
+        .instances
+        .iter()
+        .find(|i| props::get(&i.props, "name").as_deref() == Some(name))
+}
+
+/// A value from the `.asc` that xschem would evaluate is never written: not
+/// as a property, not in a code block. The export then cannot prove the
+/// circuit, so the tools write nothing.
+#[test]
+fn values_xschem_would_evaluate_are_never_written() {
+    for c in [
+        "t\nV1 a 0 1\nR1 a b tcleval(1k} ; exec touch /tmp/aispice-x ; #{)\nR2 b 0 1k\n.op\n",
+        "t\nV1 a 0 1\nR1 a 0 1k\n.param x=tcleval([exec touch /tmp/aispice-x])\n.op\n",
+        "t\nV1 a 0 1\nXM1 a a 0 0 sg13_lv_nmos w=1u l=0.13u format=tcleval([exec ls])\n.op\n",
+    ] {
+        let e = export_of(c, &ExportOptions::default());
+        assert!(
+            !e.text.to_ascii_lowercase().contains("tcleval"),
+            "{c}\n{}",
+            e.text
+        );
+        assert!(!e.proof.equivalent, "{c}");
+        assert!(
+            e.findings.iter().any(|f| f.message.contains("tcleval")),
+            "{c}: {:?}",
+            e.findings
+        );
+    }
+}
+
+/// Values and nets a symbol's Tcl would read are written so they stay text:
+/// a plain format of the instance's own, or the SPICE line in a code block.
+#[test]
+fn values_reaching_tcl_stay_text() {
+    // vsource's format is Tcl over its value and nets.
+    let e = export_of(
+        "t\nV1 in 0 dc {vdd} ac 1\nR1 in 0 1k\n.param vdd=1\n.op\n",
+        &ExportOptions::default(),
+    );
+    assert!(e.proof.equivalent, "{:?}", e.proof.differences);
+    let v1 = instance(&e, "V1").unwrap();
+    assert_eq!(
+        props::get(&v1.props, "format").as_deref(),
+        Some("@name @pinlist @value")
+    );
+    // A plain value keeps vsource's own format.
+    let e = export_of("t\nV1 in 0 3\nR1 in 0 1k\n.op\n", &ExportOptions::default());
+    assert!(props::get(&instance(&e, "V1").unwrap().props, "format").is_none());
+    // IHP's drc substitutes w and l: a parametric w goes into the value of
+    // a plain format instead.
+    let e = export_of(
+        "t\nVD d 0 1\nXM1 d d 0 0 sg13_lv_nmos w={wn} l=0.13u ng=1 m=1\n.param wn=1u\n.op\n",
+        &ExportOptions::default(),
+    );
+    assert!(e.proof.equivalent, "{:?}", e.proof.differences);
+    let m1 = instance(&e, "M1").unwrap();
+    assert!(props::get(&m1.props, "format").is_some(), "{}", m1.props);
+    assert!(props::get(&m1.props, "w").is_none(), "{}", m1.props);
+    // A net name Tcl would read on a vsource: plain format.
+    let e = export_of(
+        "t\nV1 d[0] 0 3\nR1 d[0] 0 1k\n.op\n",
+        &ExportOptions::default(),
+    );
+    assert!(e.proof.equivalent, "{:?}", e.proof.differences);
+    assert!(props::get(&instance(&e, "V1").unwrap().props, "format").is_some());
+    // The MODEL block is plain text, never Tcl.
+    let e = export_of(
+        CIRCUITS[6],
+        &ExportOptions {
+            model_lines: vec![".lib cornerMOSlv.lib mos_tt".into()],
+            ..ExportOptions::default()
+        },
+    );
+    let model = instance(&e, "MODEL").unwrap();
+    assert!(
+        props::get(&model.props, "format").is_none(),
+        "{}",
+        model.props
+    );
+}
+
+/// No export of the test circuits holds tcleval, writes a symbol outside
+/// the fixed set, or fails to read back.
+#[test]
+fn exports_hold_only_what_the_guard_allows() {
+    for c in CIRCUITS {
+        let e = export_of(c, &ExportOptions::default());
+        assert!(!e.text.to_ascii_lowercase().contains("tcleval"), "{c}");
+        for i in &e.file.instances {
+            assert!(guard::allowed_symbol(&i.symbol), "{}", i.symbol);
+        }
+        let pairs: Vec<Vec<(String, String)>> = e
+            .file
+            .instances
+            .iter()
+            .map(|i| props::pairs(&i.props))
+            .collect();
+        assert_eq!(guard::verify(&e.text, &e.file, &pairs), Ok(()));
+        // A file that does not read back as meant is caught.
+        let mut tampered = pairs.clone();
+        tampered[0].push(("schematic".into(), "x.sch".into()));
+        assert!(guard::verify(&e.text, &e.file, &tampered).is_err());
+        let evil = e.text.replacen("devices/", "evil/", 1);
+        assert!(guard::verify(&evil, &e.file, &pairs).is_err());
     }
 }

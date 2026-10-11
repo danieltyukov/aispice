@@ -25,6 +25,14 @@
 //! whose symbol's `format` cannot reproduce its line (a MOSFET without `w`
 //! and `l`, which the symbol's template would add) gets a `format` of its
 //! own that can, which xschem honours.
+//!
+//! xschem evaluates Tcl from the files it opens, and an export's values
+//! come from the user's `.asc`. So everything is written through [`guard`],
+//! which lets a value reach the file only where it stays text: an instance
+//! whose values or nets a symbol's Tcl would read gets a plain format of
+//! its own, or becomes its SPICE line in a code block, and anything with
+//! `tcleval` is left out with a finding. The written file is read back as
+//! xschem reads it and the export fails if anything differs.
 
 use super::file::{self, XFile, XInstance, XText, XWire};
 use super::import::Proof;
@@ -36,7 +44,10 @@ use crate::layout::{LayoutError, LayoutOptions, Quality};
 use crate::netlist::{CompareOptions, Element, Netlist, compare_with, instance_name};
 use crate::schematic::{Item, Schematic, TextKind, normalize_symbol_name};
 use crate::symbol::{Graphic, SymbolDef, SymbolLibrary};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+pub mod guard;
 
 /// xschem units per LTspice unit.
 const TO_XSCHEM: f64 = 0.625;
@@ -61,7 +72,7 @@ pub struct ExportOptions {
 pub struct Exported {
     pub file: XFile,
     /// The `.sch` text.
-    pub text: String,
+    pub text: SchText,
     pub findings: Vec<Finding>,
     pub notes: Vec<String>,
     /// The `.asc`'s netlist.
@@ -83,6 +94,9 @@ pub enum ExportError {
     Netlist(#[from] netlist::NetlistError),
     #[error("the circuit has {0} elements; the layout handles up to {1}")]
     TooLarge(usize, usize),
+    /// The written file did not read back as the writer meant it.
+    #[error("the xschem file was not written: {0}")]
+    Unverified(String),
 }
 
 /// How the netlister's line for an instance is made.
@@ -326,6 +340,265 @@ struct Placed {
     map: Map,
     element: Element,
     overridden: bool,
+    /// The instance as placed, for its pin positions.
+    inst: XInstance,
+}
+
+/// The `.sch` text of an export: written by the export's own writer, every
+/// instance checked by [`guard`], and read back unchanged. It is the only
+/// text aispice lets xschem open without the user asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchText(String);
+
+impl SchText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SchText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SchText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<[u8]> for SchText {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+/// The file being written, with what each instance's properties must read
+/// back as. Everything goes in through [`guard`]'s checks.
+struct Writer<'r> {
+    f: XFile,
+    pairs: Vec<Vec<(String, String)>>,
+    labels: usize,
+    code: usize,
+    resolver: &'r Resolver,
+    dir: PathBuf,
+    /// Symbols as xschem will load them, by reference.
+    loaded: HashMap<String, Option<XSymbol>>,
+    findings: Vec<Finding>,
+}
+
+impl Writer<'_> {
+    /// The definition xschem will load for a reference: the installed file,
+    /// else aispice's built-in one.
+    fn loaded(&mut self, reference: &str) -> Option<XSymbol> {
+        let (resolver, dir) = (self.resolver, &self.dir);
+        self.loaded
+            .entry(reference.to_string())
+            .or_insert_with(|| resolver.resolve(reference, dir).ok())
+            .clone()
+    }
+
+    /// Check an instance's properties against the symbol xschem will load.
+    fn check(
+        &mut self,
+        reference: &str,
+        pairs: &[(String, String)],
+        nets: &[String],
+    ) -> Result<(), String> {
+        let sym = self
+            .loaded(reference)
+            .ok_or_else(|| format!("symbol `{reference}` was not found"))?;
+        guard::check_instance(reference, &sym, pairs, nets)
+    }
+
+    /// Add an instance, or say why it may not be written.
+    fn instance(
+        &mut self,
+        mut inst: XInstance,
+        pairs: Vec<(String, String)>,
+        nets: &[String],
+    ) -> Result<usize, String> {
+        self.check(&inst.symbol, &pairs, nets)?;
+        inst.props = props::write(&pairs);
+        self.f.instances.push(inst);
+        self.pairs.push(pairs);
+        Ok(self.f.instances.len() - 1)
+    }
+
+    /// Give an instance other properties.
+    fn replace(
+        &mut self,
+        index: usize,
+        pairs: Vec<(String, String)>,
+        nets: &[String],
+    ) -> Result<(), String> {
+        let reference = self.f.instances[index].symbol.clone();
+        self.check(&reference, &pairs, nets)?;
+        self.f.instances[index].props = props::write(&pairs);
+        self.pairs[index] = pairs;
+        Ok(())
+    }
+
+    fn at(symbol: &str, (x, y): (f64, f64)) -> XInstance {
+        XInstance {
+            symbol: symbol.into(),
+            x,
+            y,
+            rot: 0,
+            flip: false,
+            props: String::new(),
+            embedded: None,
+        }
+    }
+
+    /// A ground symbol or a net label at a point.
+    fn label(&mut self, at: (f64, f64), net: &str) {
+        let checked = guard::check_label(net).and_then(|()| {
+            self.labels += 1;
+            let n = self.labels;
+            let (symbol, pairs) = if net == "0" || net.eq_ignore_ascii_case("gnd") {
+                (
+                    "devices/gnd.sym",
+                    vec![
+                        ("name".into(), format!("l{n}")),
+                        ("lab".into(), "GND".into()),
+                    ],
+                )
+            } else {
+                (
+                    "devices/lab_pin.sym",
+                    vec![
+                        ("name".into(), format!("p{n}")),
+                        ("sig_type".into(), "std_logic".into()),
+                        ("lab".into(), net.to_string()),
+                    ],
+                )
+            };
+            self.instance(Self::at(symbol, at), pairs, &[net.to_string()])
+        });
+        if let Err(why) = checked {
+            self.findings.push(Finding {
+                subject: net.to_string(),
+                message: format!("{why}; the net is not labelled"),
+            });
+        }
+    }
+
+    /// The properties of a code block holding `text`.
+    fn code_pairs(
+        &mut self,
+        name: Option<&str>,
+        toplevel: bool,
+        text: &str,
+    ) -> Vec<(String, String)> {
+        let name = match name {
+            Some(n) => n.to_string(),
+            None => {
+                self.code += 1;
+                format!("s{}", self.code)
+            }
+        };
+        vec![
+            ("name".into(), name),
+            ("only_toplevel".into(), toplevel.to_string()),
+            ("value".into(), text.to_string()),
+        ]
+    }
+
+    /// A code block. `name` defaults to `s<n>`.
+    fn code(
+        &mut self,
+        at: (f64, f64),
+        name: Option<&str>,
+        toplevel: bool,
+        text: &str,
+    ) -> Result<usize, String> {
+        guard::check_code(text)?;
+        let pairs = self.code_pairs(name, toplevel, text);
+        self.instance(Self::at("devices/code_shown.sym", at), pairs, &[])
+    }
+
+    /// Write an instance that may not be written as its symbol as its SPICE
+    /// line in a code block instead, labelling the nets at its pins so the
+    /// wires that end there stay connected. `index` is the instance to
+    /// replace, if it was written already.
+    fn as_code(&mut self, index: Option<usize>, p: &Placed, why: &str) {
+        let e = &p.element;
+        let line = format!("{} {} {}", e.name, e.nodes.join(" "), e.rest.trim());
+        if let Err(more) = guard::check_code(&line) {
+            self.findings.push(Finding {
+                subject: e.name.clone(),
+                message: format!("{why}, and {more}; the element is left out"),
+            });
+            if let Some(i) = index {
+                // Leave nothing of it that xschem would read.
+                let pairs = self.code_pairs(None, false, "");
+                self.f.instances[i] = Self::at("devices/code_shown.sym", (p.inst.x, p.inst.y));
+                self.f.instances[i].props = props::write(&pairs);
+                self.pairs[i] = pairs;
+            }
+            return;
+        }
+        self.findings.push(Finding {
+            subject: e.name.clone(),
+            message: format!("{why}; its SPICE line goes into a code block"),
+        });
+        let pairs = self.code_pairs(None, false, &line);
+        match index {
+            Some(i) => {
+                self.f.instances[i] = Self::at("devices/code_shown.sym", (p.inst.x, p.inst.y));
+                self.f.instances[i].props = props::write(&pairs);
+                self.pairs[i] = pairs;
+            }
+            None => {
+                if let Err(w) = self.instance(
+                    Self::at("devices/code_shown.sym", (p.inst.x, p.inst.y)),
+                    pairs,
+                    &[],
+                ) {
+                    self.findings.push(Finding {
+                        subject: e.name.clone(),
+                        message: format!("{w}; the element is left out"),
+                    });
+                    return;
+                }
+            }
+        }
+        if let Some(xs) = xschem_symbol(&p.map.xschem) {
+            for (k, pin) in p.map.pins.iter().enumerate() {
+                let (Some(pin), Some(net)) = (pin, e.nodes.get(k)) else {
+                    continue;
+                };
+                if let Some(xp) = xs.pins.iter().find(|x| x.name == *pin) {
+                    let at = place(&p.inst, xp.x, xp.y);
+                    self.label(at, net);
+                }
+            }
+        }
+    }
+
+    /// A comment.
+    fn text(&mut self, at: (f64, f64), text: String) {
+        if let Err(why) = guard::check_text(&text) {
+            self.findings.push(Finding {
+                subject: "comment".into(),
+                message: format!("{why}; it is left out"),
+            });
+            return;
+        }
+        self.f.texts.push(XText {
+            text,
+            x: at.0,
+            y: at.1,
+            rot: 0,
+            flip: false,
+            xscale: 0.4,
+            yscale: 0.4,
+            props: String::new(),
+        });
+    }
 }
 
 /// Export an `.asc`. `out` is where the `.sch` will be written: the netlist
@@ -345,7 +618,6 @@ pub fn export(
         return Err(ExportError::TooLarge(elements, max));
     }
     let mut notes: Vec<String> = built.warnings.clone();
-    let mut findings = Vec::new();
 
     // The generic model cards the netlister adds for parts at a default
     // model (`.model NPN NPN`) would be added again when the drawing is
@@ -362,60 +634,44 @@ pub fn export(
     let xlib = xschem_shaped_library(lib);
     let laid = crate::layout::from_netlist(&layout_input, &xlib, &opts.layout)
         .map_err(ExportError::Layout)?;
-    for w in &laid.warnings {
-        if w.contains("SPICE line") || w.contains("cannot reproduce") {
-            let (subject, message) = w.split_once(": ").unwrap_or(("", w.as_str()));
-            findings.push(Finding {
+    let mut w = Writer {
+        f: XFile {
+            version: "xschem version=3.4.4 file_version=1.2".into(),
+            ..XFile::default()
+        },
+        pairs: Vec::new(),
+        labels: 0,
+        code: 0,
+        resolver,
+        dir: out.parent().map(Path::to_path_buf).unwrap_or_default(),
+        loaded: HashMap::new(),
+        findings: Vec::new(),
+    };
+    for warning in &laid.warnings {
+        if warning.contains("SPICE line") || warning.contains("cannot reproduce") {
+            let (subject, message) = warning.split_once(": ").unwrap_or(("", warning.as_str()));
+            w.findings.push(Finding {
                 subject: subject.to_string(),
                 message: format!("{message}; it goes into a code block"),
             });
         } else {
-            notes.push(w.clone());
+            notes.push(warning.clone());
         }
     }
     let drawing = laid.schematic;
     let (drawn, _) = crate::netlist::build(&drawing, &xlib, title);
     let drawn = drawn.netlist;
 
-    let mut f = XFile {
-        version: "xschem version=3.4.4 file_version=1.2".into(),
-        ..XFile::default()
-    };
     let mut placed: Vec<Placed> = Vec::new();
-    let mut labels = 0usize;
-    let mut code = 0usize;
-    let mut label = |f: &mut XFile, at: (f64, f64), name: &str| {
-        labels += 1;
-        let (symbol, props) = if name == "0" || name.eq_ignore_ascii_case("gnd") {
-            ("devices/gnd.sym", format!("name=l{labels} lab=GND"))
-        } else {
-            (
-                "devices/lab_pin.sym",
-                format!(
-                    "name=p{labels} sig_type=std_logic lab={}",
-                    props::quote(name)
-                ),
-            )
-        };
-        f.instances.push(XInstance {
-            symbol: symbol.into(),
-            x: at.0,
-            y: at.1,
-            rot: 0,
-            flip: false,
-            props,
-            embedded: None,
-        });
-    };
     let mut right = 0.0f64;
     let mut top = f64::MAX;
     for item in &drawing.items {
         match item {
-            Item::Wire(w) => {
-                let (a, b) = (to_x(w.a), to_x(w.b));
+            Item::Wire(wire) => {
+                let (a, b) = (to_x(wire.a), to_x(wire.b));
                 right = right.max(a.0).max(b.0);
                 top = top.min(a.1).min(b.1);
-                f.wires.push(XWire {
+                w.f.wires.push(XWire {
                     x1: a.0,
                     y1: a.1,
                     x2: b.0,
@@ -423,10 +679,10 @@ pub fn export(
                     props: String::new(),
                 });
             }
-            Item::Flag(fl) => label(&mut f, to_x(fl.at), &fl.label),
+            Item::Flag(fl) => w.label(to_x(fl.at), &fl.label),
             Item::Symbol(s) => {
                 let Some(map) = map_symbol(&s.name) else {
-                    findings.push(Finding {
+                    w.findings.push(Finding {
                         subject: s.inst_name().unwrap_or_default().to_string(),
                         message: format!("symbol `{}` has no xschem counterpart", s.name),
                     });
@@ -444,7 +700,7 @@ pub fn export(
                 right = right.max(x);
                 top = top.min(y);
                 let (rot, flip) = xschem_orient(s.orient);
-                let mut inst = XInstance {
+                let inst = XInstance {
                     symbol: map.xschem.clone(),
                     x,
                     y,
@@ -453,11 +709,6 @@ pub fn export(
                     props: String::new(),
                     embedded: None,
                 };
-                let (props, overridden) = match first_props(&map, &element) {
-                    Some(p) => (p, false),
-                    None => (override_props(&map, &element), true),
-                };
-                inst.props = props;
                 let xs = xschem_symbol(&map.xschem);
                 // A three-pin MOSFET's bulk is its source: tie them.
                 if let (Style::Mos { bulk: true }, Some(xs)) = (map.style, &xs)
@@ -468,7 +719,7 @@ pub fn export(
                 {
                     let (bx, by) = place(&inst, b.x, b.y);
                     let (sx, sy) = place(&inst, src.x, src.y);
-                    f.wires.push(XWire {
+                    w.f.wires.push(XWire {
                         x1: bx,
                         y1: by,
                         x2: sx,
@@ -483,109 +734,99 @@ pub fn export(
                         && let Some(node) = element.nodes.get(k)
                     {
                         let at = place(&inst, BODY_PIN.0, BODY_PIN.1);
-                        label(&mut f, at, node);
+                        w.label(at, node);
                     }
                 }
-                placed.push(Placed {
-                    index: f.instances.len(),
+                // The symbol's own format when it reproduces the line and
+                // the values stay text in it, else a format of the
+                // instance's own.
+                let nets = element.nodes.clone();
+                let first = first_props(&map, &element, xs.as_ref())
+                    .filter(|p| w.check(&map.xschem, p, &nets).is_ok());
+                let (pairs, overridden) = match first {
+                    Some(p) => (p, false),
+                    None => (override_props(&map, &element), true),
+                };
+                let mut p = Placed {
+                    index: 0,
                     map,
                     element,
                     overridden,
-                });
-                f.instances.push(inst);
+                    inst: inst.clone(),
+                };
+                match w.instance(inst, pairs, &nets) {
+                    Ok(index) => {
+                        p.index = index;
+                        placed.push(p);
+                    }
+                    Err(why) => w.as_code(None, &p, &why),
+                }
             }
             Item::Text(t) => {
-                let (x, y) = to_x(t.at);
+                let at = to_x(t.at);
                 let text = t.lines().join("\n");
                 match t.kind {
                     TextKind::Directive => {
-                        code += 1;
-                        f.instances.push(XInstance {
-                            symbol: "devices/code_shown.sym".into(),
-                            x,
-                            y,
-                            rot: 0,
-                            flip: false,
-                            props: props::write(&[
-                                ("name".into(), format!("s{code}")),
-                                ("only_toplevel".into(), "false".into()),
-                                ("value".into(), text),
-                            ]),
-                            embedded: None,
-                        });
+                        if let Err(why) = w.code(at, None, false, &text) {
+                            w.findings.push(Finding {
+                                subject: text.lines().next().unwrap_or("").to_string(),
+                                message: format!("{why}; the directive is left out"),
+                            });
+                        }
                     }
-                    TextKind::Comment => f.texts.push(XText {
-                        text,
-                        x,
-                        y,
-                        rot: 0,
-                        flip: false,
-                        xscale: 0.4,
-                        yscale: 0.4,
-                        props: String::new(),
-                    }),
+                    TextKind::Comment => w.text(at, text),
                 }
             }
             _ => {}
         }
     }
+    let side = (right + 100.0).round();
     if !default_cards.is_empty() {
-        code += 1;
-        f.instances.push(XInstance {
-            symbol: "devices/code_shown.sym".into(),
-            x: (right + 100.0).round(),
-            y: if top == f64::MAX {
-                -200.0
-            } else {
-                top.round() - 200.0
-            },
-            rot: 0,
-            flip: false,
-            props: props::write(&[
-                ("name".into(), format!("s{code}")),
-                ("only_toplevel".into(), "false".into()),
-                ("value".into(), default_cards.join("\n")),
-            ]),
-            embedded: None,
-        });
+        let y = if top == f64::MAX {
+            -200.0
+        } else {
+            top.round() - 200.0
+        };
+        if let Err(why) = w.code((side, y), None, false, &default_cards.join("\n")) {
+            w.findings.push(Finding {
+                subject: ".model".into(),
+                message: format!("{why}; the model cards are left out"),
+            });
+        }
     }
     if !opts.model_lines.is_empty() {
+        // Plain text: the lines name the kit's libraries without a path,
+        // so nothing in them needs Tcl.
         let mut value = opts.model_lines.join("\n");
         value.push('\n');
-        f.instances.push(XInstance {
-            symbol: "devices/code_shown.sym".into(),
-            x: (right + 100.0).round(),
-            y: if top == f64::MAX { 0.0 } else { top.round() },
-            rot: 0,
-            flip: false,
-            props: props::write(&[
-                ("name".into(), "MODEL".into()),
-                ("only_toplevel".into(), "true".into()),
-                ("format".into(), "tcleval( @value )".into()),
-                ("value".into(), value),
-            ]),
-            embedded: None,
-        });
-        notes.push(format!(
-            "the PDK model header is a MODEL code block: {}",
-            opts.model_lines.join("; ")
-        ));
+        let y = if top == f64::MAX { 0.0 } else { top.round() };
+        match w.code((side, y), Some("MODEL"), true, &value) {
+            Ok(_) => notes.push(format!(
+                "the PDK model header is a MODEL code block: {}",
+                opts.model_lines.join("; ")
+            )),
+            Err(why) => w.findings.push(Finding {
+                subject: "MODEL".into(),
+                message: format!("{why}; the model header is left out"),
+            }),
+        }
     }
 
     // Check every instance with aispice's xschem netlister; give the ones
-    // their symbol cannot reproduce a format of their own.
+    // their symbol cannot reproduce a format of their own, or their SPICE
+    // line in a code block when even that would not stay text.
     let check = CompareOptions {
         auto_names: laid.renames.iter().map(|(_, to)| to.clone()).collect(),
         ..CompareOptions::xschem()
     };
-    let mut xn = netlist::netlist(out, &f, resolver, &opts.netlist)?;
+    let mut xn = netlist::netlist(out, &w.f, resolver, &opts.netlist)?;
     for _ in 0..2 {
         let x = crate::netlist::parse(&xn.text);
         let Err(problems) = compare_with(&drawn, &x, &check) else {
             break;
         };
         let mut changed = false;
-        for p in &placed {
+        for p in placed.iter_mut() {
             if p.overridden {
                 continue;
             }
@@ -595,29 +836,29 @@ pub fn export(
                     .is_some_and(|n| n.eq_ignore_ascii_case(&p.element.name))
             });
             if named {
-                f.instances[p.index].props = override_props(&p.map, &p.element);
-                changed = true;
-            }
-        }
-        for p in placed.iter_mut() {
-            if f.instances[p.index].props.contains("format=") {
+                let pairs = override_props(&p.map, &p.element);
+                if let Err(why) = w.replace(p.index, pairs, &p.element.nodes) {
+                    w.as_code(Some(p.index), p, &why);
+                }
                 p.overridden = true;
+                changed = true;
             }
         }
         if !changed {
             break;
         }
-        xn = netlist::netlist(out, &f, resolver, &opts.netlist)?;
+        xn = netlist::netlist(out, &w.f, resolver, &opts.netlist)?;
     }
     let overrides = placed
         .iter()
-        .filter(|p| props::get(&f.instances[p.index].props, "format").is_some())
+        .filter(|p| w.pairs[p.index].iter().any(|(k, _)| k == "format"))
         .count();
     if overrides > 0 {
         notes.push(format!(
-            "{overrides} instance(s) carry a format of their own, because their xschem symbol's format would write a different line"
+            "{overrides} instance(s) carry a format of their own, because their xschem symbol's format would write a different line or paste a value into Tcl"
         ));
     }
+    let mut findings = std::mem::take(&mut w.findings);
     findings.extend(xn.findings.iter().cloned());
     let compare = check;
     let x = crate::netlist::parse(&xn.text);
@@ -625,10 +866,11 @@ pub fn export(
         "the .asc's netlist against aispice's xschem netlist of the .sch",
         compare_with(&asc_netlist, &x, &compare),
     );
-    let text = file::write(&f);
+    let text = file::write(&w.f);
+    guard::verify(&text, &w.f, &w.pairs).map_err(ExportError::Unverified)?;
     Ok(Exported {
-        file: f,
-        text,
+        file: w.f,
+        text: SchText(text),
         findings,
         notes,
         asc_netlist,
@@ -657,20 +899,14 @@ fn words(rest: &str) -> Vec<String> {
 }
 
 /// The properties an instance starts with, or `None` when only a format of
-/// its own can reproduce the line.
-fn first_props(map: &Map, e: &Element) -> Option<String> {
+/// its own can reproduce the line. `xs` is the xschem symbol, whose
+/// template lists the parameters an IHP device may carry by name.
+fn first_props(map: &Map, e: &Element, xs: Option<&XSymbol>) -> Option<Vec<(String, String)>> {
     let rest = e.rest.trim();
     let mut p: Vec<(String, String)> = vec![("name".into(), e.name.clone())];
     let w = words(rest);
     match map.style {
-        Style::Value => p.push(("value".into(), rest.into())),
-        Style::Source => {
-            // vsource's format is Tcl: keep anything Tcl would read out of it.
-            if rest.contains(['[', ']', '{', '}', '$', '\\', '"']) {
-                return None;
-            }
-            p.push(("value".into(), rest.into()));
-        }
+        Style::Value | Style::Source => p.push(("value".into(), rest.into())),
         Style::Diode => p.push(("model".into(), rest.into())),
         Style::Bjt => return None,
         Style::Mos { .. } => {
@@ -716,8 +952,18 @@ fn first_props(map: &Map, e: &Element) -> Option<String> {
             p.push(("spiceprefix".into(), "X".into()));
             let (model, params) = w.split_first()?;
             p.push(("model".into(), model.clone()));
+            // Only the parameters the symbol declares go in by name; the
+            // rest need a format of the instance's own.
+            let template: Vec<String> = props::pairs(&xs?.template())
+                .into_iter()
+                .map(|(k, _)| k)
+                .filter(|k| !matches!(k.as_str(), "name" | "spiceprefix" | "model" | "body"))
+                .collect();
             for kv in params {
                 let (k, v) = kv.split_once('=')?;
+                if !template.iter().any(|t| t == k) {
+                    return None;
+                }
                 p.push((k.to_string(), v.to_string()));
             }
             if let Some(body) = body_node(map, e) {
@@ -725,7 +971,7 @@ fn first_props(map: &Map, e: &Element) -> Option<String> {
             }
         }
     }
-    Some(props::write(&p))
+    Some(p)
 }
 
 /// The net a poly resistor's body is on, as xschem will name it.
@@ -737,7 +983,7 @@ fn body_node(map: &Map, e: &Element) -> Option<String> {
 
 /// Properties with a format of their own: the name, the pins, any nodes the
 /// xschem symbol has no pin for, then the rest of the line as `value`.
-fn override_props(map: &Map, e: &Element) -> String {
+fn override_props(map: &Map, e: &Element) -> Vec<(String, String)> {
     let pdk = map.style == Style::Pdk && e.name.len() > 1 && e.name.starts_with(['X', 'x']);
     let name = if pdk {
         e.name[1..].to_string()
@@ -767,7 +1013,7 @@ fn override_props(map: &Map, e: &Element) -> String {
     }
     p.push(("format".into(), format));
     p.push(("value".into(), e.rest.trim().to_string()));
-    props::write(&p)
+    p
 }
 
 #[cfg(test)]
