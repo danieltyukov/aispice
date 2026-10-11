@@ -49,9 +49,68 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
+/// XSPICE code models a deck may use on ngspice: digital gates,
+/// flip-flops and latches, the bridges between analog and digital nodes, and
+/// analog function blocks. Not on it: the models that read a file a deck
+/// names (`d_source`, `d_state`, `file_source`, `table2d`, `table3d`) and
+/// the two that load or run native code (`d_cosim`, `d_process`, which the
+/// netlist policy refuses; aispice adds `d_cosim` cards itself for the
+/// co-simulation models a project declares).
+pub const XSPICE_MODELS: &[&str] = &[
+    "adc_bridge",
+    "dac_bridge",
+    "d_to_real",
+    "real_to_v",
+    "d_buffer",
+    "d_inverter",
+    "d_and",
+    "d_nand",
+    "d_or",
+    "d_nor",
+    "d_xor",
+    "d_xnor",
+    "d_tristate",
+    "d_pullup",
+    "d_pulldown",
+    "d_open_c",
+    "d_open_e",
+    "d_dff",
+    "d_jkff",
+    "d_tff",
+    "d_srff",
+    "d_dlatch",
+    "d_srlatch",
+    "d_osc",
+    "d_fdiv",
+    "gain",
+    "summer",
+    "mult",
+    "divide",
+    "limit",
+    "pwl",
+    "sine",
+    "square",
+    "triangle",
+    "int",
+    "d_dt",
+    "s_xfer",
+    "slew",
+    "aswitch",
+    "hyst",
+    "oneshot",
+];
+
 /// Translate `netlist` for `target`.
 pub fn translate(netlist: &Netlist, target: Target) -> Translated {
+    translate_with(netlist, target, &[])
+}
+
+/// As [`translate`], with the co-simulation models the project declares:
+/// an XSPICE `A` instance of one of them is kept for ngspice, which runs it
+/// through the `d_cosim` card aispice adds.
+pub fn translate_with(netlist: &Netlist, target: Target, cosim: &[String]) -> Translated {
     let mut cx = Cx::new(netlist, target);
+    cx.cosim = cosim.iter().map(|m| m.to_ascii_uppercase()).collect();
     if target == Target::Ltspice {
         return cx.ltspice(netlist);
     }
@@ -95,6 +154,10 @@ struct Cx {
     sources: HashSet<String>,
     /// Names already used in the scope being written.
     used: Vec<HashSet<String>>,
+    /// The deck's `.model` cards: upper-cased name to lower-cased type.
+    models: HashMap<String, String>,
+    /// Upper-cased co-simulation model names the project declares.
+    cosim: HashSet<String>,
 }
 
 impl Cx {
@@ -120,6 +183,30 @@ impl Cx {
             }
         }
         walk(&n.items, &mut coupled, &mut sources);
+        fn cards(items: &[Line], models: &mut HashMap<String, String>) {
+            for item in items {
+                match item {
+                    Line::Directive { text } => {
+                        // Words as ngspice reads a card: `(` and `,` end a
+                        // word, so `.model x adc_bridge(...)` has its type.
+                        let words: Vec<String> = text
+                            .split(|c: char| c.is_whitespace() || "=(),".contains(c))
+                            .filter(|w| !w.is_empty())
+                            .map(str::to_ascii_lowercase)
+                            .collect();
+                        if let [kw, name, kind, ..] = &words[..]
+                            && kw == ".model"
+                        {
+                            models.insert(name.to_ascii_uppercase(), kind.clone());
+                        }
+                    }
+                    Line::Subckt(s) => cards(&s.body, models),
+                    _ => {}
+                }
+            }
+        }
+        let mut models = HashMap::new();
+        cards(&n.items, &mut models);
         let analysis = n
             .analysis()
             .and_then(|a| a.split_whitespace().next())
@@ -132,6 +219,8 @@ impl Cx {
             analysis,
             sources,
             used: Vec::new(),
+            models,
+            cosim: HashSet::new(),
         }
     }
 
@@ -372,6 +461,7 @@ impl Cx {
             'L' => self.inductor(e),
             'V' => self.voltage_source(e),
             'K' => self.coupling(e),
+            'A' if self.target == Target::Ngspice && self.xspice(&e) => vec![Line::Element(e)],
             'A' => {
                 self.unsupported(format!(
                     "{}: LTspice's special-function and digital devices (A) have no {} equivalent",
@@ -389,6 +479,29 @@ impl Cx {
             }
             _ => vec![Line::Element(e)],
         }
+    }
+
+    /// Whether an `A` instance is an XSPICE device ngspice may run: its
+    /// model, the last word, is a card in the deck of a type on
+    /// [`XSPICE_MODELS`], or a co-simulation model the project declares.
+    fn xspice(&mut self, e: &Element) -> bool {
+        let model = e
+            .nodes
+            .iter()
+            .map(String::as_str)
+            .chain(e.rest.split_whitespace())
+            .last()
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_default();
+        let ok = self.cosim.contains(&model)
+            || self
+                .models
+                .get(&model)
+                .is_some_and(|t| XSPICE_MODELS.contains(&t.as_str()));
+        if ok {
+            self.note("kept XSPICE devices (A) for ngspice's code models");
+        }
+        ok
     }
 
     fn resistor(&mut self, mut e: Element) -> Vec<Line> {
@@ -1666,6 +1779,35 @@ mod tests {
             "{:?}",
             t.notes
         );
+    }
+
+    /// XSPICE devices reach ngspice when their model is an allowed code
+    /// model in the deck or a declared co-simulation model; anything else
+    /// stays an LTspice device no other simulator runs.
+    #[test]
+    fn xspice_devices_pass_for_ngspice_only() {
+        let deck = "t\nVin a 0 1\nAbr [a] [ad] tobit\n.model tobit adc_bridge(in_low=0.4 in_high=0.6)\nA1 [ad] [q] null counter\nA2 [ad] [x] lut\n.model lut d_source(input_file=\"x.txt\")\nA3 1 2 3 4 5 6 7 8 OTA g=1\n.tran 1u 10u\n";
+        let t = translate_with(&parse(deck), Target::Ngspice, &["counter".into()]);
+        let l = lines(&t);
+        assert!(l.contains(&"Abr [a] [ad] tobit"), "{l:?}");
+        assert!(
+            l.contains(&".model tobit adc_bridge(in_low=0.4 in_high=0.6)"),
+            "{l:?}"
+        );
+        assert!(l.contains(&"A1 [ad] [q] null counter"), "{l:?}");
+        assert!(
+            !t.text.contains("A2 ") && !t.text.contains("A3 "),
+            "{}",
+            t.text
+        );
+        assert_eq!(t.unsupported.len(), 2, "{:?}", t.unsupported);
+        // Without the declaration the co-simulated instance is not kept.
+        let t = translate(&parse(deck), Target::Ngspice);
+        assert!(!t.text.contains("A1 "), "{}", t.text);
+        for target in [Target::Xyce, Target::Spectre] {
+            let t = translate_with(&parse(deck), target, &["counter".into()]);
+            assert!(!t.text.contains("Abr "), "{target:?}: {}", t.text);
+        }
     }
 
     #[test]
