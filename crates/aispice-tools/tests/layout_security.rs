@@ -88,6 +88,9 @@ fn every_tool_declares_what_it_does_to_files() {
         ("pdk", Edit),
         ("gm_id", ReadOnly),
         ("check_macro", ReadOnly),
+        // xschem import and export each write one new file of the user's.
+        ("xschem_import", Edit),
+        ("xschem_export", Edit),
     ]
     .into_iter()
     .map(|(n, a)| (n.to_string(), a))

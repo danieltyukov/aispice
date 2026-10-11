@@ -63,6 +63,10 @@ impl Tool for XschemImport {
         )
     }
 
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
         let input: XschemImportInput = match parse_input(input) {
             Ok(i) => i,
@@ -200,6 +204,10 @@ impl Tool for XschemExport {
             "xschem_export",
             "Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox when both are installed). Refuses to overwrite.",
         )
+    }
+
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
     }
 
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
