@@ -29,6 +29,10 @@ pub const WIRE: i64 = 300;
 const HALF: i64 = WIRE / 2;
 const CLEAR: i64 = 250;
 const VIA: i64 = 190;
+/// How far a stacked via's landing pads reach back along the stub.
+const PAD_REACH: i64 = 200;
+/// The metals' minimum area, nm2 (`Mn.d`, 0.144 um2).
+const MIN_AREA: i64 = 144_000;
 /// Routing keeps this far from a block's outline.
 pub const HALO: i64 = 1_200;
 /// At most this many grid nodes per layer.
@@ -266,6 +270,17 @@ fn access(g: &Grid, t: &Terminal) -> Result<Access, String> {
             layer,
             rect: rect_around(nx, ny, HALF),
         });
+        // A landing pad that a route leaves on the other layer at once is
+        // all the metal there is of its layer, so it reaches back along the
+        // stub, into ground reserved for this net, far enough for the
+        // minimum area (0.144 um2 at 0.3 um wide).
+        let pad = rect_around(nx, ny, HALF);
+        let landing = match t.facing {
+            Facing::South => Rect::new(pad.x1, pad.y1, pad.x2, pad.y2 + PAD_REACH),
+            Facing::North => Rect::new(pad.x1, pad.y1 - PAD_REACH, pad.x2, pad.y2),
+            Facing::West => Rect::new(pad.x1, pad.y1, pad.x2 + PAD_REACH, pad.y2),
+            Facing::East => Rect::new(pad.x1 - PAD_REACH, pad.y1, pad.x2, pad.y2),
+        };
         for (via, metal) in stack {
             shapes.push(LayerRect {
                 layer: *via,
@@ -273,7 +288,7 @@ fn access(g: &Grid, t: &Terminal) -> Result<Access, String> {
             });
             shapes.push(LayerRect {
                 layer: *metal,
-                rect: rect_around(nx, ny, HALF),
+                rect: landing,
             });
         }
         0
@@ -665,6 +680,23 @@ pub fn check(routed: &Routed, terminals: &[Terminal]) -> Vec<String> {
             }
         }
     }
+    // A metal shape that touches no other of its net on its layer is a
+    // piece of its own, and must reach the minimum area.
+    for (k, (n, a)) in s.iter().enumerate() {
+        let metal = matches!(a.layer, METAL1 | METAL2 | METAL3 | METAL4);
+        let area = a.rect.width() * a.rect.height();
+        if metal
+            && area < MIN_AREA
+            && !s.iter().enumerate().any(|(q, (m, b))| {
+                q != k && m == n && b.layer == a.layer && b.rect.touches(&a.rect)
+            })
+        {
+            out.push(format!(
+                "{n} has a piece of layer {} smaller than the minimum area: {:?}",
+                a.layer, a.rect
+            ));
+        }
+    }
     // Connectivity per net: shapes touching on a layer, or a via joining a
     // point on two layers.
     let mut nets: BTreeMap<&str, Vec<LayerRect>> = BTreeMap::new();
@@ -791,6 +823,27 @@ mod tests {
         }
         // The same problem routes the same way.
         assert_eq!(route(&p).unwrap(), r);
+    }
+
+    #[test]
+    fn pins_below_metal3_are_reached_through_a_via_stack() {
+        let mut p = problem();
+        // The counter's pins: Metal2 squares on the bottom edge, Metal1
+        // rails along it.
+        let b = p.blocks[1];
+        p.terminals[1].pin = LayerRect {
+            layer: METAL2,
+            rect: Rect::new(72_000, b.y1, 72_400, b.y1 + 400),
+        };
+        p.terminals[4].pin = LayerRect {
+            layer: METAL1,
+            rect: Rect::new(b.x1 + 2_000, b.y1, b.x2 - 2_000, b.y1 + 600),
+        };
+        let r = route(&p).unwrap();
+        let problems = check(&r, &p.terminals);
+        assert!(problems.is_empty(), "{problems:#?}");
+        assert!(r.shapes.iter().any(|(_, s)| s.layer == VIA2));
+        assert!(r.shapes.iter().any(|(_, s)| s.layer == VIA1));
     }
 
     #[test]

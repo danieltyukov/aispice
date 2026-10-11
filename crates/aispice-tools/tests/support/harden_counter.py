@@ -168,6 +168,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("out", type=Path)
     ap.add_argument("--librelane", default="librelane")
+    ap.add_argument(
+        "--package-only",
+        action="store_true",
+        help="package an earlier run in OUT_DIR/build without running LibreLane",
+    )
     args = ap.parse_args()
     out = args.out.resolve()
     build = out / "build"
@@ -175,11 +180,12 @@ def main():
     (build / "tiny_counter.v").write_text(RTL)
     (build / "pins.cfg").write_text(PINS)
     (build / "config.json").write_text(json.dumps(CONFIG, indent=2))
-    subprocess.run(
-        [args.librelane, "--run-tag", "aispice", "--overwrite", "config.json"],
-        cwd=build,
-        check=True,
-    )
+    if not args.package_only:
+        subprocess.run(
+            [args.librelane, "--run-tag", "aispice", "--overwrite", "config.json"],
+            cwd=build,
+            check=True,
+        )
     run = build / "runs" / "aispice"
     final = run / "final"
     resolved = json.loads((run / "resolved.json").read_text())
@@ -199,6 +205,8 @@ def main():
     (pkg / "evidence").mkdir(parents=True)
     shutil.copy(final / "gds" / ("%s.gds" % NAME), pkg / ("%s.gds" % NAME))
     lef = (final / "lef" / ("%s.lef" % NAME)).read_text()
+    # LibreLane writes every signal pin as USE SIGNAL; the clock is a clock.
+    lef = re.sub(r"(PIN clk\b.*?USE )SIGNAL", r"\1CLOCK", lef, count=1, flags=re.S)
     (pkg / ("%s.lef" % NAME)).write_text(lef)
     libs = {
         "": "nom_typ_1p20V_25C",
