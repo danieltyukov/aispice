@@ -7,10 +7,12 @@
 //! PATH); without them it is skipped. Every test passes, with a note on
 //! stderr, when the PDK is not there.
 
+use aispice_agent::ToolContext;
 use aispice_sim::backend::SimId;
 use aispice_sim::dataset::{AnalysisKind, Dataset};
 use aispice_tools::pdk::{PROJECT_FILE, Registry};
-use aispice_tools::{Project, RunMods, Runner, RunnerConfig, StoredRun};
+use aispice_tools::{Project, RunMods, Runner, RunnerConfig, StoredRun, Workspace};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -260,6 +262,84 @@ async fn inverter_dc_transfer_on_ngspice_and_xyce() {
     );
     assert!(worst < 5e-3, "V(out) differs by {worst} V");
     assert!((vm_ng - vm_x).abs() < 1e-3, "{vm_ng} vs {vm_x}");
+}
+
+/// Size a device with the gm_id tool, then simulate the sized device at the
+/// bias the tool reported and check it carries the current and gm/Id asked
+/// for. A second call must come from the cache.
+async fn sized_device_meets_its_target(device: &str, sign: f64) {
+    let Some(pdk) = ihp() else { return };
+    let (dir, runner, project) = setup(&pdk, &[]);
+    let mut cfg = runner.config();
+    cfg.gmid_cache_dir = Some(dir.path().join("gmid-cache"));
+    let ws = Workspace::new();
+    ws.runner.set_config(cfg);
+    ws.set_project(project);
+    let ws = Arc::new(ws);
+    let tools = aispice_tools::registry(ws.clone());
+    let gm_id = tools.get("gm_id").unwrap();
+    let ask = json!({"device": device, "gm_id": 12, "l": "0.5u", "id": "50u"});
+    let out = gm_id.call(&ToolContext::default(), ask.clone()).await;
+    assert!(!out.is_error, "{}", out.text_content());
+    assert!(
+        out.text_content().contains("Table built"),
+        "{}",
+        out.text_content()
+    );
+    let s = out.data.as_ref().unwrap()["value"]["sizing"].clone();
+    let (w, vgs) = (s["w"].as_f64().unwrap(), s["vgs"].as_f64().unwrap());
+    let ng = s["ng"].as_u64().expect("fingers chosen");
+    assert_eq!(s["verified"], json!(true));
+    assert!(w / ng as f64 <= 10e-6, "fingers within the model's range");
+
+    let inner = device.to_ascii_lowercase();
+    let check = format!(
+        "* sized {device}\nVG g 0 {vg}\nVD d 0 {vd}\nXM1 d g 0 0 {device} w={w:e} l=0.5u ng={ng} m=1\n.save @n.xm1.n{inner}[ids] @n.xm1.n{inner}[gm]\n.dc VG {vg} {vg} 1\n.end\n",
+        vg = sign * vgs,
+        vd = sign * 0.6,
+    );
+    std::fs::write(ws.project().unwrap().root().join("check.cir"), check).unwrap();
+    let run = run(
+        &ws.runner,
+        &ws.project().unwrap(),
+        "check.cir",
+        SimId::Ngspice,
+    )
+    .await;
+    let ds = run.output.dataset(AnalysisKind::Dc).unwrap();
+    let find = |q: &str| {
+        ds.vectors
+            .iter()
+            .find(|v| v.name.to_ascii_lowercase().contains(&format!("[{q}]")))
+            .unwrap_or_else(|| panic!("no {q} in {:?}", ds.names()))
+            .data
+            .real()[0]
+            .abs()
+    };
+    let (id, gm) = (find("ids"), find("gm"));
+    eprintln!(
+        "{device}: W {:.3} um in {ng} fingers, VGS {:.4} V; simulated Id {:.3} uA, gm/Id {:.3}",
+        w * 1e6,
+        vgs,
+        id * 1e6,
+        gm / id
+    );
+    assert!((id / 50e-6 - 1.0).abs() < 0.01, "Id {id}");
+    assert!((gm / id / 12.0 - 1.0).abs() < 0.01, "gm/Id {}", gm / id);
+
+    let again = gm_id.call(&ToolContext::default(), ask).await;
+    assert!(again.text_content().contains("read from the cache"));
+    assert_eq!(again.data.as_ref().unwrap()["value"]["sizing"], s);
+}
+
+#[tokio::test]
+async fn gm_id_sizes_an_nmos() {
+    sized_device_meets_its_target("sg13_lv_nmos", 1.0).await;
+}
+
+#[tokio::test]
+async fn gm_id_sizes_a_pmos() {
+    sized_device_meets_its_target("sg13_lv_pmos", -1.0).await;
 }
 
 /// DC gain in dB and the unity-gain frequency of an AC result.

@@ -95,3 +95,29 @@ pub fn remove(name: &str) -> Result<ExitCode> {
     );
     Ok(ExitCode::SUCCESS)
 }
+
+/// `aispice gmid`: the gm_id tool, with the current folder as the project so
+/// its `aispice.toml` can name the PDK.
+pub fn gmid(input: serde_json::Value, json_mode: bool) -> Result<ExitCode> {
+    let cfg = aispice_agent::Config::load().unwrap_or_default();
+    let dir = std::env::current_dir()?;
+    let ws = aispice_tools::setup::open_workspace(&dir, &cfg, &[])?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let reg = aispice_tools::registry(ws);
+    let tool = reg
+        .get("gm_id")
+        .ok_or_else(|| anyhow::anyhow!("gm_id tool missing"))?;
+    let out = rt.block_on(tool.call(&aispice_agent::ToolContext::default(), input));
+    if json_mode {
+        println!("{}", serde_json::to_string_pretty(&out.data)?);
+    } else {
+        print!("{}", crate::cmd_agent::terminal_safe(&out.text_content()));
+    }
+    Ok(if out.is_error {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}

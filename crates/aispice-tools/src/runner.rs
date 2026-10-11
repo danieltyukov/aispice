@@ -69,6 +69,9 @@ pub struct RunnerConfig {
     /// names a PDK is told the real cause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdks_error: Option<String>,
+    /// Where gm/Id tables are cached; `<cache dir>/aispice/gmid` when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gmid_cache_dir: Option<PathBuf>,
 }
 
 impl Default for RunnerConfig {
@@ -83,6 +86,7 @@ impl Default for RunnerConfig {
             xyce_exe: None,
             pdks: Registry::default(),
             pdks_error: None,
+            gmid_cache_dir: None,
         }
     }
 }
