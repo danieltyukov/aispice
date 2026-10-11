@@ -36,11 +36,18 @@ pub fn runner_config(cfg: &Config) -> RunnerConfig {
             scp: None,
         }
     });
+    let (pdks, pdks_error) = match crate::pdk::Registry::load() {
+        Ok(r) => (r, None),
+        Err(e) => (crate::pdk::Registry::default(), Some(e.to_string())),
+    };
     RunnerConfig {
         simulator: cfg.simulator.clone(),
         ltspice_exe: cfg.ltspice_path.clone(),
+        xyce_exe: cfg.xyce_path.clone(),
         spectre,
         embedded_models_only: cfg.embedded_models_only,
+        pdks,
+        pdks_error,
         ..RunnerConfig::default()
     }
 }

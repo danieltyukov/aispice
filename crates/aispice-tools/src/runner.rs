@@ -5,13 +5,16 @@
 //! that reaches a simulator goes through [`Runner::run_netlist`], which
 //! refuses anything the policy refuses.
 
+use crate::pdk::{PROJECT_FILE, ProjectConfig, Registry};
 use crate::project::{Project, ProjectError, now_ms};
-use aispice_core::netlist::{self, Netlist, Policy};
+use aispice_core::netlist::{self, Line, Netlist, Policy};
 use aispice_sim::backend::ltspice::Ltspice;
 use aispice_sim::backend::spectre::{Spectre, SpectreConfig};
+use aispice_sim::backend::xyce::Xyce;
 use aispice_sim::backend::{self, Detection, SimId, SimJob, SimOutput, Simulator};
 use aispice_sim::dialect::{self, Target};
 use aispice_sim::models;
+use aispice_sim::pdk::{Pdk, PdkRun};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -35,6 +38,8 @@ pub enum RunError {
     #[error("{0} is not available on this machine")]
     Unavailable(String),
     #[error("{0}")]
+    Pdk(String),
+    #[error("{0}")]
     Sim(String),
 }
 
@@ -53,6 +58,17 @@ pub struct RunnerConfig {
     /// by name still reads LTspice's own library, as LTspice always does.
     #[serde(default)]
     pub embedded_models_only: bool,
+    /// The Xyce executable; `Xyce` on PATH when unset. PDK runs need a Xyce
+    /// built with plugin support.
+    #[serde(default)]
+    pub xyce_exe: Option<PathBuf>,
+    /// The user's registered PDKs (`pdks.toml`).
+    #[serde(default)]
+    pub pdks: Registry,
+    /// Why `pdks.toml` could not be read, if it could not, so a project that
+    /// names a PDK is told the real cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdks_error: Option<String>,
 }
 
 impl Default for RunnerConfig {
@@ -64,6 +80,9 @@ impl Default for RunnerConfig {
             allow_control_blocks: false,
             timeout_secs: 300,
             embedded_models_only: false,
+            xyce_exe: None,
+            pdks: Registry::default(),
+            pdks_error: None,
         }
     }
 }
@@ -179,6 +198,9 @@ impl Runner {
     fn simulator(&self, id: SimId) -> Box<dyn Simulator> {
         match id {
             SimId::Ltspice => Box::new(self.ltspice()),
+            SimId::Xyce => Box::new(Xyce {
+                exe: self.config().xyce_exe,
+            }),
             SimId::Spectre => Box::new(Spectre {
                 config: self.config().spectre,
             }),
@@ -208,6 +230,16 @@ impl Runner {
     /// compatible in its `ltpsa` mode), then LTspice, then Xyce. Spectre is
     /// used only when asked for by name.
     pub async fn choose(&self, requested: Option<&str>) -> Result<SimId, RunError> {
+        self.choose_for(requested, None).await
+    }
+
+    /// As [`choose`](Self::choose), for a circuit in a project that uses
+    /// `pdk`: only ngspice and Xyce can load a PDK's compiled models.
+    pub async fn choose_for(
+        &self,
+        requested: Option<&str>,
+        pdk: Option<&Pdk>,
+    ) -> Result<SimId, RunError> {
         let wanted = requested
             .map(str::to_string)
             .unwrap_or_else(|| self.config().simulator);
@@ -218,6 +250,17 @@ impl Runner {
             "spectre" => Some(SimId::Spectre),
             _ => None,
         };
+        if let (Some(pdk), Some(id @ (SimId::Ltspice | SimId::Spectre))) = (pdk, id) {
+            let why = if id == SimId::Ltspice {
+                "LTspice cannot load its compiled (OSDI) device models"
+            } else {
+                "aispice has no Spectre models for it"
+            };
+            return Err(RunError::Pdk(format!(
+                "this project uses PDK `{}` and {why}; simulate with ngspice or Xyce",
+                pdk.name
+            )));
+        }
         if let Some(id) = id {
             return if self.available(id).await {
                 Ok(id)
@@ -225,7 +268,12 @@ impl Runner {
                 Err(RunError::Unavailable(id.name().into()))
             };
         }
-        for id in [SimId::Ngspice, SimId::Ltspice, SimId::Xyce] {
+        let order: &[SimId] = if pdk.is_some() {
+            &[SimId::Ngspice, SimId::Xyce]
+        } else {
+            &[SimId::Ngspice, SimId::Ltspice, SimId::Xyce]
+        };
+        for &id in order {
             if self.available(id).await {
                 return Ok(id);
             }
@@ -233,21 +281,47 @@ impl Runner {
         Err(RunError::NoSimulator)
     }
 
+    /// The PDK a project's `aispice.toml` names, opened from the registry;
+    /// `None` for a board-level project.
+    pub fn project_pdk(&self, project: &Project) -> Result<Option<Pdk>, RunError> {
+        let cfg = ProjectConfig::load(project.root()).map_err(RunError::Pdk)?;
+        let Some(name) = cfg.pdk else {
+            return Ok(None);
+        };
+        let config = self.config();
+        config.pdks.open(&name).map(Some).map_err(|e| {
+            let cause = config
+                .pdks_error
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            RunError::Pdk(format!(
+                "this project uses PDK `{name}` ({PROJECT_FILE}), but {e}{cause}"
+            ))
+        })
+    }
+
     /// The netlist for a circuit file, plus the LTspice standard libraries it
-    /// relies on.
+    /// relies on. In a project that uses a PDK, the netlist ends with the
+    /// PDK's model header (`.lib <corner library> <section>` for each device
+    /// class it calls), so every run made from it, and every corner or
+    /// mismatch variant of it, has the header to work with.
     pub fn netlist_for(
         &self,
         project: &Project,
         circuit: &str,
     ) -> Result<(Netlist, Vec<String>, Vec<String>), RunError> {
-        if circuit.to_ascii_lowercase().ends_with(".asc") {
+        let (mut netlist, std_libs, warnings) = if circuit.to_ascii_lowercase().ends_with(".asc") {
             let (sch, _) = project.load(circuit)?;
             let (built, _) = netlist::build(&sch, project.library(), &format!("* {circuit}"));
-            Ok((built.netlist, built.standard_libs, built.warnings))
+            (built.netlist, built.standard_libs, built.warnings)
         } else {
             let text = project.read_text(circuit)?;
-            Ok((netlist::parse(&text), Vec::new(), Vec::new()))
+            (netlist::parse(&text), Vec::new(), Vec::new())
+        };
+        if let Some(pdk) = self.project_pdk(project)? {
+            pdk.add_header(&mut netlist);
         }
+        Ok((netlist, std_libs, warnings))
     }
 
     /// A hash of what a circuit simulates as now: its netlist, before any
@@ -314,15 +388,23 @@ impl Runner {
         cancel: &CancellationToken,
         remember: bool,
     ) -> Result<Arc<StoredRun>, RunError> {
-        let mut id = self.choose(simulator).await?;
+        let pdk = self.project_pdk(project)?;
+        if pdk.is_none()
+            && let Some(msg) = pdk_devices_without_pdk(netlist)
+        {
+            return Err(RunError::Pdk(msg));
+        }
+        let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         let lib_dirs = self.model_lib_dirs();
         let mut notes = Vec::new();
-        let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes);
+        let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, pdk.as_ref());
         if let Some(t) = &text.1 {
             // ngspice or Xyce cannot run this deck; LTspice can, if present
-            // and its library may be used.
+            // and its library may be used. Not for a PDK, whose models
+            // LTspice cannot load.
             if simulator.is_none()
                 && id != SimId::Ltspice
+                && pdk.is_none()
                 && !self.config().embedded_models_only
                 && self.available(SimId::Ltspice).await
             {
@@ -332,7 +414,7 @@ impl Runner {
                 ));
                 id = SimId::Ltspice;
                 notes.clear();
-                text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes);
+                text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, None);
             } else {
                 return Err(RunError::Netlist(format!(
                     "{} cannot run this circuit: {t}",
@@ -349,11 +431,14 @@ impl Runner {
             .unwrap_or_else(|| project.root().to_path_buf());
         let mut allowed = project.allowed_dirs();
         allowed.extend(lib_dirs.iter().cloned());
+        // Every registered PDK folder may be included from, so a hand-written
+        // deck can name a PDK's libraries itself.
+        let trusted = self.config().pdks.roots();
         let policy = Policy {
             base_dir: base.clone(),
             allowed_dirs: allowed,
             allow_control_blocks: self.config().allow_control_blocks,
-            trusted_dirs: Vec::new(),
+            trusted_dirs: trusted.clone(),
         };
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
@@ -391,12 +476,37 @@ impl Runner {
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
         job.timeout = Duration::from_secs(self.config().timeout_secs);
+        // A deck that includes PDK files by hand in a project that names no
+        // PDK runs without the PDK's compiled models; say why if it fails.
+        let mut hint = None;
+        match &pdk {
+            Some(pdk) => {
+                job.pdk = Some(pdk_run(pdk, id)?);
+                notes.push(pdk_note(pdk, id));
+            }
+            None => {
+                if let Some(root) = trusted
+                    .iter()
+                    .find(|r| deck.contains(&*r.to_string_lossy()))
+                {
+                    let h = format!(
+                        "the deck reads PDK files from {}, but the project names no PDK in {PROJECT_FILE}, so the PDK's compiled models are not loaded",
+                        root.display()
+                    );
+                    notes.push(h.clone());
+                    hint = Some(h);
+                }
+            }
+        }
         let run_dir = job.run_dir.clone();
         let result = self
             .simulator(id)
             .run(&job, cancel)
             .await
-            .map_err(|e| RunError::Sim(e.to_string()));
+            .map_err(|e| match &hint {
+                Some(h) => RunError::Sim(format!("{e}\n({h})")),
+                None => RunError::Sim(e.to_string()),
+            });
         if !remember {
             let _ = std::fs::remove_dir_all(&run_dir);
         }
@@ -426,12 +536,17 @@ impl Runner {
         std_libs: &[String],
         lib_dirs: &[PathBuf],
         notes: &mut Vec<String>,
+        pdk: Option<&Pdk>,
     ) -> (String, Option<String>) {
         let target = id.target();
         let source = if target == Target::Ltspice {
             single_analysis(netlist, "LTspice", notes)
         } else {
-            let resolved = models::resolve_with(netlist, std_libs, lib_dirs);
+            let (netlist, defined) = match pdk {
+                Some(p) => (p.retarget(netlist, target), p.defined_names()),
+                None => (netlist.clone(), Vec::new()),
+            };
+            let resolved = models::resolve_with_defined(&netlist, std_libs, lib_dirs, &defined);
             for a in &resolved.added {
                 notes.push(format!("model {} from {:?}", a.name, a.source));
             }
@@ -482,6 +597,90 @@ impl Runner {
             .find(|r| r.circuit == circuit)
             .cloned()
     }
+}
+
+/// What a run loads from its PDK, each file checked to be inside the PDK's
+/// folder. Xyce needs plugins; without them its run is refused here rather
+/// than failing on the first transistor.
+fn pdk_run(pdk: &Pdk, id: SimId) -> Result<PdkRun, RunError> {
+    use aispice_core::netlist::policy::check_module;
+    let roots = std::slice::from_ref(&pdk.root);
+    let refused = |v: aispice_core::netlist::Violation| RunError::Policy(format!("  {}", v.reason));
+    let osdi = pdk
+        .osdi
+        .iter()
+        .map(|p| check_module(p, roots, &["osdi"]).map_err(refused))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut xyce_plugins = Vec::new();
+    if id == SimId::Xyce {
+        if !pdk.xyce_models {
+            return Err(RunError::Pdk(format!(
+                "PDK `{}` has no complete Xyce model folder (libs.tech/xyce/models); simulate with ngspice",
+                pdk.name
+            )));
+        }
+        if pdk.xyce_plugins.is_empty() {
+            return Err(RunError::Pdk(format!(
+                "Xyce needs PDK `{}`'s Verilog-A models built as Xyce plugins, and {} has none. Build them with IHP's libs.tech/verilog-a/adms-compile-va.sh (needs ADMS and a Xyce built with plugin support), or simulate with ngspice",
+                pdk.name,
+                pdk.root.join("libs.tech/xyce/plugins").display()
+            )));
+        }
+        xyce_plugins = pdk
+            .xyce_plugins
+            .iter()
+            .map(|p| check_module(p, roots, &["so", "dylib", "dll"]).map_err(refused))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    Ok(PdkRun { osdi, xyce_plugins })
+}
+
+fn pdk_note(pdk: &Pdk, id: SimId) -> String {
+    let commit = pdk
+        .commit
+        .as_deref()
+        .map(|c| format!(" at {}", &c[..c.len().min(12)]))
+        .unwrap_or_default();
+    let how = match id {
+        SimId::Ngspice => "ngspice in its native mode, with the PDK's OSDI models",
+        _ => "Xyce with the PDK's plugins",
+    };
+    format!("PDK {}{commit}: {how}", pdk.name)
+}
+
+/// When a netlist calls PDK devices it does not define and the project names
+/// no PDK, the reason the run cannot work and how to fix it.
+fn pdk_devices_without_pdk(netlist: &Netlist) -> Option<String> {
+    fn walk(items: &[Line], calls: &mut Vec<(String, String)>, defined: &mut Vec<String>) {
+        for item in items {
+            match item {
+                Line::Element(e) if e.letter() == 'X' => {
+                    if let Some(w) = e.first_word() {
+                        calls.push((e.name.clone(), w.to_string()));
+                    }
+                }
+                Line::Subckt(s) => {
+                    defined.push(s.name.to_ascii_lowercase());
+                    walk(&s.body, calls, defined);
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mut calls, mut defined) = (Vec::new(), Vec::new());
+    walk(&netlist.items, &mut calls, &mut defined);
+    let (inst, device) = calls.into_iter().find_map(|(inst, name)| {
+        let d = aispice_core::pdk::device(&name)?;
+        (!defined.contains(&name.to_ascii_lowercase())).then_some((inst, d))
+    })?;
+    let kit = aispice_core::pdk::KITS
+        .iter()
+        .find(|k| k.device(device.name).is_some())
+        .map_or("", |k| k.title);
+    Some(format!(
+        "{inst} is a {kit} device ({}), but this project names no PDK. Register the PDK once with `aispice pdk add <name> <path>`, then put `pdk = \"<name>\"` in {PROJECT_FILE} at the project root (or use the pdk tool's `use` action)",
+        device.name
+    ))
 }
 
 fn clone_run(r: &StoredRun) -> StoredRun {
@@ -629,7 +828,7 @@ mod tests {
         };
         for id in SimId::ALL {
             let mut notes = Vec::new();
-            let (deck, unsupported) = runner.deck_for(id, &netlist, &[], &[], &mut notes);
+            let (deck, unsupported) = runner.deck_for(id, &netlist, &[], &[], &mut notes, None);
             assert!(unsupported.is_none(), "{id:?}: {unsupported:?}");
             let violations = netlist::check_policy(&deck, &policy);
             assert!(violations.is_empty(), "{id:?}: {violations:?}\n{deck}");
@@ -678,8 +877,14 @@ mod tests {
         });
         assert!(usual.model_lib_dirs().contains(&lib));
         let mut notes = Vec::new();
-        let (deck, _) =
-            usual.deck_for(SimId::Ngspice, &n, &[], &usual.model_lib_dirs(), &mut notes);
+        let (deck, _) = usual.deck_for(
+            SimId::Ngspice,
+            &n,
+            &[],
+            &usual.model_lib_dirs(),
+            &mut notes,
+            None,
+        );
         assert!(
             deck.to_ascii_lowercase().contains(".subckt fakeamp"),
             "{deck}"
@@ -699,6 +904,7 @@ mod tests {
             &[],
             &strict.model_lib_dirs(),
             &mut notes,
+            None,
         );
         let lower = deck.to_ascii_lowercase();
         assert!(!lower.contains(".subckt fakeamp"), "{deck}");
@@ -707,6 +913,165 @@ mod tests {
             "embedded models still come: {deck}"
         );
         assert!(notes.iter().any(|n| n.contains("fakeamp")), "{notes:?}");
+    }
+
+    /// A runner with a fake IHP PDK registered as `ihp`, and a project
+    /// folder whose `aispice.toml` says `project_toml`.
+    fn pdk_setup(project_toml: Option<&str>) -> (tempfile::TempDir, Runner, Project, Pdk) {
+        let dir = tempfile::tempdir().unwrap();
+        aispice_sim::pdk::fake_ihp(dir.path());
+        let mut pdks = Registry::default();
+        let pdk = pdks.add("ihp", &dir.path().join("IHP-Open-PDK")).unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        if let Some(t) = project_toml {
+            std::fs::write(root.join(PROJECT_FILE), t).unwrap();
+        }
+        std::fs::write(
+            root.join("inv.cir"),
+            "* inverter\nVDD vdd 0 1.2\nVIN in 0 0\nXM1 out in 0 0 sg13_lv_nmos w=1u l=0.13u ng=1 m=1\nXM2 out in vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1\n.dc VIN 0 1.2 10m\n.end\n",
+        )
+        .unwrap();
+        let runner = Runner::new(RunnerConfig {
+            pdks,
+            ..RunnerConfig::default()
+        });
+        let project = Project::open(&root, Default::default()).unwrap();
+        (dir, runner, project, pdk)
+    }
+
+    #[test]
+    fn pdk_projects_get_the_model_header() {
+        let (_d, runner, project, pdk) = pdk_setup(Some("pdk = \"ihp\"\n"));
+        let (n, _, _) = runner.netlist_for(&project, "inv.cir").unwrap();
+        let text = netlist::write(&n);
+        let models = pdk.root.join("libs.tech/ngspice/models");
+        assert!(
+            text.contains(&format!(
+                ".lib {}/cornerMOSlv.lib mos_tt\n",
+                models.display()
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with(".lib")).count(),
+            1,
+            "{text}"
+        );
+        // Board-level projects are untouched.
+        let (_d2, runner2, project2, _) = pdk_setup(None);
+        let (n2, _, _) = runner2.netlist_for(&project2, "inv.cir").unwrap();
+        assert!(!netlist::write(&n2).contains(".lib"));
+    }
+
+    #[test]
+    fn pdk_decks_pass_the_policy_and_retarget_for_xyce() {
+        let (_d, runner, project, pdk) = pdk_setup(Some("pdk = \"ihp\"\n"));
+        let (n, _, _) = runner.netlist_for(&project, "inv.cir").unwrap();
+        for id in [SimId::Ngspice, SimId::Xyce] {
+            let mut notes = Vec::new();
+            let (deck, unsupported) = runner.deck_for(id, &n, &[], &[], &mut notes, Some(&pdk));
+            assert!(unsupported.is_none(), "{unsupported:?}");
+            assert!(
+                !notes.iter().any(|n| n.contains("no definition")),
+                "PDK devices are not looked up: {notes:?}"
+            );
+            let folder = if id == SimId::Xyce { "xyce" } else { "ngspice" };
+            assert!(
+                deck.contains(&format!("libs.tech/{folder}/models/cornerMOSlv.lib mos_tt")),
+                "{deck}"
+            );
+            let policy = Policy {
+                base_dir: project.root().to_path_buf(),
+                trusted_dirs: runner.config().pdks.roots(),
+                ..Default::default()
+            };
+            assert_eq!(netlist::check_policy(&deck, &policy), vec![], "{deck}");
+            // Without the PDK registered, its files are outside the project.
+            let strict = Policy {
+                base_dir: project.root().to_path_buf(),
+                ..Default::default()
+            };
+            assert!(!netlist::check_policy(&deck, &strict).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pdk_projects_refuse_ltspice_and_spectre() {
+        let (_d, runner, _project, pdk) = pdk_setup(Some("pdk = \"ihp\"\n"));
+        for sim in ["ltspice", "LTspice", "spectre"] {
+            let err = runner.choose_for(Some(sim), Some(&pdk)).await.unwrap_err();
+            assert!(matches!(err, RunError::Pdk(_)), "{sim}: {err}");
+            assert!(err.to_string().contains("ngspice or Xyce"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pdk_devices_need_the_project_to_name_a_pdk() {
+        let (_d, runner, project, _) = pdk_setup(None);
+        let (n, std_libs, _) = runner.netlist_for(&project, "inv.cir").unwrap();
+        let err = runner
+            .run_netlist(
+                &project,
+                "inv.cir",
+                &n,
+                &std_libs,
+                None,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("XM1") && msg.contains("aispice.toml"), "{msg}");
+        // A deck that defines the subcircuit itself is not a PDK deck.
+        let own = netlist::parse(
+            "t\nXM1 a b 0 0 sg13_lv_nmos\n.subckt sg13_lv_nmos d g s b\nR1 d s 1k\n.ends\n.op\n",
+        );
+        assert!(pdk_devices_without_pdk(&own).is_none());
+    }
+
+    #[test]
+    fn unknown_or_unregistered_pdk_names_explain_themselves() {
+        let (_d, runner, project, _) = pdk_setup(Some("pdk = \"sky130\"\n"));
+        let err = runner
+            .netlist_for(&project, "inv.cir")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sky130") && err.contains("registered: ihp"),
+            "{err}"
+        );
+        let (_d2, _, project2, _) = pdk_setup(Some("pdk = \"ihp\"\n"));
+        let empty = Runner::new(RunnerConfig {
+            pdks_error: Some("pdks.toml is not valid".into()),
+            ..RunnerConfig::default()
+        });
+        let err = empty
+            .netlist_for(&project2, "inv.cir")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("none are registered") && err.contains("pdks.toml is not valid"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pdk_runs_load_checked_modules_and_xyce_needs_plugins() {
+        let (_d, _runner, _project, pdk) = pdk_setup(None);
+        let run = pdk_run(&pdk, SimId::Ngspice).unwrap();
+        assert_eq!(run.osdi.len(), 4);
+        assert!(run.osdi.iter().all(|p| p.starts_with(&pdk.root)));
+        assert!(run.xyce_plugins.is_empty());
+        let err = pdk_run(&pdk, SimId::Xyce).unwrap_err().to_string();
+        assert!(err.contains("adms-compile-va.sh"), "{err}");
+        let plugins = pdk.root.join("libs.tech/xyce/plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join("libXyce_Plugin_PSP103_VA.so"), b"").unwrap();
+        let pdk = Pdk::open("ihp", &pdk.root).unwrap();
+        let run = pdk_run(&pdk, SimId::Xyce).unwrap();
+        assert_eq!(run.xyce_plugins.len(), 1);
+        assert!(pdk_note(&pdk, SimId::Ngspice).contains("native mode"));
     }
 
     #[test]
