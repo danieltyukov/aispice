@@ -13,8 +13,8 @@ use aispice_core::xschem::import::Proof;
 use aispice_core::xschem::netlist::Finding;
 use aispice_tools::pdk::Registry;
 use aispice_tools::xschem::{
-    Effort, Setup, XschemCheck, check_export, check_import, export_schematic, import_file, pdk_for,
-    report, report_json,
+    Effort, ImportCheck, Setup, XschemCheck, check_export, check_import, export_schematic,
+    import_file, pdk_for, report, report_json,
 };
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -36,11 +36,16 @@ fn folder_of(p: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Folders a schematic may pull files from besides the libraries: its own
-/// and the current one.
+/// Folders a schematic may pull files from besides the libraries: its own,
+/// and the current one when the schematic is inside it (a project run from
+/// its root). A path in the schematic never widens this.
 fn roots(file: &Path) -> Vec<PathBuf> {
     let mut out = vec![folder_of(file)];
-    if let Ok(cwd) = std::env::current_dir() {
+    if let (Ok(cwd), Ok(f)) = (
+        std::env::current_dir().and_then(|d| d.canonicalize()),
+        file.canonicalize(),
+    ) && f.starts_with(&cwd)
+    {
         out.push(cwd);
     }
     out
@@ -82,12 +87,15 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
+/// `xschem_check`: the user's `--xschem-check`, which lets xschem itself
+/// (in its sandbox) check the import.
 pub fn import(
     ctx: &Ctx,
     file: &Path,
     output: Option<&Path>,
     force: bool,
     effort: u8,
+    xschem_check: bool,
 ) -> Result<ExitCode> {
     let sch = file
         .canonicalize()
@@ -133,6 +141,7 @@ pub fn import(
         roots(&sch),
         &imported,
         Some(&out_dir),
+        ImportCheck::from_cli(xschem_check),
         &CancellationToken::new(),
     ));
     std::fs::write(&out, schematic::write_bytes(&imported.schematic))

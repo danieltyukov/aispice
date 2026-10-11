@@ -1,24 +1,14 @@
 //! `aispice xschem import|export` on files in a temporary folder, with an
 //! empty PDK registry so the user's own is never read.
 
+mod common;
+
 use assert_cmd::Command;
+use common::RC;
+#[cfg(unix)]
+use common::{fake_xschem, path_with};
 use predicates::prelude::*;
 use std::path::Path;
-
-const RC: &str = r#"v {xschem version=3.4.4 file_version=1.2}
-N 100 -200 200 -200 {lab=in}
-N 260 -200 300 -200 {lab=out}
-N 300 -200 300 -160 {lab=out}
-N 100 -200 100 -170 {lab=in}
-C {devices/vsource.sym} 100 -140 0 0 {name=V1 value="dc 0 ac 1"}
-C {devices/res.sym} 230 -200 1 0 {name=R1 value=1k}
-C {devices/capa.sym} 300 -130 0 0 {name=C1 value=1n}
-C {devices/gnd.sym} 100 -110 0 0 {name=l1 lab=GND}
-C {devices/gnd.sym} 300 -100 0 0 {name=l2 lab=GND}
-C {devices/lab_pin.sym} 300 -200 0 0 {name=p1 lab=out}
-C {devices/lab_pin.sym} 100 -200 0 0 {name=p2 lab=in}
-C {devices/code_shown.sym} 400 -200 0 0 {name=s1 only_toplevel=false value=".ac dec 10 1 1meg"}
-"#;
 
 fn aispice(dir: &Path) -> Command {
     let mut c = Command::cargo_bin("aispice").unwrap();
@@ -80,4 +70,87 @@ fn unreadable_input_is_an_error() {
         .args(["xschem", "export", "missing.asc"])
         .assert()
         .code(2);
+}
+
+/// xschem runs Tcl from the schematic, so an import runs it only when the
+/// user asks, and only inside the sandbox, so the stand-in xschem never
+/// leaves its mark: it is blocked by the sandbox, or no sandbox starts and
+/// it is not run.
+#[cfg(unix)]
+#[test]
+fn import_runs_xschem_only_when_asked_and_only_in_a_sandbox() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let sentinel = dir.join("xschem-ran");
+    let (program, fakebin) = fake_xschem(&dir, &sentinel);
+    std::fs::write(dir.join("rc.sch"), RC).unwrap();
+    let run = |args: &[&str], ask_env: bool| {
+        let mut c = aispice(&dir);
+        c.env("AISPICE_XSCHEM", &program)
+            .env("PATH", path_with(&fakebin))
+            .env_remove("AISPICE_XSCHEM_CHECK_IMPORTS");
+        if ask_env {
+            c.env("AISPICE_XSCHEM_CHECK_IMPORTS", "1");
+        }
+        let out = c.args(args).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    // Not asked: aispice's own proof only.
+    let (code, out) = run(&["xschem", "import", "rc.sch", "--effort", "1"], false);
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("Proof, aispice: same circuit"), "{out}");
+    assert!(out.contains("not checked against xschem"), "{out}");
+    assert!(!sentinel.exists());
+    // Asked, by flag or by environment: xschem is run only sandboxed, so
+    // the stand-in's mark is never left (it is blocked where a sandbox
+    // starts, or xschem is not run where none does). Either way the import
+    // succeeds and no longer reports that xschem did not check it.
+    for (args, env) in [
+        (
+            &[
+                "xschem",
+                "import",
+                "rc.sch",
+                "--force",
+                "--effort",
+                "1",
+                "--xschem-check",
+            ][..],
+            false,
+        ),
+        (
+            &["xschem", "import", "rc.sch", "--force", "--effort", "1"][..],
+            true,
+        ),
+    ] {
+        let (code, out) = run(args, env);
+        assert_eq!(code, Some(0), "{out}");
+        assert!(!out.contains("not checked against xschem"), "{out}");
+        assert!(!sentinel.exists(), "{out}");
+    }
+    // The reviewer's payload: refused by the scan before any sandbox.
+    std::fs::write(
+        dir.join("evil.sch"),
+        format!(
+            "v {{xschem version=3.4.4 file_version=1.2}}\nC {{devices/res.sym}} 0 0 0 0 {{name=R1 value=\"tcleval(1k\\}} ; exec touch {} ; #\\{{)\"}}\nC {{devices/capa.sym}} 100 0 0 0 {{name=C1 value=1n}}\nC {{devices/gnd.sym}} 0 30 0 0 {{name=l1 lab=GND}}\nC {{devices/lab_pin.sym}} 0 -30 0 0 {{name=p1 lab=a}}\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    let (_, out) = run(
+        &[
+            "xschem",
+            "import",
+            "evil.sch",
+            "--effort",
+            "1",
+            "--xschem-check",
+        ],
+        false,
+    );
+    assert!(out.contains("xschem was not run"), "{out}");
+    assert!(!sentinel.exists(), "{out}");
 }

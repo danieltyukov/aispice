@@ -24,7 +24,7 @@ Proof, xschem: same circuit (xschem's own netlist of the .sch against the .asc's
 ```
 
 - **Proof, aispice** always runs. aispice netlists the `.sch` with its own xschem netlister, which follows xschem's netlister step by step, and compares it with the `.asc`'s netlist: the same elements with the same values, connected the same way. Ground is `0` on one side and `GND` on the other, numbered nets (`net3`, `N001`) may be numbered differently as long as they connect the same pins, parameters compare by value (`0.5u` is `0.5e-6`), and `m=1` may be left out.
-- **Proof, xschem** runs xschem itself, headless, when it is installed, and compares its netlist with the `.asc`'s. It is skipped, with the reason, when xschem is missing, when a symbol is known only from aispice's built-in definitions (xschem would not find it), or when the safety check below refuses the file. A skip is not a failure.
+- **Proof, xschem** runs xschem itself, headless and sandboxed, and compares its netlist with the `.asc`'s. On an export it always runs (the `.sch` is aispice's own, written so nothing in it is evaluated). On an import it runs only when you ask, because the `.sch` is a file aispice did not write and xschem evaluates Tcl from it: pass `--xschem-check`, or start aispice with `AISPICE_XSCHEM_CHECK_IMPORTS=1`. Without that the import says `not checked against xschem` and is still proven by aispice's own netlist. The proof is skipped, with the reason, when xschem is missing, when no sandbox is available (see [Running xschem safely](#running-xschem-safely)), when a symbol is known only from aispice's built-in definitions (xschem would not find it), or when the safety scan refuses the file. A skip is not a failure.
 - **Findings** are what could not be carried over, each naming what it is about. **Notes** are what changed on purpose.
 
 The CLI exits with code 1 when a proof finds a difference, so conversions can run in CI. A conversion aispice cannot prove is not written.
@@ -56,11 +56,35 @@ The `.asc` is netlisted and redrawn with xschem's symbols: `devices/` for generi
 
 ## Running xschem safely
 
-xschem evaluates Tcl from the files it opens: `tcleval(...)` properties, `@tcleval` tokens, instance values substituted into a symbol's Tcl, and file names spliced into Tcl commands. A schematic from someone else could use any of these to run commands. aispice never runs Tcl itself: it evaluates a small side-effect-free subset (`expr`, IHP's `ev`, `if`, `return`, `sim_is_*`, and the model folder variables), and anything else is a finding. Before it asks xschem for a netlist, it reads every file xschem would read and refuses to run xschem when:
+xschem evaluates Tcl from the files it opens: `tcleval(...)` property values, `@tcleval` tokens, instance values substituted into a symbol's Tcl, symbols it loads by library path, file names spliced into Tcl commands, and the rc files it sources. A schematic from someone else could use any of these to run commands. aispice never runs Tcl itself. What keeps a machine safe is, in order:
 
-- a schematic, or a symbol outside xschem's library and the registered PDK, has Tcl command substitution (`[...]`) in a `tcleval` property or text;
-- an instance of a symbol whose properties use Tcl has `[` or `]` in its own properties (the `value` of xschem's `simulator_commands` symbols, which their Tcl wraps in braces, may hold brackets as long as it has no braces or backslashes);
-- a symbol reference looks like Tcl, is not a `.sym` or `.sch` file, or leads outside the folders aispice may read;
-- a path xschem would see has characters other than letters, digits and `/ . _ - + , = @`.
+1. **xschem runs on an import only when you ask.** An export is aispice's own file; an import is not, so aispice runs xschem on it only with `--xschem-check` or `AISPICE_XSCHEM_CHECK_IMPORTS=1` in the environment of the process you start. The agent and MCP tools and the content of a schematic cannot turn it on; the model can ask for an import but not for xschem to run on it.
+2. **Every xschem run is sandboxed.** aispice uses, in order:
+   - **bubblewrap** (`bwrap`) where it can start: new user, PID, IPC, UTS and network namespaces (no network at all), the system folders and xschem's install read-only, the library, model and input files read-only at their own paths, a private `/tmp` and `HOME`, and one writable folder for the netlist;
+   - else **Landlock** (Linux 5.13 and later): xschem runs confined to read and execute the system and its own install, read the library, model and input files, write only a private output folder with a private `HOME` and `TMPDIR`, and make no TCP bind or connection;
+   - when neither is available, xschem is not run, and the proof is skipped with the reason.
 
-When it does run, xschem gets an argument vector, no window (`-x`), stdin closed, a timeout, an empty environment except `PATH`, a fresh private `HOME` (so `~/.xschem/xschemrc` is never read), and an rc file that takes every path from environment variables, so no path is ever written into Tcl.
+   On Ubuntu 24.04 the default kernel refuses bubblewrap its user namespace (`kernel.apparmor_restrict_unprivileged_userns=1`) unless bwrap has an AppArmor profile, so aispice falls back to Landlock there. To use bubblewrap instead, add a profile that allows the namespace (this needs root), for example in `/etc/apparmor.d/bwrap`:
+
+   ```
+   abi <abi/4.0>,
+   include <tunables/global>
+   profile bwrap /usr/bin/bwrap flags=(unconfined) {
+     userns,
+     include if exists <local/bwrap>
+   }
+   ```
+
+   then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. aispice does not change system configuration; this is yours to decide.
+3. **An export writes nothing xschem would evaluate.** Every value in an export comes from the `.asc`, so the export writer lets a value reach the file only where it stays literal: an instance whose values or nets a symbol's Tcl would read gets a plain `format` of its own, or becomes its SPICE line in a code block, and anything holding `tcleval` is left out with a finding. The written file is read back as xschem reads it and the export fails if anything does not round-trip.
+
+A scan of the text (`aispice_core::xschem::safety`) runs before any of this. It is defense in depth, not a security boundary, and refuses before anything runs what is known to be dangerous or not comparable:
+
+- any property value, symbol `format` or text that starts with `tcleval(` and holds `[` or `]`, whose braces do not balance the way Tcl counts them, or that ends in an odd run of backslashes (any of these lets the value leave the Tcl word xschem wraps it in); the reviewer's `value="tcleval(1k} ; <command> ; #{)"` is refused here;
+- `tcleval(` together with `[` anywhere in a schematic's or an untrusted symbol's string;
+- a value xschem would paste into Tcl that could reshape it: the properties of an instance of a symbol that uses Tcl, label names, and the properties of subcircuit instances must hold no bracket, brace, quote, `;`, backslash or line break (the `value` of xschem's `simulator_commands` symbols, whose Tcl wraps it in braces, may hold brackets as long as it has no brace or backslash);
+- bus or vector notation in names and labels, which xschem expands and aispice does not;
+- a symbol reference that looks like Tcl, is not a `.sym` or `.sch` file, or leads outside the folders aispice may read;
+- a file that cannot be read, or a hierarchy deeper, wider or larger than aispice's netlister follows.
+
+When it does run, xschem gets an argument vector, no window (`-x`), stdin closed, a timeout and capped output, an environment of only `PATH`, `HOME`, `TMPDIR`, `LC_ALL` and the variables the rc reads (nothing inherited), a private `HOME` (so `~/.xschem/xschemrc` is never read), and `--rcfile` pointing at an rc aispice writes that takes every path from environment variables, so no path is ever written into Tcl. Given `--rcfile`, xschem sources no other rc, not even an `xschemrc` in the working folder. Everything an import produces (code-block SPICE, directives, model names, include and lib lines) also passes aispice's netlist policy before it is written or simulated, and an import never opens a file outside the project or a registered PDK because of a path in the `.sch`.

@@ -77,6 +77,18 @@ async fn import_creates_an_asc_with_proofs() {
         json!(true)
     );
     xschem_proof_ok(&data["xschem"]);
+    // The tool never runs xschem on a schematic it did not write unless the
+    // user started this process asking for it.
+    if std::env::var_os("AISPICE_XSCHEM_CHECK_IMPORTS").is_none() {
+        let x = &data["xschem"]["proofs"]["xschem"];
+        assert_eq!(x["status"], "skipped", "{x}");
+        assert!(
+            x["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("not checked against xschem")),
+            "{x}"
+        );
+    }
     let root = ws.project().unwrap().root().to_path_buf();
     let asc = std::fs::read_to_string(root.join("rc.asc")).unwrap();
     assert!(asc.contains("SYMBOL res"), "{asc}");
@@ -165,10 +177,11 @@ async fn hostile_schematics_are_data() {
         m = marker.display()
     );
     std::fs::write(root.join("evil.sch"), hostile).unwrap();
+    // An extra input field cannot turn the xschem check on.
     let (text, err, data) = call(
         &ws,
         "xschem_import",
-        json!({"schematic": "evil.sch", "effort": 1}),
+        json!({"schematic": "evil.sch", "effort": 1, "xschem_check": true}),
     )
     .await;
     assert!(!err, "{text}");

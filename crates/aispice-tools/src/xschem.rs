@@ -4,11 +4,27 @@
 //! The conversions themselves are in `aispice_core::xschem`; this module
 //! finds what they need on this machine (xschem's library, the PDK's
 //! symbols and model folders) and adds the second proof: xschem's own
-//! netlist of the `.sch`, made headless by `aispice_sim::xschem`, compared
-//! with the `.asc`'s netlist. That proof is skipped, with the reason, when
-//! xschem is not installed, when a symbol is known only from aispice's
-//! built-in definitions (xschem would not find it), or when the safety scan
-//! refuses the file; a skip is never a failure of the conversion.
+//! netlist of the `.sch`, made headless inside a sandbox by
+//! `aispice_sim::xschem`, compared with the `.asc`'s netlist.
+//!
+//! xschem evaluates Tcl from the files it opens, so it is run:
+//!
+//! - on an export, always: the file is aispice's own, written through the
+//!   export's guard so no value in it is evaluated;
+//! - on a schematic being imported, only when the user asked
+//!   ([`ImportCheck`]: the CLI's `--xschem-check`, or
+//!   `AISPICE_XSCHEM_CHECK_IMPORTS=1` in the environment of the process they
+//!   started). No tool input and no project file can ask. Without it, the
+//!   import is proven by aispice's own netlist and reports that xschem did
+//!   not check it;
+//! - never without a sandbox (bubblewrap where it can start, else Landlock),
+//!   and never when the safety scan refuses the file (defense in depth, see
+//!   `aispice_core::xschem::safety`).
+//!
+//! The proof is skipped, with the reason, in those cases and when xschem is
+//! not installed or a symbol is known only from aispice's built-in
+//! definitions (xschem would not find it); a skip is never a failure of the
+//! conversion.
 
 use crate::pdk::{ProjectConfig, Registry};
 use aispice_core::layout::LayoutOptions;
@@ -23,10 +39,47 @@ use aispice_core::xschem::symbol::{Resolver, read_limited};
 use aispice_core::xschem::tcl::Env;
 use aispice_core::xschem::{file, netlist};
 use aispice_sim::pdk::Pdk;
-use aispice_sim::xschem::{Run, Xschem};
+use aispice_sim::xschem::{Run, Sandbox, Xschem};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
+
+/// The variable that lets xschem check imports, in the environment of the
+/// process the user starts.
+pub const CHECK_IMPORTS_ENV: &str = "AISPICE_XSCHEM_CHECK_IMPORTS";
+
+/// Whether an import may be checked by running xschem on the schematic,
+/// which aispice did not write. Only the user can turn it on: the CLI's
+/// `--xschem-check` flag, or [`CHECK_IMPORTS_ENV`] set to `1` in the
+/// environment of the aispice process they start. Tools and project files
+/// have no say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportCheck {
+    Off,
+    On,
+}
+
+impl ImportCheck {
+    /// From this process's environment.
+    pub fn from_env() -> Self {
+        match std::env::var(CHECK_IMPORTS_ENV) {
+            Ok(v) if v.trim() == "1" => ImportCheck::On,
+            _ => ImportCheck::Off,
+        }
+    }
+
+    /// From the CLI's flag, else the environment.
+    pub fn from_cli(flag: bool) -> Self {
+        if flag {
+            ImportCheck::On
+        } else {
+            Self::from_env()
+        }
+    }
+}
+
+/// Why an import was not checked with xschem when the user did not ask.
+pub const NOT_ASKED: &str = "not checked against xschem: aispice runs xschem on a schematic it did not write only when you ask (pass --xschem-check, or start aispice with AISPICE_XSCHEM_CHECK_IMPORTS=1); the proof above is aispice's own netlist of the schematic";
 
 /// Where xschem, its library and the PDK's xschem symbols are.
 #[derive(Debug, Clone, Default)]
@@ -239,13 +292,23 @@ async fn xschem_compare(
             reason: "xschem is not installed".into(),
         };
     };
+    // Pick the sandbox now: bubblewrap if it can start here, else Landlock,
+    // else no run.
+    let sandbox = match Sandbox::select(cancel).await {
+        Ok(s) => s,
+        Err(e) => {
+            return XschemCheck::Skipped {
+                reason: format!("xschem was not run: {e}"),
+            };
+        }
+    };
     let run = Run {
         library: setup.library.clone(),
         files: verdict.files.clone(),
         models_ngspice: setup.models("ngspice"),
         models_xyce: setup.models("xyce"),
     };
-    let text = match aispice_sim::xschem::netlist(x, sch, &run, cancel).await {
+    let text = match aispice_sim::xschem::netlist(x, &sandbox, sch, &run, cancel).await {
         Ok(t) => t,
         Err(e) => {
             return XschemCheck::Skipped {
@@ -269,15 +332,21 @@ async fn xschem_compare(
     XschemCheck::Ran { proof }
 }
 
-/// xschem's side of an import's proof.
+/// xschem's side of an import's proof: run only when the user asked.
 pub async fn check_import(
     setup: &Setup,
     sch: &Path,
     roots: Vec<PathBuf>,
     imported: &Imported,
     out_dir: Option<&Path>,
+    asked: ImportCheck,
     cancel: &CancellationToken,
 ) -> XschemCheck {
+    if asked != ImportCheck::On {
+        return XschemCheck::Skipped {
+            reason: NOT_ASKED.into(),
+        };
+    }
     let expected = Expected {
         asc: &imported.asc_netlist,
         opts: &imported.compare,
@@ -335,7 +404,8 @@ pub fn export_schematic(
     export(asc, lib, title, out, &setup.resolver(roots), &opts).map_err(|e| e.to_string())
 }
 
-/// xschem's side of an export's proof. The `.sch` text is written to a
+/// xschem's side of an export's proof. The `.sch` text is the export
+/// writer's own ([`aispice_core::xschem::export::SchText`]), written to a
 /// private folder first, so the proof is known before anything is saved;
 /// an export refers only to library symbols, so it reads the same there.
 pub async fn check_export(

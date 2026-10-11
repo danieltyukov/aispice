@@ -1,6 +1,8 @@
 //! The `aispice mcp` binary driven over stdio with raw JSON-RPC, the way
 //! an MCP client does it.
 
+mod common;
+
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -14,7 +16,17 @@ struct Client {
 
 impl Client {
     fn start(project: &std::path::Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_aispice"))
+        Self::start_with(project, &[])
+    }
+
+    /// With `env` added to the server's environment.
+    fn start_with(project: &std::path::Path, env: &[(&str, std::ffi::OsString)]) -> Self {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_aispice"));
+        cmd.env_remove("AISPICE_XSCHEM_CHECK_IMPORTS");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .args(["mcp", "--project"])
             .arg(project)
             .stdin(Stdio::piped())
@@ -212,4 +224,60 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// An MCP client cannot make aispice run xschem on a schematic it did not
+/// write: the tool has no switch for it (an extra input field changes
+/// nothing), so only the environment the user starts the server with can
+/// allow it, and even then xschem runs only inside the sandbox, so a
+/// stand-in in its place never escapes to leave its mark.
+#[cfg(unix)]
+#[test]
+fn mcp_import_never_runs_xschem_without_the_user() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("rc.sch"), common::RC).unwrap();
+    let sentinel = dir.join("xschem-ran");
+    let (program, fakebin) = common::fake_xschem(&dir, &sentinel);
+    let env = |ask: bool| {
+        let mut e = vec![
+            ("AISPICE_XSCHEM", program.clone().into_os_string()),
+            ("PATH", common::path_with(&fakebin)),
+            (
+                "AISPICE_PDK_REGISTRY",
+                dir.join("pdks.toml").into_os_string(),
+            ),
+        ];
+        if ask {
+            e.push(("AISPICE_XSCHEM_CHECK_IMPORTS", "1".into()));
+        }
+        e
+    };
+    // Without the opt-in the import says xschem did not check it; with the
+    // opt-in it may run xschem, but only sandboxed. Either way the import is
+    // written and the stand-in xschem never leaves its mark outside the
+    // sandbox (it is blocked, or no sandbox starts and it is not run).
+    for (ask, circuit) in [(false, "a.asc"), (true, "b.asc")] {
+        let mut c = Client::start_with(&project, &env(ask));
+        c.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1"}}),
+        );
+        c.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        let out = c.call(
+            "xschem_import",
+            json!({"schematic": "rc.sch", "circuit": circuit, "effort": 1, "xschem_check": true}),
+        );
+        assert_ne!(out["isError"], json!(true), "{out}");
+        let text = text(&out);
+        assert_eq!(
+            text.contains("not checked against xschem"),
+            !ask,
+            "ask={ask}: {text}"
+        );
+        assert!(project.join(circuit).exists());
+        assert!(!sentinel.exists(), "ask={ask}: {text}");
+    }
 }

@@ -6,8 +6,8 @@ use super::blocking;
 use super::schematic_tools::spec;
 use crate::workspace::Workspace;
 use crate::xschem::{
-    Effort, ExportOutcome, ImportOutcome, MAX_LAYOUT_ELEMENTS, Setup, check_export, check_import,
-    export_schematic, import_file, pdk_for, report, report_json,
+    Effort, ExportOutcome, ImportCheck, ImportOutcome, MAX_LAYOUT_ELEMENTS, Setup, check_export,
+    check_import, export_schematic, import_file, pdk_for, report, report_json,
 };
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
@@ -59,7 +59,7 @@ impl Tool for XschemImport {
     fn spec(&self) -> ToolSpec {
         spec::<XschemImportInput>(
             "xschem_import",
-            "Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted (by aispice, and by xschem when installed) and compared. Refuses to overwrite.",
+            "Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. xschem itself checks an import only when the user started aispice with AISPICE_XSCHEM_CHECK_IMPORTS=1; this tool cannot turn that on. Refuses to overwrite.",
         )
     }
 
@@ -122,12 +122,15 @@ impl Tool for XschemImport {
                 imported.proof.differences.join("; ")
             ));
         }
+        // xschem evaluates Tcl from the schematic, which aispice did not
+        // write: only the user's own environment can let it run here.
         let xschem = check_import(
             &setup,
             &sch,
             roots,
             &imported,
             out_dir.as_deref(),
+            ImportCheck::from_env(),
             &ctx.cancel,
         )
         .await;
@@ -195,7 +198,7 @@ impl Tool for XschemExport {
     fn spec(&self) -> ToolSpec {
         spec::<XschemExportInput>(
             "xschem_export",
-            "Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for stay SPICE lines in a code block. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem when installed). Refuses to overwrite.",
+            "Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox when both are installed). Refuses to overwrite.",
         )
     }
 

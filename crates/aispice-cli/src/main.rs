@@ -365,6 +365,11 @@ enum XschemAction {
         /// How many candidate layouts to try: 1 is quick, 3 searches widely.
         #[arg(long, default_value_t = 2)]
         effort: u8,
+        /// Also check the import with xschem itself. xschem runs Tcl from the
+        /// schematic, so it runs inside a bubblewrap sandbox, and only when
+        /// asked (this flag, or AISPICE_XSCHEM_CHECK_IMPORTS=1).
+        #[arg(long)]
+        xschem_check: bool,
     },
     /// Export an .asc as an xschem schematic.
     Export {
@@ -523,7 +528,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 output,
                 force,
                 effort,
-            } => cmd_xschem::import(&ctx, &file, output.as_deref(), force, effort),
+                xschem_check,
+            } => cmd_xschem::import(&ctx, &file, output.as_deref(), force, effort, xschem_check),
             XschemAction::Export {
                 file,
                 output,
