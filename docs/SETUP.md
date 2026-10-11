@@ -146,6 +146,57 @@ In such a project:
 
   The first use of a device sweeps it on ngspice over L, VDS and VGS (a few seconds) and caches the table in `~/.cache/aispice/gmid/<pdk>/<device>.json`, rebuilt when the PDK's commit or model files change. The answer is then simulated at the size found and corrected, since the models do not scale exactly with finger width.
 
+## Layout
+
+aispice lays out, checks and extracts analog blocks on the PDK the project uses. It needs:
+
+- **KLayout 0.30 or newer** (`klayout` on PATH, or `klayout_path`). It runs IHP's DRC and LVS decks, draws layouts with IHP's pcells and renders pictures, always in batch mode (`-b`), so no window opens. The klayout.org packages work; aispice's tests use 0.30.4.
+- **Magic 8.3.573 or newer** (`magic` on PATH, or `magic_path`), for extraction with IHP's tech file, run without graphics (`-dnull`). Tested with 8.3.677.
+- **The pcell support submodules of IHP-Open-PDK**, which the pcells import:
+
+  ```sh
+  cd ~/IHP-Open-PDK
+  git submodule update --init ihp-sg13g2/libs.tech/klayout/python/pycell4klayout-api \
+      ihp-sg13g2/libs.tech/klayout/python/pypreprocessor
+  ```
+
+`aispice doctor` shows whether KLayout and Magic were found.
+
+### Generate a layout
+
+```sh
+aispice layout generate ota.asc --template ota5t
+aispice layout render ota.gds -o ota.png
+```
+
+A generator is a deterministic planner: it reads the circuit, checks the topology it expects, splits each device into two-finger units, orders matched devices in a common-centroid or interdigitated row with dummy fingers at both ends and a guard ring, routes every net on Metal3 tracks (joined across rows on Metal4) and labels the pins. One KLayout script draws the plan with IHP's own MOS pcells. Templates and their roles:
+
+| Template | Roles |
+|---|---|
+| `current_mirror` | `ref` (diode-connected), `out` (one or more) |
+| `diff_pair` | `pair` |
+| `ota5t` | `pair`, `load`, `tail`, `bias` (optional) |
+| `comparator` | `tail`, `pair`, `latch_n`, `latch_p`, `reset` (StrongARM latch) |
+
+Roles are found from the topology when you give none; `--roles '{"pair": ["M1", "M2"], "tail": "M5"}'` names them. Parameters (`--params` as JSON): `pattern` (`common_centroid` or `interdigitated`), `dummies` (0 to 4 per row end), `guard_ring`, `fingers` (of the smallest device in a row; even), `track_pitch` and `row_gap` in um. Devices must be `sg13_lv_nmos` or `sg13_lv_pmos`, sized on the 5 nm grid, with fingers at least 0.3 um wide.
+
+`generate` writes `<cell>.gds` and `<cell>.layout.json` (the template, roles, parameters, the devices drawn and the dummies) and runs DRC and LVS. When DRC fails on a rule a parameter addresses (spacing on the routing layers, wells, latch-up), it changes that parameter and draws again, up to three times. It overwrites only a layout it made itself.
+
+### Check and extract
+
+```sh
+aispice drc ota.gds                  # main rules, IHP's extra rules and antenna
+aispice lvs ota.gds ota.asc          # against the circuit's devices (and the layout's dummies)
+aispice extract ota.gds --resistance # Magic: devices, capacitors, resistor networks
+aispice check ota.asc --post-layout ota.gds
+```
+
+LVS writes the circuit's PDK devices in the CDL form IHP's deck reads. For a layout from a generator, only the devices it drew are compared and its dummy transistors are added to the schematic side (KLayout drops a dummy whose terminals are all one net, so those are left out). Pins are the nets the devices share with the rest of the circuit, and ground.
+
+Extraction runs Magic's `extract` and `ext2spice` with coupling capacitance (capacitors under 0.01 fF dropped) and, with resistance, `extresist` on every net. Magic cannot split a substrate net that carries a label, so with resistance the substrate net (ground) stays one ideal node and the report says so. `check --post-layout` puts the extracted subcircuit in place of the laid-out devices, joined by net name, keeps the PDK's model header, and reports each spec before and after layout. A net the test bench uses that the layout does not label is an error that names the net.
+
+Reports, logs, KLayout's extracted netlist and Magic's netlists are kept in `.aispice/layout/<run>/`.
+
 ## Model providers
 
 aispice works with Anthropic, OpenAI, Google Gemini, OpenRouter, Ollama, and any OpenAI-compatible endpoint (LM Studio, vLLM, a company gateway).
@@ -188,6 +239,8 @@ simulator = "auto"              # auto, ngspice, ltspice, xyce or spectre
 edit_mode = "apply"             # apply (with undo) or ask (approve each edit)
 # ltspice_path = "/home/me/.wine/drive_c/Program Files/ADI/LTspice/LTspice.exe"
 # xyce_path = "/home/me/.local/xyce/bin/Xyce"   # a Xyce other than the one on PATH
+# klayout_path = "/opt/klayout/klayout"         # a KLayout other than the one on PATH
+# magic_path = "/opt/magic/bin/magic"           # a Magic other than the one on PATH
 # embedded_models_only = true   # never use models or symbols from LTspice's library
 
 [agent]
@@ -234,6 +287,8 @@ Cursor, Claude Desktop, and other clients that take a JSON server list:
 | `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project. Written only when you (or the agent, with approval) choose a PDK. |
 | `.aispice/history/` | A snapshot before every edit, for undo |
 | `.aispice/runs/` | Recent simulation output |
+| `<cell>.gds`, `<cell>.layout.json` | A generated layout and how it was made (template, roles, parameters, devices, dummies). Commit both. |
+| `.aispice/layout/` | DRC and LVS reports, logs and extracted netlists |
 
 Add `.aispice/` to `.gitignore` unless you want history in version control. Chat sessions from the desktop app are kept in your user data folder, not in the project.
 

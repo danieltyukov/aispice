@@ -681,7 +681,7 @@ impl Tool for CheckSpecs {
         spec::<SpecsInput>(
             "check_specs",
             &format!(
-                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. {CORNERS_HELP} {SPEC_SYNTAX} {MEASURE_SYNTAX}"
+                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. With post_layout (a layout from the layout tool), the layout is extracted and simulated in place of the schematic's devices, and each spec is reported before and after layout (at every corner when corners are given). {CORNERS_HELP} {SPEC_SYNTAX} {MEASURE_SYNTAX}"
             ),
         )
     }

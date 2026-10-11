@@ -12,6 +12,7 @@ flowchart TB
   tools["aispice-tools<br/>project, history, runner, tool registry"]
   agent["aispice-agent<br/>agent loop, providers, keys, config"]
   sim["aispice-sim<br/>simulator backends, raw files, measurements, specs"]
+  layout["aispice-layout<br/>DRC, LVS, extraction, generators"]
   core["aispice-core<br/>.asc and .asy, netlister, edits, lint, render"]
   app --> tools
   cli --> tools
@@ -20,7 +21,9 @@ flowchart TB
   cli --> agent
   tools --> agent
   tools --> sim
+  tools --> layout
   tools --> core
+  layout --> sim
   sim --> core
 ```
 
@@ -68,6 +71,20 @@ Running simulators and reading what they return.
 | `gmid` | gm/Id lookup tables for a PDK's transistors, built on ngspice and cached, and sizing from them checked by simulation |
 | `plot` | SVG plots of waveforms |
 
+### aispice-layout
+
+Analog layout on a PDK's own decks and pcells. Every external program runs from an argument vector in a private folder that is also its `HOME`, with scripts that are aispice's own (embedded in the binary) and values passed as data: `-rd name=value` for KLayout, environment variables for Magic.
+
+| Module | What it does |
+|---|---|
+| `tools` | Finding KLayout and Magic, run folders, and the checks every name and path passes before it reaches a program |
+| `gds` | A small GDSII reader: cells, top cells, layers and labels, with limits on size and nesting |
+| `drc` | IHP's KLayout decks (main, extra, antenna, density) run directly with the switches `run_drc.py` sets, and their report databases read into rules, layers and boxes |
+| `lvs` | The CDL netlist IHP's LVS deck reads, written from a circuit (or the devices a layout holds, plus its dummies); the deck run, and its result read through KLayout's own API |
+| `extract` | Magic with IHP's tech file: devices, coupling capacitance and resistor networks, and the post-layout netlist that puts the extracted cell in place of the schematic's devices |
+| `generator` | Templates (mirror, pair, OTA, comparator) that check a circuit's topology and plan rows of matched two-finger units with dummies and guard rings, a router of Metal3 tracks and Metal4 spines, and the KLayout script that draws a plan with IHP's pcells |
+| `render` | Layout pictures with KLayout's batch `LayoutView` |
+
 ### aispice-agent
 
 The language model side. It knows nothing about circuits.
@@ -90,6 +107,7 @@ Where circuits meet the agent.
 | `project` | The open folder. Every path is resolved inside it and refused if it escapes, including through symbolic links. Writes are atomic, and every save records a snapshot for undo |
 | `runner` | Picks a simulator, netlists the circuit (with the PDK's model header in a PDK project), runs it, keeps recent results |
 | `pdk` | The user's PDK registry (`pdks.toml`) and a project's `aispice.toml` |
+| `layout` | The layout flow on a project: opening its GDS files, run folders, hints from DRC and LVS failures, and the post-layout netlist check_specs simulates |
 | `workspace` | What all tools share: the project, the runner, and hooks a front end sets (approve an edit first, reload LTspice after a save) |
 | `tools` | The tools themselves. `aispice docs tools` prints the full reference |
 | `templates` | The verified reference circuits behind the `templates` tool, embedded in the binary |
@@ -99,7 +117,7 @@ Where circuits meet the agent.
 
 ### aispice (CLI)
 
-`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `macro`, `mcp`, `pdk`, `gmid`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
+`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `macro`, `mcp`, `pdk`, `gmid`, `layout`, `drc`, `lvs`, `extract`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
 
 ### Desktop app
 
@@ -122,6 +140,7 @@ Circuit files, simulator logs and tool output are data, not instructions. The de
 - **No shell.** Every process is started with an argument vector. The one remote shell command, for Spectre, is built from the user's configuration and values aispice generated and checked.
 - **Netlist policy.** Before a simulator runs, the netlist and everything it includes are checked against an allowlist of dot-commands. Control blocks, shell escapes, and includes outside the project are refused. The check reads a deck the way ngspice and Xyce do (both of their rules for which line a `+` continues), accepts include lines in one form both read alike, and the deck's own include lines are rewritten to name the checked file, so the simulator opens exactly what was approved; a test runs odd spellings through both simulators against a decoy outside the project.
 - **Compiled models.** A PDK's transistor models are compiled code (ngspice OSDI files, Xyce plugins). A netlist can never load one: `pre_osdi`, `osdi`, `codemodel` and includes of compiled libraries are refused everywhere. aispice loads them itself, outside the deck (in the start-up file it writes into the private run folder, or with Xyce's `-plugin`), and only from a PDK folder the user registered with `aispice pdk add`, after checking each resolved path is inside that folder. A project can only name a registered PDK in `aispice.toml`, never a path, and the agent cannot register one. `aispice.toml` is project content: it is read only as a regular file, never through a link, and its errors give a line and column, never its text. Registered folders are include roots whose files get every policy rule except the path heuristic their expressions (`w/ng`) would trip.
+- **Layout programs.** KLayout and Magic run only scripts aispice ships, written into a private run folder that is also their `HOME`, so no start-up file of the user's or a project's is read. Paths and names reach them as data (`-rd` values, environment variables), never as script text: cell, net and label names must match `[A-Za-z0-9_$.<>-]`, paths must be absolute without control characters, and each script checks them again. A project's GDS files must lie inside the project and are read first by aispice's own bounded reader (256 MiB, 64 levels of nesting); report databases, LVS results and extracted netlists are read with size and nesting limits, and each reader is fuzzed with random and mutated input.
 - **Approval.** Every tool that writes goes through one approval hook, so "ask before applying" covers edits, spec files, optimiser results and undo.
 - **Keys.** API keys stay in the keychain and are never logged, printed or included in errors.
 - **Desktop.** A strict content security policy, minimal Tauri capabilities, and SVG sanitising in the interface. Chat sessions are stored in the user's data folder, never in a project, so a cloned repository cannot plant a conversation.
@@ -141,5 +160,6 @@ See [SECURITY.md](../SECURITY.md) to report a problem.
 | Templates | `crates/aispice-tools/tests/templates.rs`: every template meets its specs on ngspice |
 | PDK | `crates/aispice-tools/tests/pdk_ihp.rs` with `AISPICE_PDK_IHP` set: IHP circuits drawn with the PDK symbols on ngspice and Xyce, and gm/Id sizing checked by simulation |
 | Macro packages | `crates/aispice-core/tests/macro_contract.rs`: the findings ChipLeap's validator also reports, on fixtures shared with it, and hashes that catch drift between the two copies |
+| Layout | `crates/aispice-layout/tests/` with `AISPICE_PDK_IHP`, KLayout and Magic: a Metal1 spacing violation found with its rule and place; generated mirror, pair, OTA and comparator DRC and LVS clean; a missing contact failing LVS on its net and a sliver failing DRC; the OTA extracted. `crates/aispice-tools/tests/layout_ihp.rs`: the OTA laid out, checked and simulated after layout through the tools. `malformed.rs`: every reader of untrusted files against random and mutated input |
 | Model behaviour | `aispice eval`: design tasks judged by simulation, with reference solutions checked in `crates/aispice-tools/tests/eval_suite.rs` |
 | Desktop app | `npm run test:desktop -w app`: the built app driven through tauri-driver and WebKitWebDriver, with a local mock model |

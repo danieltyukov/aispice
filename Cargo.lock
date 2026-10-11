@@ -38,6 +38,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "async-trait",
+ "base64 0.23.1",
  "clap",
  "predicates",
  "rmcp",
@@ -150,6 +151,7 @@ version = "0.2.0"
 dependencies = [
  "aispice-agent",
  "aispice-core",
+ "aispice-layout",
  "aispice-sim",
  "async-trait",
  "base64 0.23.1",

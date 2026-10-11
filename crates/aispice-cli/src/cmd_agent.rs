@@ -217,6 +217,7 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             "simulators": sims.iter().map(|(i, d)| serde_json::json!({"id": i, "found": d.found, "version": d.version, "path": d.path, "notes": d.notes})).collect::<Vec<_>>(),
             "ltspice_library": runner.ltspice_lib_dirs(),
             "pdks": pdk_lines(&runner),
+            "layout_tools": layout_lines(&runner),
             "providers": configured.iter().map(|k| serde_json::json!({"provider": k.provider, "source": k.source.to_string()})).collect::<Vec<_>>(),
             "config": Config::default_path(),
         });
@@ -264,6 +265,10 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
     for l in pdks {
         println!("  {l}");
     }
+    println!("\nLayout tools:");
+    for l in layout_lines(&runner) {
+        println!("  {l}");
+    }
     println!("\nModel providers with a key:");
     if configured.is_empty() {
         println!(
@@ -280,6 +285,28 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             .unwrap_or_else(|| "unavailable".into())
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// KLayout (DRC, LVS, generators, pictures) and Magic (extraction): where
+/// each is, or how to get it.
+fn layout_lines(runner: &aispice_tools::Runner) -> Vec<String> {
+    let programs = runner.config().layout_programs;
+    let line = |name: &str, found: Option<std::path::PathBuf>, hint: &str| match found {
+        Some(p) => format!("{name:8} {}", p.display()),
+        None => format!("{name:8} not found ({hint})"),
+    };
+    vec![
+        line(
+            "KLayout",
+            programs.klayout().ok(),
+            "0.30 or newer from klayout.de, or set klayout_path",
+        ),
+        line(
+            "Magic",
+            programs.magic().ok(),
+            "8.3.573 or newer from opencircuitdesign.com, or set magic_path",
+        ),
+    ]
 }
 
 pub fn keys_set(provider: &str) -> Result<ExitCode> {
