@@ -65,15 +65,11 @@ pub(crate) async fn run_variants(
         }
     };
     // One job per simulation: each variant, then its derived runs.
-    let mut jobs: Vec<(usize, Option<String>, Result<Netlist, String>)> = Vec::new();
-    for (i, (_, n)) in variants.iter().enumerate() {
-        jobs.push((i, None, Ok(n.clone())));
+    let mut jobs: Vec<Result<Netlist, String>> = Vec::new();
+    for (_, n) in &variants {
+        jobs.push(Ok(n.clone()));
         for s in sources {
-            jobs.push((
-                i,
-                Some(s.clone()),
-                stimulus::ac_on(n, s).map_err(|e| e.to_string()),
-            ));
+            jobs.push(stimulus::ac_on(n, s).map_err(|e| e.to_string()));
         }
     }
     let total = jobs.len();
@@ -82,7 +78,7 @@ pub(crate) async fn run_variants(
         if ctx.cancel.is_cancelled() {
             break;
         }
-        let futs = chunk.iter().map(|(_, _, n)| {
+        let futs = chunk.iter().map(|n| {
             let p = p.clone();
             async move {
                 match n {
