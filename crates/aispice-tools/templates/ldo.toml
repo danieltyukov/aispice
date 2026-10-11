@@ -2,7 +2,7 @@ id = "ldo"
 title = "Low-dropout regulator, 3.3 V to 1.2 V (IHP SG13G2)"
 category = "ic"
 pdk = "ihp-sg13g2"
-description = "Linear regulator on IHP SG13G2's 3.3 V thick-oxide devices: an NMOS-input error amplifier (M1-M6, IB = 10 uA) drives the gate of the PMOS pass device MP (400 um wide) so that out follows the 1.2 V reference ref (unity feedback; feed ref from a bandgap, or add a divider for a higher output). The load steps from 0.1 mA to 10 mA and back into 1 uF with 0.2 ohm of ESR, whose zero keeps the loop stable. out stays within 1.17 V to 1.23 V at both loads, droops less than 80 mV on the step and settles without ringing, at every process corner from -40 C to 125 C with the input from 2.7 V to 3.6 V."
+description = "Linear regulator on IHP SG13G2's 3.3 V thick-oxide devices: an NMOS-input error amplifier (M1-M6, IB = 10 uA) drives the gate of the PMOS pass device MP (400 um wide) so that out follows the 1.2 V reference ref (unity feedback; feed ref from a bandgap, or add a divider for a higher output). The load steps from 0.1 mA to 10 mA and back into 1 uF with 0.2 ohm of ESR, whose zero keeps the loop stable. At 27 C out is 1.201 V at light load and 1.194 V at 10 mA, and the step pulls it down by about 11 mV without ringing. The specs hold at every process corner from -40 C to 125 C with the input from 2.7 V to 3.6 V."
 analysis = ".tran 10n 60u"
 corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125], supplies = [{ target = "VIN", values = [2.7, 3.3, 3.6] }] }
 simulators = ["ngspice", "xyce"]

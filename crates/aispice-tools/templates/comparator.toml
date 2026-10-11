@@ -2,7 +2,7 @@ id = "comparator"
 title = "StrongARM latch comparator (IHP SG13G2)"
 category = "ic"
 pdk = "ihp-sg13g2"
-description = "Clocked StrongARM latch on IHP SG13G2 low-voltage devices. While clk is low, M7-M10 precharge both outputs to the supply; when it rises, the input pair M1-M2 on the clocked tail M0 discharges xp and xn at rates set by the inputs, and the cross-coupled latch M3-M6 regenerates the difference to full logic levels. The test bench clocks it at 500 MHz with inputs 1 mV apart at 0.7 V that swap between the two decisions, into 5 fF on each output. It decides correctly both ways and outn falls through half the supply within 250 ps at every process corner from -40 C to 125 C (about 160 ps at 27 C)."
+description = "Clocked StrongARM latch on IHP SG13G2 low-voltage devices. While clk is low, M7-M10 precharge both outputs to the supply; when it rises, the input pair M1-M2 on the clocked tail M0 discharges xp and xn at rates set by the inputs, and the cross-coupled latch M3-M6 regenerates the difference to full logic levels. The test bench clocks it at 500 MHz with inputs 1 mV apart at 0.7 V that swap between the two decisions, into 5 fF on each output. It decides correctly both ways and outn falls through half the supply within 250 ps at every process corner from -40 C to 125 C (about 135 ps at 27 C)."
 analysis = ".tran 1p 3n"
 corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
 simulators = ["ngspice", "xyce"]

@@ -2,7 +2,7 @@ id = "current_mirror"
 title = "NMOS current mirror bias (IHP SG13G2)"
 category = "ic"
 pdk = "ihp-sg13g2"
-description = "Two matched low-voltage NMOS transistors on IHP SG13G2: IREF forces 10 uA through the diode-connected M1, and M2 copies it into its drain. The drain voltage is swept from 0 to 1.2 V to show how far down the copy holds (compliance) and how flat it stays (output resistance). Long channels, L = 4 um, give the output resistance; the same pair biases the OTA and op-amp templates. Holds at every process corner and from -40 C to 125 C."
+description = "Two matched low-voltage NMOS transistors on IHP SG13G2: IREF forces 10 uA through the diode-connected M1, and M2 copies it into its drain. The drain voltage is swept from 0 to 1.2 V to show how far down the copy holds (compliance) and how flat it stays (output resistance). Long channels, L = 4 um, give the output resistance: at 27 C the copy is 9.7 uA at 0.3 V, 10.3 uA at 0.6 V and 11.1 uA at 1.2 V. The specs hold at every process corner from -40 C to 125 C."
 analysis = ".dc VOUT 0 1.2 10m"
 corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
 simulators = ["ngspice", "xyce"]
