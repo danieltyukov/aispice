@@ -7,6 +7,7 @@
 
 use crate::project::{Project, ProjectError};
 use crate::runner::Runner;
+use aispice_agent::{Access, Tool};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -24,6 +25,14 @@ pub type AfterSave = Arc<dyn Fn(&Path) + Send + Sync>;
 pub struct Hooks {
     pub approver: Option<Arc<dyn Approver>>,
     pub after_save: Option<AfterSave>,
+}
+
+/// One file a tool writes into the project.
+#[derive(Debug, Clone)]
+pub struct FileWrite {
+    /// Project-relative path.
+    pub rel: String,
+    pub bytes: Vec<u8>,
 }
 
 pub struct Workspace {
@@ -99,6 +108,53 @@ impl Workspace {
             Some(a) => a.approve(circuit, summary, diff).await,
             None => true,
         }
+    }
+
+    /// Write files of the user's on behalf of a tool. Only a tool that
+    /// declares [`Access::Edit`] may; each path must pass the project's
+    /// output resolver (inside the project, no `..`, not through a link);
+    /// the user approves the whole set once, as for an edit; and each file
+    /// is recorded in the history so it can be undone. Returns the
+    /// project-relative paths written.
+    pub async fn write_files(
+        &self,
+        tool: &dyn Tool,
+        files: &[FileWrite],
+        summary: &str,
+        preview: &str,
+    ) -> Result<Vec<String>, String> {
+        let names: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        if tool.access() != Access::Edit {
+            return Err(format!(
+                "{} is a read-only tool and may not write {}",
+                tool.spec().name,
+                names.join(", ")
+            ));
+        }
+        let p = self.project().map_err(|e| e.to_string())?;
+        let mut targets = Vec::new();
+        for f in files {
+            let path = p.resolve_output(&f.rel).map_err(|e| e.to_string())?;
+            targets.push((p.relative(&path), path, &f.bytes));
+        }
+        let Some((first, _, _)) = targets.first() else {
+            return Ok(Vec::new());
+        };
+        if !self.approve(first, summary, preview).await {
+            return Err(format!("the user declined writing {}", names.join(", ")));
+        }
+        let mut written = Vec::new();
+        for (rel, path, bytes) in targets {
+            p.save_file_tracked(&rel, bytes, summary)
+                .map_err(|e| e.to_string())?;
+            // The front end's hook reloads schematics (in LTspice too); a
+            // layout or its record is no schematic.
+            if rel.to_ascii_lowercase().ends_with(".asc") {
+                self.after_save(&path);
+            }
+            written.push(rel);
+        }
+        Ok(written)
     }
 
     pub fn after_save(&self, path: &Path) {

@@ -4,8 +4,7 @@
 
 use super::schematic_tools::spec;
 use crate::layout::{self, GdsFile, LayoutEnv};
-use crate::project::atomic_write;
-use crate::workspace::Workspace;
+use crate::workspace::{FileWrite, Workspace};
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
 use aispice_layout::drc::{self, DrcChecks, DrcReport};
@@ -128,6 +127,10 @@ pub struct DrcTool {
 
 #[async_trait]
 impl Tool for DrcTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<DrcInput>(
             "drc",
@@ -137,12 +140,12 @@ impl Tool for DrcTool {
 
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
         let input: DrcInput = input!(input);
-        let env = tri!(layout::env(&self.ws));
-        let gds = tri!(layout::open_gds(
-            &env.project,
+        let gds = tri!(layout::open_project_gds(
+            &self.ws,
             &input.layout,
             input.cell.as_deref()
         ));
+        let env = tri!(layout::env(&self.ws));
         let checks = DrcChecks {
             extra: input.extra,
             antenna: input.antenna,
@@ -178,6 +181,10 @@ pub struct LvsTool {
 
 #[async_trait]
 impl Tool for LvsTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<LvsInput>(
             "lvs",
@@ -187,12 +194,12 @@ impl Tool for LvsTool {
 
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
         let input: LvsInput = input!(input);
-        let env = tri!(layout::env(&self.ws));
-        let gds = tri!(layout::open_gds(
-            &env.project,
+        let gds = tri!(layout::open_project_gds(
+            &self.ws,
             &input.layout,
             input.cell.as_deref()
         ));
+        let env = tri!(layout::env(&self.ws));
         let report = tri!(run_lvs(&self.ws, &env, &gds, &input.circuit, &ctx.cancel).await);
         let mut t = format!(
             "{} against {}: {}",
@@ -231,6 +238,10 @@ pub struct ExtractTool {
 
 #[async_trait]
 impl Tool for ExtractTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<ExtractInput>(
             "extract",
@@ -240,12 +251,12 @@ impl Tool for ExtractTool {
 
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
         let input: ExtractInput = input!(input);
-        let env = tri!(layout::env(&self.ws));
-        let gds = tri!(layout::open_gds(
-            &env.project,
+        let gds = tri!(layout::open_project_gds(
+            &self.ws,
             &input.layout,
             input.cell.as_deref()
         ));
+        let env = tri!(layout::env(&self.ws));
         let (_, dir) = tri!(layout::run_dir(&env.project));
         let ex = tri!(
             extract::run(
@@ -333,6 +344,10 @@ pub struct LayoutTool {
 
 #[async_trait]
 impl Tool for LayoutTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<LayoutInput>("layout", LAYOUT_DESCRIPTION)
     }
@@ -366,17 +381,18 @@ impl LayoutTool {
                 "generate needs a template: current_mirror, diff_pair, ota5t, two_stage or comparator",
             );
         };
-        let env = tri!(layout::env(&self.ws));
         let cell = input
             .cell
             .clone()
             .or_else(|| cell_from(&circuit))
             .unwrap_or_else(|| template.name().to_string());
-        let (netlist, _, _) = tri!(self.ws.runner.netlist_for(&env.project, &circuit));
-        let roles = input.roles.clone().unwrap_or_default();
-        let mut params = input.params.clone().unwrap_or_default();
+        if let Err(e) = aispice_layout::tools::check_name("cell", &cell) {
+            return ToolOutput::error(e.to_string());
+        }
+        let p = tri!(self.ws.project());
 
-        // Where it goes: beside the circuit unless named.
+        // Where it goes: beside the circuit unless named. Both files go
+        // through the project's output resolver now, before any work.
         let out_rel = input.layout.clone().unwrap_or_else(|| {
             let dir = Path::new(&circuit)
                 .parent()
@@ -388,19 +404,27 @@ impl LayoutTool {
                 format!("{dir}/{cell}.gds")
             }
         });
-        let out = tri!(env.project.resolve(&out_rel));
+        let out = tri!(p.resolve_output(&out_rel));
         if !out
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("gds"))
         {
             return ToolOutput::error(format!("{out_rel} must be a .gds file"));
         }
-        let sidecar = LayoutMeta::path_for(&out, &cell);
-        if out.exists() && !sidecar.is_file() {
+        let rel = p.relative(&out);
+        let sidecar_rel = p.relative(&LayoutMeta::path_for(&out, &cell));
+        let sidecar = tri!(p.resolve_output(&sidecar_rel));
+        // A file of the user's under that name is never replaced: only a
+        // layout this tool made (it has its record beside it).
+        if out.exists() && !std::fs::symlink_metadata(&sidecar).is_ok_and(|m| m.is_file()) {
             return ToolOutput::error(format!(
-                "{out_rel} exists and was not made by the layout tool; name another file with `layout`"
+                "{rel} exists and was not made by the layout tool; name another file with `layout`"
             ));
         }
+        let env = tri!(layout::env(&self.ws));
+        let (netlist, _, _) = tri!(self.ws.runner.netlist_for(&env.project, &circuit));
+        let roles = input.roles.clone().unwrap_or_default();
+        let mut params = input.params.clone().unwrap_or_default();
 
         // Draw and check in a run folder; only the result goes into the
         // project. A failed DRC that a parameter addresses is drawn again.
@@ -444,23 +468,26 @@ impl LayoutTool {
         };
 
         let summary = generated.summary();
-        let rel = env.project.relative(&out);
-        if !self
-            .ws
-            .approve(&rel, &format!("Write layout {rel}"), &summary)
-            .await
-        {
-            return ToolOutput::error(format!("the user declined writing {rel}"));
-        }
         let bytes = tri!(std::fs::read(&tmp));
-        tri!(atomic_write(&out, &bytes));
         let meta_json = serde_json::to_string_pretty(&generated.meta).unwrap_or_default();
-        tri!(atomic_write(&sidecar, meta_json.as_bytes()));
-        self.ws.after_save(&out);
+        let files = [
+            FileWrite {
+                rel: rel.clone(),
+                bytes,
+            },
+            FileWrite {
+                rel: sidecar_rel.clone(),
+                bytes: meta_json.into_bytes(),
+            },
+        ];
+        tri!(
+            self.ws
+                .write_files(self, &files, &format!("Layout {rel}"), &summary)
+                .await
+        );
 
         let mut t = format!(
-            "{log}Wrote {rel} and {}.\n{summary}",
-            env.project.relative(&sidecar)
+            "{log}Wrote {rel} and {sidecar_rel} (undo either with the history tool).\n{summary}"
         );
         let mut data = json!({"layout": rel, "meta": generated.meta, "attempts": k});
         if let Some((drc, lvs)) = checks {
@@ -483,8 +510,12 @@ impl LayoutTool {
         let Some(rel) = input.layout.clone() else {
             return ToolOutput::error("render needs the layout (a GDS file) to draw");
         };
+        let gds = tri!(layout::open_project_gds(
+            &self.ws,
+            &rel,
+            input.cell.as_deref()
+        ));
         let env = tri!(layout::env(&self.ws));
-        let gds = tri!(layout::open_gds(&env.project, &rel, input.cell.as_deref()));
         let [w, h] = input.size.unwrap_or([1200, 900]);
         let png = tri!(
             render::png(

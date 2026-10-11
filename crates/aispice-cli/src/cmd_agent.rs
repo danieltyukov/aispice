@@ -373,9 +373,17 @@ pub fn docs_tools() -> Result<ExitCode> {
     println!(
         "# Tools\n\nGenerated with `aispice docs tools`. The desktop app's agent and the MCP server expose the same tools.\n"
     );
-    for s in reg.specs() {
+    for (s, access) in reg.specs_with_access() {
+        let class = match access {
+            aispice_agent::Access::ReadOnly => {
+                "Read-only: writes nothing of yours, only aispice's own folders."
+            }
+            aispice_agent::Access::Edit => {
+                "Edits your files: each write is approved in ask-before-applying mode and can be undone."
+            }
+        };
         println!(
-            "## `{}`\n\n{}\n\n<details><summary>Input schema</summary>\n\n```json\n{}\n```\n\n</details>\n",
+            "## `{}`\n\n{}\n\n{class}\n\n<details><summary>Input schema</summary>\n\n```json\n{}\n```\n\n</details>\n",
             s.name,
             s.description,
             serde_json::to_string_pretty(&s.input_schema)?

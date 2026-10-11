@@ -5,7 +5,7 @@
 
 use crate::project::Project;
 use crate::workspace::Workspace;
-use aispice_core::netlist::{Line, Netlist};
+use aispice_core::netlist::{Line, Netlist, Policy, resolve_include};
 use aispice_layout::drc::DrcReport;
 use aispice_layout::extract::{self, Extracted};
 use aispice_layout::gds;
@@ -25,6 +25,17 @@ pub struct LayoutEnv {
     pub project: Arc<Project>,
     pub programs: Programs,
     pub files: PdkLayoutFiles,
+}
+
+/// The registered PDK folders, which layout tools may read from.
+pub fn pdk_roots(ws: &Workspace) -> Vec<PathBuf> {
+    ws.runner.config().pdks.trusted_roots()
+}
+
+/// Open a GDS of the open project (see [`open_gds`]).
+pub fn open_project_gds(ws: &Workspace, rel: &str, cell: Option<&str>) -> Result<GdsFile, String> {
+    let p = ws.project().map_err(|e| e.to_string())?;
+    open_gds(&p, &pdk_roots(ws), rel, cell)
 }
 
 /// The layout setup of the open project, or why there is none.
@@ -54,11 +65,29 @@ pub struct GdsFile {
     pub meta: Option<LayoutMeta>,
 }
 
-/// Open a project's GDS file: inside the project, a GDS by its header, not
-/// too large or deep, and a cell that is in it (the one top cell by
-/// default).
-pub fn open_gds(p: &Project, rel: &str, cell: Option<&str>) -> Result<GdsFile, String> {
-    let path = p.resolve(rel).map_err(|e| e.to_string())?;
+/// Open a GDS file a tool was asked to read. It is resolved by the netlist
+/// policy's rules (no `~`, drive or `..`; symlinks followed) and must lie
+/// inside the project, outside `.aispice/`, or inside a registered PDK
+/// folder (`pdk_roots`). It must be a GDS by its header, not too large or
+/// deep, with the cell asked for (the one top cell by default).
+pub fn open_gds(
+    p: &Project,
+    pdk_roots: &[PathBuf],
+    rel: &str,
+    cell: Option<&str>,
+) -> Result<GdsFile, String> {
+    let policy = Policy {
+        base_dir: p.root().to_path_buf(),
+        allowed_dirs: Vec::new(),
+        allow_control_blocks: false,
+        trusted_dirs: pdk_roots.to_vec(),
+    };
+    let path = resolve_include(rel, p.root(), &policy)
+        .map_err(|e| format!("layout {e}"))?
+        .ok_or_else(|| format!("{rel} does not exist"))?;
+    if path.starts_with(p.root().join(crate::project::STATE_DIR)) {
+        return Err(format!("{rel} is inside aispice's own .aispice folder"));
+    }
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -89,8 +118,13 @@ pub fn open_gds(p: &Project, rel: &str, cell: Option<&str>) -> Result<GdsFile, S
         Ok(m) if m.is_file() => Some(LayoutMeta::read(&sidecar)?),
         _ => None,
     };
+    let rel = if path.starts_with(p.root()) {
+        p.relative(&path)
+    } else {
+        path.display().to_string()
+    };
     Ok(GdsFile {
-        rel: p.relative(&path),
+        rel,
         path,
         cell,
         meta,
@@ -201,8 +235,8 @@ pub async fn post_layout_netlist(
     input: &PostLayout,
     cancel: &CancellationToken,
 ) -> Result<(Netlist, Vec<String>, Extracted), String> {
+    let gds = open_project_gds(ws, &input.layout, input.cell.as_deref())?;
     let env = env(ws)?;
-    let gds = open_gds(&env.project, &input.layout, input.cell.as_deref())?;
     let (netlist, std_libs, _) = ws
         .runner
         .netlist_for(&env.project, circuit)

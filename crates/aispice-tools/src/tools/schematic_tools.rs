@@ -62,6 +62,10 @@ pub struct ListCircuits {
 
 #[async_trait]
 impl Tool for ListCircuits {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<NoInput>(
             "list_circuits",
@@ -93,6 +97,10 @@ pub struct ReadSchematic {
 
 #[async_trait]
 impl Tool for ReadSchematic {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<CircuitInput>(
             "read_schematic",
@@ -147,6 +155,10 @@ The edit is saved immediately (the user can undo it) and LTspice reloads if it i
 
 #[async_trait]
 impl Tool for EditSchematic {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<EditInput>("edit_schematic", EDIT_DESCRIPTION)
     }
@@ -346,6 +358,10 @@ pub struct CreateSchematic {
 
 #[async_trait]
 impl Tool for CreateSchematic {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<CreateInput>(
             "create_schematic",
@@ -446,6 +462,10 @@ pub struct Lint {
 
 #[async_trait]
 impl Tool for Lint {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<CircuitInput>(
             "lint",
@@ -489,6 +509,10 @@ pub struct NetlistTool {
 
 #[async_trait]
 impl Tool for NetlistTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<CircuitInput>(
             "netlist",
@@ -556,6 +580,10 @@ pub struct History {
 
 #[async_trait]
 impl Tool for History {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<HistoryInput>(
             "history",
@@ -642,6 +670,10 @@ pub struct Symbols {
 
 #[async_trait]
 impl Tool for Symbols {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SymbolsInput>(
             "symbols",

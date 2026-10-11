@@ -203,6 +203,19 @@ impl fmt::Debug for ToolContext {
     }
 }
 
+/// What a tool may do to the user's files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    /// Reads the project. Writes nothing of the user's: at most aispice's
+    /// own state and run folders under `.aispice/`, or its cache.
+    ReadOnly,
+    /// Writes or overwrites files of the user's. Every such write is
+    /// approved by the user in ask-before-applying mode and recorded for
+    /// undo.
+    Edit,
+}
+
 /// A tool. Failures are reported in the returned `ToolOutput` (with
 /// `is_error`), never by panicking, so the model can read the error and try
 /// again.
@@ -210,6 +223,13 @@ impl fmt::Debug for ToolContext {
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
     async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput;
+
+    /// What the tool may do to the user's files. A tool that does not say
+    /// is taken to write, so it gets the approval prompt; the project's
+    /// write path refuses a write from a tool that says it only reads.
+    fn access(&self) -> Access {
+        Access::Edit
+    }
 }
 
 /// Deserialize a tool input into its typed form. The error is a ready-made
@@ -263,6 +283,11 @@ impl Registry {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.tools.iter().map(|t| t.spec()).collect()
+    }
+
+    /// Every tool's spec with its access class.
+    pub fn specs_with_access(&self) -> Vec<(ToolSpec, Access)> {
+        self.tools.iter().map(|t| (t.spec(), t.access())).collect()
     }
 
     pub fn names(&self) -> Vec<String> {

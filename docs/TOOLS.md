@@ -6,6 +6,8 @@ Generated with `aispice docs tools`. The desktop app's agent and the MCP server 
 
 List the circuit files in the open project (.asc schematics and SPICE netlists), newest first. Only needed when you do not know the file name: when the user names a file, read it directly.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -20,6 +22,8 @@ List the circuit files in the open project (.asc schematics and SPICE netlists),
 ## `read_schematic`
 
 Describe a schematic in circuit terms: every component with its value, its attributes in brackets and the net on each pin, every net with its members, the directives, and electrical rule check results. Read a circuit before editing it. The value column is what set_value changes; for an op-amp or other subcircuit it is the subcircuit's name (opamp), and parameters such as [SpiceLine2: GBW=10Meg] are changed with set_attr on that attribute. The pin names listed for each part are the ones edit_schematic expects.
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -44,6 +48,8 @@ Describe a schematic in circuit terms: every component with its value, its attri
 
 Change a schematic with circuit-level edits. Refer to parts by instance name (R1) and to pins as PART.PIN with the pin names read_schematic lists (R1.A, R1.2, Q1.B, V1.+, and U1.invin, U1.noninvin, U1.out for the built-in op-amp). Never compute coordinates: `connect` routes wires itself and only ever joins the two nets you name (it falls back to net labels when no clean route exists), `connect_to_net` attaches a pin to a named net or to ground (`0`), and `add_component` without `at` finds free space near `near`. Typical sequence for a new part: add_component, then connect or connect_to_net for each pin. Two-terminal parts are vertical by default; orient R90 makes them horizontal. Directives (.tran, .ac, .op, .param, .meas, .step) go in with add_directive.
 The edit is saved immediately (the user can undo it) and LTspice reloads if it is open. The result lists what changed, a semantic diff, and any electrical rule problems the edit introduced; fix those before simulating.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
@@ -217,6 +223,8 @@ The edit is saved immediately (the user can undo it) and LTspice reloads if it i
 
 Create a new LTspice schematic in the project. Give a SPICE netlist to have it drawn as a readable schematic (parts placed, wires routed, checked to netlist back to the same circuit), or build it from an empty sheet with the edits edit_schematic accepts, or both (edits apply after the drawing). Refuses to overwrite an existing file.
 
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -388,6 +396,8 @@ Create a new LTspice schematic in the project. Give a SPICE netlist to have it d
 
 Run electrical rule checks on a schematic: missing ground, floating pins, dangling wires, duplicate names, missing values, shorted parts, parallel voltage sources, nets with no DC path to ground, missing analysis directive. Run it after edits and before simulating.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -411,6 +421,8 @@ Run electrical rule checks on a schematic: missing ground, floating pins, dangli
 
 Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models), with the PDK's model header in a PDK project. Useful to check exactly what will be simulated.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -433,6 +445,8 @@ Show the SPICE netlist of a schematic, derived the way LTspice does it (instance
 ## `history`
 
 List a schematic's saved versions, or undo, redo or restore one. Every edit made by aispice and every change made in LTspice in between is a version.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
@@ -469,6 +483,8 @@ List a schematic's saved versions, or undo, redo or restore one. Every edit made
 ## `render_schematic`
 
 Draw a schematic as an image (PNG by default) so you can look at its layout: overlapping parts, crossing wires, unreadable labels. For connectivity, read_schematic is more precise than looking.
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -510,6 +526,8 @@ Draw a schematic as an image (PNG by default) so you can look at its layout: ove
 
 Search the symbols available for add_component: aispice's built-in set and, when installed, LTspice's library (thousands of vendor parts such as LT1001 or ADA4898). Shows each symbol's name, prefix and pin names in SPICE order.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -536,6 +554,8 @@ Search the symbols available for add_component: aispice's built-in set and, when
 
 List the simulators installed on this machine (ngspice, LTspice, Xyce, Spectre) with versions and how each will run.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -550,6 +570,8 @@ List the simulators installed on this machine (ngspice, LTspice, Xyce, Spectre) 
 ## `simulate`
 
 Simulate a circuit and report what came back: analyses, vector names, operating point, the simulator's own .meas results, warnings and errors, plus any measurements you ask for. Fix lint errors first. Use the run id with measure, plot and read_waveform. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -589,6 +611,8 @@ Simulate a circuit and report what came back: analyses, vector names, operating 
 
 Take measurements on a simulation result without re-running it. Without a run id it uses the circuit's latest run, and simulates the circuit again (with that run's analysis) when the circuit has changed since, so numbers always describe the circuit as it is; the answer says when that happened. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -621,6 +645,8 @@ Take measurements on a simulation result without re-running it. Without a run id
 ## `check_specs`
 
 Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
@@ -708,6 +734,8 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
 
 Plot waveforms from a simulation as an image: time-domain traces, or a Bode plot (magnitude in dB and phase) for AC data. Use it to look at behaviour; use measure for numbers. Without a run id it uses the circuit's latest run, simulating again first if the circuit has changed since.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -753,6 +781,8 @@ Plot waveforms from a simulation as an image: time-domain traces, or a Bode plot
 
 Read sampled values of signals from a simulation as a table (evenly spaced over a range). For AC data values are magnitude in dB and phase in degrees. Without a run id it uses the circuit's latest run, simulating again first if the circuit has changed since.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -795,6 +825,8 @@ Read sampled values of signals from a simulation as a table (evenly spaced over 
 ## `poles_zeros`
 
 Pole-zero analysis of a transfer function with ngspice's .pz: the poles and zeros of V(output)/V(input), or V(output)/I(input) with transfer `cur`, in Hz, with f0, Q and damping ratio for each complex pair and the corner of each real root, and whether the circuit is stable (any pole in the right half-plane means it is not). Nonlinear parts are linearised at the operating point, as in an AC analysis. The circuit's own analyses, .meas, .step and .save lines are left out of this run, and the file is not changed. Needs ngspice: LTspice and Xyce have no .pz analysis.
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -870,6 +902,8 @@ Pole-zero analysis of a transfer function with ngspice's .pz: the poles and zero
 
 Check bias: the DC operating point with each semiconductor device's small-signal values, for sizing transistors (the gm/Id method). MOSFETs: region (cutoff, subthreshold, triode, saturation), id, vgs, vds, vbs, vth (von for level 1 to 3), vdsat, gm, gds, gmbs, gm/id, intrinsic gain gm/gds, cgs and cgd when the model has them, W and L. BJTs: region (active, saturation, cutoff, reverse active), ic, ib, beta, vbe, vce, gm, rpi, ro. Diodes: id, vd, rd. Also node voltages and source currents. Devices inside subcircuits are named by path, as X1.M7. Points out devices in triode or cutoff that look like they should be saturated, such as a current-mirror output. Values are in each device's own polarity (for a PMOS, vgs is vsg). The circuit's own analyses, .meas, .step and .save lines are left out of this run and the file is not changed. Device values need ngspice; without it only node voltages and source currents come back, from LTspice or Xyce.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -914,6 +948,8 @@ Check bias: the DC operating point with each semiconductor device's small-signal
 ## `sweep`
 
 Sweep component values or .param values (several parameters give every combination, at most 200 runs) and tabulate measurements for each. Works with every simulator. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -1070,6 +1106,8 @@ Sweep component values or .param values (several parameters give every combinati
 
 Monte Carlo analysis: vary component values within their tolerances, device parameters through the PDK's mismatch or statistical model sections (`mismatch`), or both; simulate each sample and report the yield against the specs with per-spec spread and the worst run. Seeded and reproducible. With corners, every corner runs the same samples and reports its own yield. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.
 
+Read-only: writes nothing of yours, only aispice's own folders.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -1219,6 +1257,8 @@ Monte Carlo analysis: vary component values within their tolerances, device para
 ## `optimize`
 
 Size component values to meet a spec table with the simulator in the loop (Nelder-Mead or CMA-ES over log-scaled ranges), then round to standard E-series values and re-check. You choose the parameters and sensible ranges; the optimizer does the search. With corners it optimizes the worst case over every corner; the budget counts candidates, each simulated at every corner. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 
@@ -1406,6 +1446,8 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
 
 Verified reference circuits to start a design from: passive and active filters, op-amp and transistor gain stages, voltage references, regulators and power switching, an oscillator, a logic level shifter and a photodiode front end. Every template is simulated in aispice's test suite and meets its own spec table. `list` shows the library (filter by category or by words), `show` gives a template's design equations, the parts usually changed, its spec table and the parts and nets of the schematic, and `use` copies it into the project as a new circuit with its specs saved beside it, ready for check_specs and then optimize. `use` refuses to overwrite existing files.
 
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -1466,6 +1508,8 @@ Verified reference circuits to start a design from: passive and active filters, 
 
 Process design kits (PDKs) for transistor-level IC design. `list` shows the PDKs the user has registered and the one the open project uses. `show` describes one: its folder and commit, the compiled device models it loads, its corner libraries with their sections, and the model header aispice adds to every netlist (`.lib <corner library> mos_tt` and the like). `devices` lists the devices with the symbol to place (for example sg13g2\sg13_lv_nmos), the pins in order and the default parameters; set W, L, fingers (ng) and multiplier (m) through the SpiceLine attribute, e.g. `w=2u l=0.5u ng=2 m=1`. `use` makes the open project use a registered PDK by writing aispice.toml. Only the user can register a PDK (with `aispice pdk add`). A PDK project simulates on ngspice or Xyce; LTspice cannot load PDK models.
 
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
 <details><summary>Input schema</summary>
 
 ```json
@@ -1520,6 +1564,8 @@ Process design kits (PDKs) for transistor-level IC design. `list` shows the PDKs
 ## `gm_id`
 
 Size a PDK transistor with the gm/Id method. Give the device, the gm/Id you want (S/A), the channel length, and the drain current (or a width); get back W, the number of fingers, VGS, Vth, gm, gds, intrinsic gain gm/gds, Cgg and fT at that bias, and the SpiceLine to give the transistor (`w=... l=... ng=... m=1`). VDS defaults to half the supply. A lookup table made by sweeping the device on ngspice over L, VDS and VGS with the PDK's own models (typical corner) gives the first answer; the first use of a device builds its table (a few seconds) and later uses read it from the cache. The answer is then checked by simulating the device at that size and corrected, since the models do not scale exactly with width. Without gm_id and l, it reports what the table covers. Check the whole circuit by simulating it.
+
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
@@ -1600,6 +1646,8 @@ Size a PDK transistor with the gm/Id method. Give the device, the gm/Id you want
 ## `check_macro`
 
 Check a macro package before a chip places it. A macro package (macro/v1) is the format aispice and ChipLeap use to hand hardened blocks to each other: macro.toml plus GDS, LEF, liberty, a Verilog model, a SPICE netlist, a measured spec table for analog blocks, and DRC and LVS evidence. The check covers macro.toml against its schema, the files each kind needs, every pin across the GDS, LEF, liberty, Verilog and SPICE views with its direction, the size, timing arcs of digital outputs, measured specs against their limits, and evidence that passes, matches the package files and names the same PDK. Returns every finding with its rule id, severity, file and message; the package passes when there are no errors. ChipLeap's `chipleap macro check` reports the same findings.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
 <details><summary>Input schema</summary>
 

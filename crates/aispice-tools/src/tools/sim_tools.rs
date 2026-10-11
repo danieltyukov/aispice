@@ -372,6 +372,10 @@ pub struct NoArgs {}
 
 #[async_trait]
 impl Tool for Simulators {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<NoArgs>(
             "simulators",
@@ -422,6 +426,10 @@ pub struct Simulate {
 
 #[async_trait]
 impl Tool for Simulate {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SimulateInput>(
             "simulate",
@@ -510,6 +518,10 @@ pub struct MeasureTool {
 
 #[async_trait]
 impl Tool for MeasureTool {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<MeasureInput>(
             "measure",
@@ -677,6 +689,10 @@ fn spec_text(report: &SpecReport) -> String {
 
 #[async_trait]
 impl Tool for CheckSpecs {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SpecsInput>(
             "check_specs",
@@ -858,6 +874,10 @@ pub struct Plot {
 
 #[async_trait]
 impl Tool for Plot {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<PlotInput>(
             "plot",
@@ -931,6 +951,10 @@ pub struct ReadWaveform {
 
 #[async_trait]
 impl Tool for ReadWaveform {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<WaveInput>(
             "read_waveform",
@@ -1045,6 +1069,10 @@ pub struct Sweep {
 
 #[async_trait]
 impl Tool for Sweep {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<SweepInput>(
             "sweep",
@@ -1164,6 +1192,10 @@ const MAX_MC_RUNS: usize = 500;
 
 #[async_trait]
 impl Tool for MonteCarlo {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<MonteCarloInput>(
             "monte_carlo",
@@ -1439,6 +1471,10 @@ pub struct Optimize {
 
 #[async_trait]
 impl Tool for Optimize {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::Edit
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<OptimizeInput>(
             "optimize",
@@ -1890,6 +1926,10 @@ fn roots_json(roots: &[Root]) -> Vec<Value> {
 
 #[async_trait]
 impl Tool for PolesZeros {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<PolesZerosInput>(
             "poles_zeros",
@@ -2089,6 +2129,10 @@ impl OperatingPoint {
 
 #[async_trait]
 impl Tool for OperatingPoint {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<OperatingPointInput>(
             "operating_point",
