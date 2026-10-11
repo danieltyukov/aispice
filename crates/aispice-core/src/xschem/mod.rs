@@ -15,6 +15,7 @@ mod builtin;
 pub mod file;
 pub mod netlist;
 pub mod props;
+pub mod safety;
 pub mod symbol;
 pub mod tcl;
 
