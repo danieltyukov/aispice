@@ -7,6 +7,7 @@ mod cmd_layout;
 mod cmd_macro;
 mod cmd_pdk;
 mod cmd_sim;
+mod cmd_xschem;
 mod mcp;
 
 use anyhow::Result;
@@ -122,6 +123,13 @@ enum Command {
         /// How many candidate layouts to try: 1 is quick, 3 searches widely.
         #[arg(long, default_value_t = 2)]
         effort: u8,
+    },
+    /// Convert between xschem schematics (.sch) and LTspice schematics
+    /// (.asc), proving the circuit did not change: exit code 1 when a proof
+    /// finds a difference.
+    Xschem {
+        #[command(subcommand)]
+        action: XschemAction,
     },
     /// Serve aispice's tools over the Model Context Protocol on stdio.
     Mcp {
@@ -343,6 +351,35 @@ enum LayoutAction {
 }
 
 #[derive(Subcommand)]
+enum XschemAction {
+    /// Import an xschem schematic as a readable .asc.
+    Import {
+        /// The xschem schematic (.sch).
+        file: PathBuf,
+        /// The schematic to write (default: the same name with .asc).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Replace the output file if it exists.
+        #[arg(long)]
+        force: bool,
+        /// How many candidate layouts to try: 1 is quick, 3 searches widely.
+        #[arg(long, default_value_t = 2)]
+        effort: u8,
+    },
+    /// Export an .asc as an xschem schematic.
+    Export {
+        /// The LTspice schematic (.asc).
+        file: PathBuf,
+        /// The xschem schematic to write (default: the same name with .sch).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Replace the output file if it exists.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum DocsWhat {
     /// Markdown reference of every tool.
     Tools,
@@ -480,6 +517,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             force,
             effort,
         } => cmd_files::draw(&ctx, &file, &output, force, effort),
+        Command::Xschem { action } => match action {
+            XschemAction::Import {
+                file,
+                output,
+                force,
+                effort,
+            } => cmd_xschem::import(&ctx, &file, output.as_deref(), force, effort),
+            XschemAction::Export {
+                file,
+                output,
+                force,
+            } => cmd_xschem::export(&ctx, &file, output.as_deref(), force),
+        },
         Command::Mcp { project } => {
             let dir = match project {
                 Some(p) => p,
