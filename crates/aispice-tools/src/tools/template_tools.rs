@@ -96,7 +96,7 @@ fn ic_text(t: &Template) -> String {
     if let Some(layout) = &t.layout {
         s.push_str(&format!(
             "Layout: the {} generator draws this block, with the roles {}.\n",
-            layout.generator,
+            layout.generator.name(),
             serde_json::to_string(&layout.roles).unwrap_or_default()
         ));
     }

@@ -2,7 +2,8 @@
 //! "verified": every template, copied into a project the way an agent would,
 //! netlists without warnings and meets every spec in its own table on
 //! ngspice, with room to spare. The simulation test is skipped when ngspice
-//! is missing.
+//! is missing. IC templates need their PDK and are simulated in
+//! `templates_ihp.rs`.
 
 use aispice_agent::{Tool, ToolContext, ToolOutput};
 use aispice_sim::spec::{evaluate, parse_specs};
@@ -151,6 +152,117 @@ async fn use_creates_the_circuit_and_specs_and_never_overwrites() {
     }
 }
 
+/// A project beside a fake IHP PDK: registered or not, and used by the
+/// project or not.
+fn pdk_workspace(register: bool, use_it: bool) -> (tempfile::TempDir, Arc<Workspace>) {
+    use aispice_tools::pdk::{PROJECT_FILE, Registry};
+    let dir = tempfile::tempdir().unwrap();
+    aispice_sim::pdk::fake_ihp(dir.path());
+    let mut pdks = Registry::default();
+    if register {
+        pdks.add("sg13", &dir.path().join("IHP-Open-PDK")).unwrap();
+    }
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    if use_it {
+        std::fs::write(root.join(PROJECT_FILE), "pdk = \"sg13\"\n").unwrap();
+    }
+    let ws = Workspace::new();
+    ws.runner.set_config(aispice_tools::RunnerConfig {
+        pdks,
+        ..Default::default()
+    });
+    ws.set_project(Project::open(&root, ProjectOptions::default()).unwrap());
+    (dir, Arc::new(ws))
+}
+
+/// An IC template is drawn in its PDK's devices: `use` refuses it, writing
+/// nothing, until the project uses a registered PDK of that kind, and says
+/// what to do. Then it is copied with its corners and layout generator.
+#[tokio::test]
+async fn an_ic_template_needs_a_project_on_its_pdk() {
+    let input = json!({"action": "use", "id": "ota5t", "circuit": "ota.asc"});
+    for (register, hint) in [
+        (false, "no ihp-sg13g2 PDK is registered"),
+        (
+            true,
+            "make it use the registered sg13 first (pdk tool, action use)",
+        ),
+    ] {
+        let (dir, ws) = pdk_workspace(register, false);
+        let out = call(&ws, input.clone()).await;
+        let text = out.text_content();
+        assert!(out.is_error, "{text}");
+        assert!(text.contains("this project uses no PDK"), "{text}");
+        assert!(text.contains(hint), "{text}");
+        assert!(text.contains("nothing was written"), "{text}");
+        let root = dir.path().join("project");
+        assert!(!root.join("ota.asc").exists() && !root.join("ota.specs").exists());
+    }
+
+    let (dir, ws) = pdk_workspace(true, true);
+    let out = call(&ws, input).await;
+    let text = out.text_content();
+    assert!(!out.is_error, "{text}");
+    assert!(text.contains("PDK: ihp-sg13g2."), "{text}");
+    assert!(
+        text.contains(
+            r#"as corners: {"process":["tt","ss","ff","sf","fs"],"temperatures":[-40.0,27.0,125.0]"#
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#"Layout: the ota5t generator draws this block, with the roles {"bias":"M6","load":["M3","M4"],"pair":["M1","M2"],"tail":"M5"}."#),
+        "{text}"
+    );
+    let t = templates::find("ota5t").unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("project/ota.asc")).unwrap(),
+        t.asc
+    );
+    // A non-IC template needs no PDK, whatever the project uses.
+    let plain = call(
+        &ws,
+        json!({"action": "use", "id": "rc_lowpass", "circuit": "rc.asc"}),
+    )
+    .await;
+    assert!(!plain.is_error, "{}", plain.text_content());
+}
+
+#[tokio::test]
+async fn ic_templates_list_and_show_their_pdk() {
+    let (_dir, ws) = workspace();
+    let out = call(&ws, json!({"action": "list", "category": "ic"})).await;
+    let text = out.text_content();
+    assert!(text.starts_with("6 template(s):"), "{text}");
+    assert!(
+        text.contains("  ota5t [ic, ihp-sg13g2] Five-transistor OTA"),
+        "{text}"
+    );
+    let items = out.data.unwrap()["items"].as_array().unwrap().clone();
+    assert!(items.iter().all(|i| i["pdk"] == "ihp-sg13g2"));
+    let found = call(&ws, json!({"action": "list", "query": "sg13g2 comparator"})).await;
+    assert!(
+        found.text_content().contains("comparator [ic"),
+        "{}",
+        found.text_content()
+    );
+
+    let shown = call(&ws, json!({"action": "show", "id": "bandgap"})).await;
+    let text = shown.text_content();
+    assert!(!shown.is_error, "{text}");
+    assert!(text.contains("on ngspice;"), "{text}");
+    assert!(!text.contains("Layout:"), "{text}");
+    let data = shown.data.unwrap();
+    assert_eq!(data["template"]["pdk"], "ihp-sg13g2");
+    assert_eq!(data["template"]["simulators"], json!(["ngspice"]));
+    assert_eq!(data["template"]["corners"]["supplies"][0]["target"], "VDD");
+    let shown = call(&ws, json!({"action": "show", "id": "two_stage"})).await;
+    let layout = &shown.data.unwrap()["template"]["layout"];
+    assert_eq!(layout["generator"], "two_stage");
+    assert_eq!(layout["roles"]["cc"], "C1");
+}
+
 struct DenyAll;
 
 #[async_trait::async_trait]
@@ -223,7 +335,8 @@ async fn template_netlists_match_live_ltspice() {
     let dir = tempfile::tempdir().unwrap();
     let lib = aispice_core::symbol::SymbolLibrary::builtin_only();
     let mut failures = Vec::new();
-    for t in templates::all() {
+    // IC templates use the PDK's device symbols, which LTspice does not have.
+    for t in templates::all().iter().filter(|t| t.pdk.is_none()) {
         let asc = dir.path().join(format!("{}.asc", t.id));
         std::fs::write(&asc, t.asc).unwrap();
         let live = lt
@@ -248,7 +361,9 @@ async fn every_template_meets_its_specs_on_ngspice() {
     let (dir, ws) = workspace();
     let p = ws.project().unwrap();
     let mut failures = Vec::new();
-    for t in templates::all() {
+    // IC templates need their PDK: templates_ihp.rs checks them at their
+    // corners.
+    for t in templates::all().iter().filter(|t| t.pdk.is_none()) {
         let circuit = format!("{}.asc", t.id);
         let out = call(
             &ws,

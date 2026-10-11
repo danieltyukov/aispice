@@ -18,7 +18,6 @@
 use aispice_core::schematic::{self, Schematic};
 use aispice_sim::corner::CornerSet;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 /// The categories templates are filed under, in display order.
@@ -45,32 +44,14 @@ pub struct Parameter {
     pub equation: String,
 }
 
-/// A role's instances: one name or several, as the layout generators read
-/// role maps (`{"pair": ["M1", "M2"], "tail": "M5"}`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RoleDevices {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl RoleDevices {
-    pub fn names(&self) -> Vec<&str> {
-        match self {
-            RoleDevices::One(s) => vec![s.as_str()],
-            RoleDevices::Many(v) => v.iter().map(String::as_str).collect(),
-        }
-    }
-}
-
 /// The layout generator that draws a template's block, and the role map it
-/// takes.
+/// takes: the generator's own types, so a template that names a generator
+/// or a role it does not have fails to load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutHint {
-    /// `current_mirror`, `ota5t`, `two_stage` or `comparator`.
-    pub generator: String,
-    pub roles: BTreeMap<String, RoleDevices>,
+    pub generator: aispice_layout::generator::Template,
+    pub roles: aispice_layout::generator::Roles,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +277,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A parameter from a PDK device's SpiceLine (`w=11u l=2u ng=2 m=1`).
+    fn spice_param(line: &str, key: &str) -> Option<f64> {
+        line.split_whitespace()
+            .filter_map(|w| w.split_once('='))
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .and_then(|(_, v)| aispice_core::units::parse(v))
+    }
+
+    /// An IC template says which PDK it is drawn in, the corners and
+    /// simulators its specs hold on, and uses only that kit's devices, each
+    /// inside the models' valid range. Other templates name none of this.
+    #[test]
+    fn ic_templates_name_their_kit_corners_and_simulators() {
+        let mut ic = 0;
+        for t in all() {
+            if t.category != "ic" {
+                assert!(
+                    t.pdk.is_none()
+                        && t.corners.is_none()
+                        && t.simulators.is_empty()
+                        && t.layout.is_none(),
+                    "{}: only IC templates name a PDK, corners, simulators or a layout",
+                    t.id
+                );
+                continue;
+            }
+            ic += 1;
+            let kind = t
+                .pdk
+                .as_deref()
+                .unwrap_or_else(|| panic!("{}: no pdk", t.id));
+            let kit = aispice_core::pdk::kit(kind)
+                .unwrap_or_else(|| panic!("{}: unknown PDK kind {kind}", t.id));
+            let set = t
+                .corners
+                .as_ref()
+                .unwrap_or_else(|| panic!("{}: no corners", t.id));
+            set.corners()
+                .unwrap_or_else(|e| panic!("{}: corners: {e}", t.id));
+            assert_eq!(
+                set.process,
+                ["tt", "ss", "ff", "sf", "fs"],
+                "{}: every process corner",
+                t.id
+            );
+            assert!(!t.simulators.is_empty(), "{}: no simulators", t.id);
+            let mut hbt = false;
+            for s in t.schematic().symbols() {
+                let Some(device) = aispice_core::pdk::device_for_symbol(&s.name) else {
+                    continue;
+                };
+                assert!(kit.device(device.name).is_some(), "{}: {}", t.id, s.name);
+                hbt |= device.family == aispice_core::pdk::Family::Hbt;
+                if device.is_mosfet() {
+                    // IHP's MOS models hold up to 10 um per finger.
+                    let line = s.attr("SpiceLine").unwrap_or_default();
+                    let w = spice_param(line, "w").unwrap();
+                    let ng = spice_param(line, "ng").unwrap_or(1.0);
+                    assert!(
+                        w / ng <= 10e-6 + 1e-12,
+                        "{}: {} has {} um per finger",
+                        t.id,
+                        s.inst_name().unwrap_or_default(),
+                        w / ng * 1e6
+                    );
+                }
+            }
+            for sim in &t.simulators {
+                assert!(
+                    ["ngspice", "xyce"].contains(&sim.as_str()),
+                    "{}: simulator {sim}",
+                    t.id
+                );
+            }
+            // Xyce's IHP models have no HBT.
+            assert!(
+                !hbt || t.simulators == ["ngspice"],
+                "{}: a circuit with an HBT runs on ngspice only",
+                t.id
+            );
+        }
+        assert_eq!(ic, 6, "six IC templates");
+    }
+
+    /// A template that names a layout generator goes straight to layout:
+    /// the generator's planner accepts its netlist with its role map and
+    /// keeps the roles as given.
+    #[test]
+    fn ic_role_maps_suit_their_layout_generators() {
+        use aispice_layout::generator::{Params, generate};
+        let lib = SymbolLibrary::builtin_only();
+        let mut drawn = BTreeSet::new();
+        for t in all() {
+            let Some(layout) = &t.layout else { continue };
+            let sch = t.schematic();
+            for (role, devices) in &layout.roles {
+                for name in devices.names() {
+                    assert!(
+                        sch.symbol(name).is_some(),
+                        "{}: role {role} names {name}, which is not in the schematic",
+                        t.id
+                    );
+                }
+            }
+            let (built, _) = netlist::build(&sch, &lib, &t.id);
+            let planned = generate(
+                &built.netlist,
+                layout.generator,
+                &layout.roles,
+                &Params::default(),
+                &t.id,
+            )
+            .unwrap_or_else(|e| panic!("{}: {e}", t.id));
+            assert_eq!(planned.meta.roles, layout.roles, "{}", t.id);
+            drawn.insert(layout.generator.name());
+        }
+        assert_eq!(
+            drawn.into_iter().collect::<Vec<_>>(),
+            ["comparator", "current_mirror", "ota5t", "two_stage"]
+        );
     }
 
     #[test]
