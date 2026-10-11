@@ -8,7 +8,7 @@ pub mod policy;
 pub mod spice;
 
 pub use build::{Built, build, instance_name};
-pub use compare::{Mismatch, compare};
+pub use compare::{CompareOptions, Mismatch, compare, compare_with};
 pub use connect::{Connectivity, Net, PinRef, connect};
 pub use policy::{
     Include, Policy, Violation, canonical_includes, check as check_policy, check_lexical,
