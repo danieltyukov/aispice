@@ -45,6 +45,7 @@ Other test suites:
 - **Tools.** A tool returns text the model reads and, where the interface shows something, structured data. Keep the description short and concrete. After changing tools, regenerate the reference with `cargo run -p aispice -- docs tools > docs/TOOLS.md`.
 - **Security.** Paths go through `Project::resolve`. Processes are started with argument vectors, never a shell string. Anything that writes a file goes through `Workspace::approve`. Treat circuit files, logs and model output as untrusted.
 - **Style.** Follow the code around you. `cargo fmt` and the ESLint config settle formatting. Comments explain why, not what.
+- **Macro packages.** The format is shared with [ChipLeap](https://github.com/danieltyukov/chipleap), whose copies are canonical. `docs/macro-package.md`, `crates/aispice-core/src/macropkg/macro-v1.schema.json` and `crates/aispice-core/tests/fixtures/macro/` are identical to ChipLeap's `docs/macro-package.md`, `src/chipleap/macro/macro-v1.schema.json` and `tests/fixtures/macro/`, and both validators must report what `expected.json` there says. Change them together: make the change in ChipLeap (its `generate.py` writes the fixtures), copy the three here, make the same change to `aispice_core::macropkg`, and update the pinned hashes in `crates/aispice-core/tests/macro_contract.rs` and ChipLeap's `tests/test_macro.py`.
 - **Commits.** Small, focused commits with messages in the conventional style (`fix(core): ...`, `feat(tools): ...`). Update `CHANGELOG.md` under "Unreleased" when behaviour changes.
 
 ## What not to commit

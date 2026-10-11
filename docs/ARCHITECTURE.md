@@ -43,6 +43,7 @@ Pure computation over files: no processes and no network.
 | `lint` | Rule checks for what makes a simulation fail or mislead: no ground, floating pins, nets with no DC path, shorted parts and sources, sources in parallel, missing values or analysis, duplicate names; readability checks (off-grid, overlapping parts) as information |
 | `summary`, `diff` | What the agent reads: parts with the net on every pin, and a semantic diff after an edit |
 | `render` | SVG and PNG drawings of schematics |
+| `macropkg` | Macro packages shared with ChipLeap (`macro/v1`, [macro-package.md](macro-package.md)): the manifest, a small interpreter of its JSON schema, readers for GDS, LEF, liberty, Verilog and SPICE, the validator and evidence writing. ChipLeap's Python validator runs the same rules with the same messages |
 
 The netlister is checked against LTspice itself: `crates/aispice-sim/tests/golden_netlist.rs` compares aispice's netlist with LTspice's `-netlist` output for every test schematic, and a larger corpus run matched 660 of 660 files.
 
@@ -98,7 +99,7 @@ Where circuits meet the agent.
 
 ### aispice (CLI)
 
-`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `mcp`, `pdk`, `gmid`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
+`crates/aispice-cli`, the `aispice` binary: `chat`, `sim`, `check`, `netlist`, `lint`, `show`, `render`, `draw`, `eval`, `macro`, `mcp`, `pdk`, `gmid`, `doctor`, `keys`, `models` and `docs`. The MCP server uses the `rmcp` crate over stdio.
 
 ### Desktop app
 
@@ -139,5 +140,6 @@ See [SECURITY.md](../SECURITY.md) to report a problem.
 | Interface | `npm test -w app` (Vitest) and `npx playwright test` in `app/` against the browser mock |
 | Templates | `crates/aispice-tools/tests/templates.rs`: every template meets its specs on ngspice |
 | PDK | `crates/aispice-tools/tests/pdk_ihp.rs` with `AISPICE_PDK_IHP` set: IHP circuits drawn with the PDK symbols on ngspice and Xyce, and gm/Id sizing checked by simulation |
+| Macro packages | `crates/aispice-core/tests/macro_contract.rs`: the findings ChipLeap's validator also reports, on fixtures shared with it, and hashes that catch drift between the two copies |
 | Model behaviour | `aispice eval`: design tasks judged by simulation, with reference solutions checked in `crates/aispice-tools/tests/eval_suite.rs` |
 | Desktop app | `npm run test:desktop -w app`: the built app driven through tauri-driver and WebKitWebDriver, with a local mock model |

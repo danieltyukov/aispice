@@ -112,6 +112,7 @@ Measurements:
 | `aispice eval` | Run the design task suite in `evals/` against one or more models and report pass rates |
 | `aispice pdk add\|list\|show\|remove` | Register an installed PDK (IHP-Open-PDK's `ihp-sg13g2`), list and describe them |
 | `aispice gmid <device>` | Size a PDK transistor by gm/Id, for example `--gm-id 12 --l 0.5u --id 50u` |
+| `aispice macro check <dir>` | Check a macro package (a hardened block shared with ChipLeap); exits 1 when it fails |
 | `aispice mcp` | Serve the tools over MCP on stdio |
 | `aispice doctor` | Show simulators, LTspice's library, keys and the config file |
 | `aispice keys`, `aispice models` | Manage provider keys, list a provider's models |
@@ -138,6 +139,16 @@ aispice gmid sg13_lv_nmos --gm-id 12 --l 0.5u --id 50u
 ```
 
 Every netlist in that project then carries the PDK's model header (`.lib .../cornerMOSlv.lib mos_tt` and the like), and simulations load the PDK's compiled device models on ngspice or Xyce. [docs/SETUP.md](docs/SETUP.md#pdks-for-ic-design) covers building the models and what aispice checks.
+
+## Blocks for mixed-signal chips
+
+Mixed-signal chips need blocks from both sides. aispice and its digital counterpart, [ChipLeap](https://github.com/danieltyukov/chipleap), hand hardened blocks to each other as macro packages: GDS, LEF, liberty, a Verilog model, a SPICE netlist, measured specs and DRC and LVS evidence, described by one `macro.toml`. Both tools check a package with the same rules before placing it:
+
+```sh
+aispice macro check tiny_counter.macro --pdk ihp-sg13g2
+```
+
+The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-package.md](docs/macro-package.md) is the format, shared word for word with ChipLeap.
 
 ## Simulators and models
 
