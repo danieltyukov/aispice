@@ -524,6 +524,8 @@ pub(crate) fn wire(c: &Circuit, placed: &[Placement]) -> Wiring {
         pin_dirs: pins.iter().map(|p| (p.p, p.f)).collect(),
     };
 
+    let mut renames: Vec<(usize, String)> = Vec::new();
+    let mut taken: Vec<String> = Vec::new();
     // Ground symbols and rail labels first: they sit right at their pins.
     for pin in pins.clone() {
         let net = &c.nets[pin.net];
@@ -542,7 +544,19 @@ pub(crate) fn wire(c: &Circuit, placed: &[Placement]) -> Wiring {
             }
             NetKind::Rail { positive } => {
                 let toward = if positive { Dir::Up } else { Dir::Down };
-                let name = net.name.clone();
+                // A rail LTspice would have numbered gets a name of its own,
+                // or its label could collide with LTspice's numbering of
+                // the other nets.
+                let name = if net.named || !auto_named(&net.name) {
+                    net.name.clone()
+                } else if let Some((_, given)) = renames.iter().find(|(n, _)| *n == pin.net) {
+                    given.clone()
+                } else {
+                    let given = fresh_name(c, &taken);
+                    taken.push(given.clone());
+                    renames.push((pin.net, given.clone()));
+                    given
+                };
                 if !ctx.flag_on_pin(pin, &name, toward) {
                     ctx.commit_flag(
                         Flag {
@@ -570,8 +584,6 @@ pub(crate) fn wire(c: &Circuit, placed: &[Placement]) -> Wiring {
         }
     };
     order.sort_by_key(|&n| (span(n), n));
-    let mut renames: Vec<(usize, String)> = Vec::new();
-    let mut taken: Vec<String> = Vec::new();
     for n in order {
         let net_pins: Vec<PinPos> = pins.iter().copied().filter(|p| p.net == n).collect();
         if net_pins.is_empty() {

@@ -97,3 +97,17 @@ fn pdk_devices_without_parameters_or_with_other_pins_stay_lines() {
         r.warnings
     );
 }
+
+#[test]
+fn rails_with_numbered_names_get_labels_of_their_own() {
+    // The drain is held at ground by a 0 V ammeter source and feeds a
+    // transistor, so it is drawn as a rail; labelling it `N001` would
+    // collide with LTspice's numbering of the gate net.
+    let r = lay("t\nM1 N001 N002 0 0 NMOS\nVg N002 0 0.8\nVd 0 N001 0\n.op\n");
+    assert!(
+        r.renames.iter().any(|(from, _)| from == "N001"),
+        "{:?}",
+        r.renames
+    );
+    assert!(!r.schematic.flags().any(|f| f.label == "N001"));
+}

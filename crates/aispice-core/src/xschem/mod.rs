@@ -13,6 +13,7 @@
 
 mod builtin;
 pub mod file;
+pub mod import;
 pub mod netlist;
 pub mod props;
 pub mod safety;
