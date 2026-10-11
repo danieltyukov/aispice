@@ -100,6 +100,13 @@ pub struct SimJob {
     /// `_` and `-`, so it is safe as a file name and a command argument.
     pub deck_name: String,
     pub timeout: Duration,
+    /// Compiled device models from a registered PDK, which the backend loads
+    /// outside the deck (ngspice through its generated `.spiceinit`, Xyce
+    /// with `-plugin`). Set only by aispice, after the paths passed
+    /// `aispice_core::netlist::policy::check_module`; deck text can never
+    /// add to it. `Some` also runs ngspice in its native mode, which PDK
+    /// model libraries need.
+    pub pdk: Option<crate::pdk::PdkRun>,
 }
 
 impl SimJob {
@@ -109,6 +116,7 @@ impl SimJob {
             run_dir: run_dir.into(),
             deck_name: "deck".into(),
             timeout: Duration::from_secs(120),
+            pdk: None,
         }
     }
 

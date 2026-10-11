@@ -1,6 +1,7 @@
 //! Xyce in serial mode.
 //!
-//! `Xyce -r deck.raw deck.cir`. Measurements come from the console, or from
+//! `Xyce -r deck.raw deck.cir`, with `-plugin a.so,b.so` first for a PDK run
+//! whose compiled device models are Xyce plugins. Measurements come from the console, or from
 //! the `deck.cir.mt*` files when the console has none (one file per `.step`
 //! run). Xyce's binary raw names a DC sweep's axis `sweep`, so the swept
 //! source is taken from the deck's `.dc` line.
@@ -12,6 +13,7 @@ use super::{
 };
 use crate::dataset::AnalysisKind;
 use crate::log::{parse_xyce_mt, parse_xyce_output};
+use crate::pdk::PdkRun;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +33,25 @@ impl Xyce {
     }
 
     pub fn args(stem: &str) -> Vec<String> {
-        vec!["-r".into(), format!("{stem}.raw"), format!("{stem}.cir")]
+        Self::args_for(stem, None)
+    }
+
+    /// The argument vector, loading a PDK's plugins when it has any. Xyce
+    /// takes them as one comma-separated list; the caller's check refused
+    /// paths with commas.
+    pub fn args_for(stem: &str, pdk: Option<&PdkRun>) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(p) = pdk.filter(|p| !p.xyce_plugins.is_empty()) {
+            let list: Vec<String> = p
+                .xyce_plugins
+                .iter()
+                .map(|f| f.display().to_string())
+                .collect();
+            args.push("-plugin".into());
+            args.push(list.join(","));
+        }
+        args.extend(["-r".into(), format!("{stem}.raw"), format!("{stem}.cir")]);
+        args
     }
 }
 
@@ -98,7 +118,7 @@ impl Simulator for Xyce {
         let ws = Workspace::new()?;
         ws.write(&format!("{stem}.cir"), job.netlist_text.as_bytes())?;
         let mut spec = ProcessSpec::new(&exe, ws.path()).env("HOME", ws.path());
-        for a in Self::args(&stem) {
+        for a in Self::args_for(&stem, job.pdk.as_ref()) {
             spec = spec.arg(a);
         }
         let out = process::run(&spec, job.timeout, cancel).await?;
@@ -170,6 +190,16 @@ mod tests {
     #[test]
     fn command_and_dc_source() {
         assert_eq!(Xyce::args("d"), vec!["-r", "d.raw", "d.cir"]);
+        let pdk = PdkRun {
+            osdi: vec![PathBuf::from("/pdk/x.osdi")],
+            xyce_plugins: vec![PathBuf::from("/pdk/a.so"), PathBuf::from("/pdk/b.so")],
+        };
+        assert_eq!(
+            Xyce::args_for("d", Some(&pdk)),
+            vec!["-plugin", "/pdk/a.so,/pdk/b.so", "-r", "d.raw", "d.cir"]
+        );
+        let no_plugins = PdkRun::default();
+        assert_eq!(Xyce::args_for("d", Some(&no_plugins)), Xyce::args("d"));
         assert_eq!(dc_source("t\nV1 a 0 1\n.dc V1 0 10 1\n"), Some("V1".into()));
         assert_eq!(dc_source("t\n.DC lin Vin 0 1 0.1\n"), Some("Vin".into()));
         assert_eq!(dc_source("t\n.op\n"), None);
