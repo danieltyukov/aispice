@@ -20,7 +20,8 @@ view.set_config("grid-visible", "false")
 view.set_config("text-visible", "true")
 view.set_config("default-text-size", "0.4")
 index = view.load_layout(gds, True)  # noqa: F821
-view.load_layer_props(lyp)  # noqa: F821
+if lyp:  # noqa: F821
+    view.load_layer_props(lyp)  # noqa: F821
 layout = view.cellview(index).layout()
 target = layout.cell(cell)  # noqa: F821
 if target is None:

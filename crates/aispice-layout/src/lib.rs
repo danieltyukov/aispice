@@ -7,7 +7,9 @@
 //! that are aispice's own and parameters passed as data.
 
 pub mod drc;
+pub mod extract;
 pub mod gds;
 pub mod generator;
 pub mod lvs;
+pub mod render;
 pub mod tools;
