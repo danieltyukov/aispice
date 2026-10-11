@@ -136,6 +136,12 @@ const FOREIGN: &[&str] = &[
 /// File types that hold compiled code a simulator would load and run.
 const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
 
+/// XSPICE code models a deck may not use: `d_cosim` loads the shared library
+/// its `simulation` parameter names, and `d_process` starts the program its
+/// `process_file` names. aispice adds its own `d_cosim` models, for libraries
+/// it built, after this check.
+const CODE_RUNNING_MODELS: &[&str] = &["d_cosim", "d_process"];
+
 /// Included files larger than this are refused rather than read.
 const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -421,6 +427,20 @@ fn check_lines(
             }
             Some(Ok(include)) => include,
             None => {
+                if let Some(kind) = code_running_model(&lower) {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!(
+                            "a `{kind}` model {} native code a deck cannot choose; declare Verilog to co-simulate under [[cosim]] in aispice.toml and aispice builds and loads it",
+                            if kind == "d_process" {
+                                "starts a program, which is"
+                            } else {
+                                "loads a shared library, which is"
+                            }
+                        ),
+                    });
+                    continue;
+                }
                 check_values(line, &lower, base, policy, trusted, out);
                 continue;
             }
@@ -512,6 +532,19 @@ fn check_lines(
             Ok(_) => {}
         }
     }
+}
+
+/// The type of a `.model` card, when it is one of [`CODE_RUNNING_MODELS`]:
+/// `.model x d_cosim(...)`, `.model x d_cosim (...)` or `.model x d_cosim`.
+fn code_running_model(lower: &str) -> Option<&'static str> {
+    let mut words = lower.split_whitespace();
+    if words.next() != Some(".model") {
+        return None;
+    }
+    let _name = words.next()?;
+    let kind = words.next()?;
+    let kind = kind.split('(').next().unwrap_or(kind);
+    CODE_RUNNING_MODELS.iter().copied().find(|k| *k == kind)
 }
 
 /// The checks on every line that is not an include: no `cmd=`, and every
@@ -1553,6 +1586,47 @@ mod tests {
             format!("t\n.control\npre_osdi {}\n.endc\n", osdi.display()),
         ] {
             assert!(!check(&deck, &policy).is_empty(), "{deck}");
+        }
+    }
+
+    #[test]
+    fn decks_cannot_choose_code_for_xspice_to_load_or_run() {
+        let d = temp("cosim");
+        std::fs::write(d.join("counter.so"), b"").unwrap();
+        std::fs::write(d.join("prog"), b"").unwrap();
+        let policy = policy_at(&d);
+        for card in [
+            ".model cnt d_cosim simulation=\"./counter.so\"",
+            ".MODEL cnt D_COSIM(simulation=\"counter.so\")",
+            ".model cnt d_cosim (simulation=\"counter.so\")",
+            ".model cnt\n+ d_cosim simulation=\"counter.so\"",
+            ".model p d_process process_file=\"./prog\"",
+            ".model p d_process(process_file=\"prog\" process_params=[\"-x\"])",
+            ".subckt s a\n.model p d_process process_file=\"prog\"\n.ends",
+        ] {
+            let deck = format!("t\nA1 [a] [b] null cnt\n{card}\n.end\n");
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("native code")),
+                "{card}: {v:?}"
+            );
+        }
+        // The same card in an included file is refused there too.
+        std::fs::write(
+            d.join("models.lib"),
+            ".model cnt d_cosim simulation=\"counter.so\"\n",
+        )
+        .unwrap();
+        let v = check("t\n.include models.lib\n.end\n", &policy);
+        assert!(v.iter().any(|v| v.reason.contains("native code")), "{v:?}");
+        // Other code models and an ordinary model of a similar name pass.
+        for ok in [
+            ".model tobit adc_bridge(in_low=0.4 in_high=0.8)",
+            ".model d_cosimx d(is=1n)",
+            ".model g1 d_and(rise_delay=1n)",
+        ] {
+            let deck = format!("t\n{ok}\n.end\n");
+            assert!(check(&deck, &policy).is_empty(), "{ok}");
         }
     }
 
