@@ -1,0 +1,470 @@
+//! Analog layout as tools: generate a layout from a schematic, check it
+//! (DRC, LVS), extract it, and look at it. Layouts come only from the
+//! generators; no tool edits GDS.
+
+use super::schematic_tools::spec;
+use crate::layout::{self, GdsFile, LayoutEnv};
+use crate::project::atomic_write;
+use crate::workspace::Workspace;
+use aispice_agent::tool::parse_input;
+use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
+use aispice_layout::drc::{self, DrcChecks, DrcReport};
+use aispice_layout::extract;
+use aispice_layout::generator::{self, LayoutMeta, Params, Roles, Template};
+use aispice_layout::lvs::{self, LvsReport};
+use aispice_layout::render;
+use async_trait::async_trait;
+use base64::Engine as _;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::path::Path;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+
+macro_rules! input {
+    ($v:expr) => {
+        match parse_input($v) {
+            Ok(i) => i,
+            Err(e) => return e,
+        }
+    };
+}
+
+macro_rules! tri {
+    ($v:expr) => {
+        match $v {
+            Ok(v) => v,
+            Err(e) => return ToolOutput::error(e.to_string()),
+        }
+    };
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn hints_text(hints: &[String]) -> String {
+    hints.iter().map(|h| format!("  hint: {h}\n")).collect()
+}
+
+async fn run_drc(
+    env: &LayoutEnv,
+    gds: &GdsFile,
+    checks: DrcChecks,
+    cancel: &CancellationToken,
+) -> Result<DrcReport, String> {
+    let (_, dir) = layout::run_dir(&env.project)?;
+    drc::run(
+        &env.programs,
+        &env.files,
+        &gds.path,
+        &gds.cell,
+        checks,
+        &dir.join("drc"),
+        cancel,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+async fn run_lvs(
+    ws: &Workspace,
+    env: &LayoutEnv,
+    gds: &GdsFile,
+    circuit: &str,
+    cancel: &CancellationToken,
+) -> Result<LvsReport, String> {
+    let (netlist, _, _) = ws
+        .runner
+        .netlist_for(&env.project, circuit)
+        .map_err(|e| e.to_string())?;
+    let (only, extra) = match &gds.meta {
+        Some(m) => (Some(m.devices.as_slice()), m.dummies.as_slice()),
+        None => (None, &[][..]),
+    };
+    let schematic = lvs::lvs_netlist(&netlist, &gds.cell, only, extra)?;
+    let (_, dir) = layout::run_dir(&env.project)?;
+    lvs::run(
+        &env.programs,
+        &env.files,
+        &gds.path,
+        &schematic,
+        &dir.join("lvs"),
+        cancel,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+fn kept(env: &LayoutEnv, path: &Option<std::path::PathBuf>) -> String {
+    path.as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| env.project.relative(p))
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DrcInput {
+    /// The layout: a GDS file in the project.
+    pub layout: String,
+    /// The cell to check; default the file's one top cell.
+    #[serde(default)]
+    pub cell: Option<String>,
+    /// IHP's extra rules beyond the main set (default true).
+    #[serde(default = "yes")]
+    pub extra: bool,
+    /// Antenna rules (default true).
+    #[serde(default = "yes")]
+    pub antenna: bool,
+    /// Density rules, which apply to a whole chip (default false).
+    #[serde(default)]
+    pub density: bool,
+}
+
+pub struct DrcTool {
+    pub ws: Arc<Workspace>,
+}
+
+#[async_trait]
+impl Tool for DrcTool {
+    fn spec(&self) -> ToolSpec {
+        spec::<DrcInput>(
+            "drc",
+            "Design rule check of a layout (GDS) with the PDK's own KLayout rule decks: the main rules, IHP's extra rules and antenna rules by default. Each violation comes with its rule, the layer, a description and where it is (box in um). For a layout made by the layout tool, the report says which generator parameter usually fixes each rule family; change it and generate again. Never edit GDS by hand.",
+        )
+    }
+
+    async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
+        let input: DrcInput = input!(input);
+        let env = tri!(layout::env(&self.ws));
+        let gds = tri!(layout::open_gds(
+            &env.project,
+            &input.layout,
+            input.cell.as_deref()
+        ));
+        let checks = DrcChecks {
+            extra: input.extra,
+            antenna: input.antenna,
+            density: input.density,
+        };
+        let report = tri!(run_drc(&env, &gds, checks, &ctx.cancel).await);
+        let mut t = format!("{}: {}", gds.rel, report.to_text());
+        if gds.meta.is_some() {
+            t.push_str(&hints_text(&layout::drc_hints(&report)));
+        }
+        let folder = kept(&env, &report.reports.first().cloned());
+        if !folder.is_empty() {
+            t.push_str(&format!("Reports kept in {folder}.\n"));
+        }
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"drc": report}}))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LvsInput {
+    /// The layout: a GDS file in the project.
+    pub layout: String,
+    /// The circuit it should match: a schematic or netlist of the project.
+    pub circuit: String,
+    /// The cell; default the file's one top cell.
+    #[serde(default)]
+    pub cell: Option<String>,
+}
+
+pub struct LvsTool {
+    pub ws: Arc<Workspace>,
+}
+
+#[async_trait]
+impl Tool for LvsTool {
+    fn spec(&self) -> ToolSpec {
+        spec::<LvsInput>(
+            "lvs",
+            "Layout versus schematic with the PDK's KLayout LVS deck: compares the devices and nets extracted from a layout (GDS) with the circuit's PDK devices. For a layout the layout tool made, only the devices it drew are compared, with its dummy transistors added to the schematic side. Reports every net, device and pin that does not match, by its name in the schematic and in the layout. Pin nets must be labelled in the layout; the generators do that.",
+        )
+    }
+
+    async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
+        let input: LvsInput = input!(input);
+        let env = tri!(layout::env(&self.ws));
+        let gds = tri!(layout::open_gds(
+            &env.project,
+            &input.layout,
+            input.cell.as_deref()
+        ));
+        let report = tri!(run_lvs(&self.ws, &env, &gds, &input.circuit, &ctx.cancel).await);
+        let mut t = format!(
+            "{} against {}: {}",
+            gds.rel,
+            input.circuit,
+            report.to_text()
+        );
+        t.push_str(&hints_text(&layout::lvs_hints(&report, gds.meta.is_some())));
+        if let Some(m) = &gds.meta
+            && m.circuit.as_deref().is_some_and(|c| c != input.circuit)
+        {
+            t.push_str(&format!(
+                "  note: this layout was generated from {}, not {}\n",
+                m.circuit.as_deref().unwrap_or(""),
+                input.circuit
+            ));
+        }
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"lvs": report}}))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExtractInput {
+    /// The layout: a GDS file in the project.
+    pub layout: String,
+    #[serde(default)]
+    pub cell: Option<String>,
+    /// Resistor networks as well as capacitance (default false).
+    #[serde(default)]
+    pub resistance: bool,
+}
+
+pub struct ExtractTool {
+    pub ws: Arc<Workspace>,
+}
+
+#[async_trait]
+impl Tool for ExtractTool {
+    fn spec(&self) -> ToolSpec {
+        spec::<ExtractInput>(
+            "extract",
+            "Extract a layout's parasitics with Magic and the PDK's tech file: every transistor finger, coupling and ground capacitance and, with resistance, a resistor network per net. Returns the extracted subcircuit. To simulate it, run check_specs with post_layout, which puts the extracted layout in place of the schematic's devices and reports each spec before and after layout.",
+        )
+    }
+
+    async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
+        let input: ExtractInput = input!(input);
+        let env = tri!(layout::env(&self.ws));
+        let gds = tri!(layout::open_gds(
+            &env.project,
+            &input.layout,
+            input.cell.as_deref()
+        ));
+        let (_, dir) = tri!(layout::run_dir(&env.project));
+        let ex = tri!(
+            extract::run(
+                &env.programs,
+                &env.files,
+                &gds.path,
+                &gds.cell,
+                input.resistance,
+                &dir,
+                &ctx.cancel,
+            )
+            .await
+        );
+        let mut t = format!("{}: {}", gds.rel, ex.to_text());
+        if let Some(p) = &ex.path {
+            t.push_str(&format!("Kept as {}.\n", env.project.relative(p)));
+        }
+        let lines: Vec<&str> = ex.text.lines().collect();
+        if lines.len() <= 120 {
+            t.push_str(&ex.text);
+        } else {
+            t.push_str(&lines[..120].join("\n"));
+            t.push_str(&format!("\n... {} more lines\n", lines.len() - 120));
+        }
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"extracted": {
+            "cell": ex.cell, "ports": ex.ports, "devices": ex.devices,
+            "capacitors": ex.capacitors, "resistors": ex.resistors,
+            "total_cap_ff": ex.total_cap_ff,
+        }}}))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutAction {
+    /// Lay out a circuit's transistors with a generator, then check it.
+    Generate,
+    /// Draw a layout as an image.
+    Render,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LayoutInput {
+    pub action: LayoutAction,
+    /// generate: the circuit to lay out.
+    #[serde(default)]
+    pub circuit: Option<String>,
+    /// generate: current_mirror, diff_pair or ota5t.
+    #[serde(default)]
+    pub template: Option<Template>,
+    /// generate: which instances play which part, e.g. {"pair": ["M1",
+    /// "M2"], "load": ["M3", "M4"], "tail": "M5", "bias": "M6"}. Found from
+    /// the topology when omitted.
+    #[serde(default)]
+    pub roles: Option<Roles>,
+    /// generate: pattern, dummies, guard_ring, fingers, track_pitch, row_gap.
+    #[serde(default)]
+    pub params: Option<Params>,
+    /// The cell name; default the circuit's file name.
+    #[serde(default)]
+    pub cell: Option<String>,
+    /// generate: the GDS to write, default `<cell>.gds` beside the circuit.
+    /// render: the GDS to draw.
+    #[serde(default)]
+    pub layout: Option<String>,
+    /// generate: run DRC and LVS on the result (default true).
+    #[serde(default = "yes")]
+    pub check: bool,
+    /// render: image width and height in pixels (default 1200 x 900).
+    #[serde(default)]
+    pub size: Option<[u32; 2]>,
+}
+
+const LAYOUT_DESCRIPTION: &str = r#"
+Analog layout on the project's PDK (IHP SG13G2), drawn with the PDK's own pcells. `generate` lays out a circuit's transistors with a generator: current_mirror (roles ref, out), diff_pair (pair) or ota5t (pair, load, tail, bias). Each matched group becomes a row of two-finger units in a common-centroid or interdigitated pattern with dummy fingers at both ends and a guard ring; nets run on Metal3 tracks, joined across rows on Metal4, and pin nets are labelled. It writes <cell>.gds and <cell>.layout.json (how it was made) and then runs DRC and LVS, returning every violation with a hint on which parameter to change. Parameters: pattern (common_centroid, interdigitated), dummies (0 to 4 per row end), guard_ring, fingers (of the smallest device in a row, even), track_pitch and row_gap in um. GDS is never edited by hand: when a check fails, change parameters or roles and generate again. `render` draws a layout as a PNG.
+"#;
+
+pub struct LayoutTool {
+    pub ws: Arc<Workspace>,
+}
+
+#[async_trait]
+impl Tool for LayoutTool {
+    fn spec(&self) -> ToolSpec {
+        spec::<LayoutInput>("layout", LAYOUT_DESCRIPTION)
+    }
+
+    async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
+        let input: LayoutInput = input!(input);
+        match input.action {
+            LayoutAction::Generate => self.generate(input, &ctx.cancel).await,
+            LayoutAction::Render => self.render(input, &ctx.cancel).await,
+        }
+    }
+}
+
+/// A cell name from a file name: its stem if that is a name layout tools
+/// take.
+fn cell_from(circuit: &str) -> Option<String> {
+    let stem = Path::new(circuit)
+        .file_stem()?
+        .to_string_lossy()
+        .into_owned();
+    aispice_layout::tools::safe_name(&stem).then_some(stem)
+}
+
+impl LayoutTool {
+    async fn generate(&self, input: LayoutInput, cancel: &CancellationToken) -> ToolOutput {
+        let Some(circuit) = input.circuit.clone() else {
+            return ToolOutput::error("generate needs the circuit to lay out");
+        };
+        let Some(template) = input.template else {
+            return ToolOutput::error(
+                "generate needs a template: current_mirror, diff_pair or ota5t",
+            );
+        };
+        let env = tri!(layout::env(&self.ws));
+        let cell = input
+            .cell
+            .clone()
+            .or_else(|| cell_from(&circuit))
+            .unwrap_or_else(|| template.name().to_string());
+        let (netlist, _, _) = tri!(self.ws.runner.netlist_for(&env.project, &circuit));
+        let params = input.params.clone().unwrap_or_default();
+        let roles = input.roles.clone().unwrap_or_default();
+        let mut generated = tri!(generator::generate(
+            &netlist, template, &roles, &params, &cell
+        ));
+        generated.meta.circuit = Some(circuit.clone());
+
+        // Where it goes: beside the circuit unless named.
+        let out_rel = input.layout.clone().unwrap_or_else(|| {
+            let dir = Path::new(&circuit)
+                .parent()
+                .map(|d| d.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if dir.is_empty() {
+                format!("{cell}.gds")
+            } else {
+                format!("{dir}/{cell}.gds")
+            }
+        });
+        let out = tri!(env.project.resolve(&out_rel));
+        if !out
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("gds"))
+        {
+            return ToolOutput::error(format!("{out_rel} must be a .gds file"));
+        }
+        let sidecar = LayoutMeta::path_for(&out, &cell);
+        if out.exists() && !sidecar.is_file() {
+            return ToolOutput::error(format!(
+                "{out_rel} exists and was not made by the layout tool; name another file with `layout`"
+            ));
+        }
+        // Draw in a run folder, then move it into the project once approved.
+        let (_, dir) = tri!(layout::run_dir(&env.project));
+        let tmp = dir.join(format!("{cell}.gds"));
+        tri!(generator::draw(&env.programs, &env.files, &generated.plan, &tmp, cancel).await);
+        let summary = generated.summary();
+        let rel = env.project.relative(&out);
+        if !self
+            .ws
+            .approve(&rel, &format!("Write layout {rel}"), &summary)
+            .await
+        {
+            return ToolOutput::error(format!("the user declined writing {rel}"));
+        }
+        let bytes = tri!(std::fs::read(&tmp));
+        tri!(atomic_write(&out, &bytes));
+        let meta_json = serde_json::to_string_pretty(&generated.meta).unwrap_or_default();
+        tri!(atomic_write(&sidecar, meta_json.as_bytes()));
+        self.ws.after_save(&out);
+
+        let mut t = format!(
+            "Wrote {rel} and {}.\n{summary}",
+            env.project.relative(&sidecar)
+        );
+        let mut data = json!({"layout": rel, "meta": generated.meta});
+        if input.check {
+            let gds = tri!(layout::open_gds(&env.project, &rel, Some(&cell)));
+            let drc = tri!(run_drc(&env, &gds, DrcChecks::default(), cancel).await);
+            t.push_str(&drc.to_text());
+            t.push_str(&hints_text(&layout::drc_hints(&drc)));
+            let lvs = tri!(run_lvs(&self.ws, &env, &gds, &circuit, cancel).await);
+            t.push_str(&lvs.to_text());
+            t.push_str(&hints_text(&layout::lvs_hints(&lvs, true)));
+            if drc.clean() && lvs.matched {
+                t.push_str(&format!(
+                    "Next: look at it with layout render, and compare specs before and after layout with check_specs and post_layout {{\"layout\": \"{rel}\"}}.\n"
+                ));
+            }
+            data["drc"] = json!(drc);
+            data["lvs"] = json!(lvs);
+        }
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": data}))
+    }
+
+    async fn render(&self, input: LayoutInput, cancel: &CancellationToken) -> ToolOutput {
+        let Some(rel) = input.layout.clone() else {
+            return ToolOutput::error("render needs the layout (a GDS file) to draw");
+        };
+        let env = tri!(layout::env(&self.ws));
+        let gds = tri!(layout::open_gds(&env.project, &rel, input.cell.as_deref()));
+        let [w, h] = input.size.unwrap_or([1200, 900]);
+        let png = tri!(
+            render::png(
+                &env.programs,
+                &env.files,
+                &gds.path,
+                &gds.cell,
+                (w, h),
+                cancel
+            )
+            .await
+        );
+        let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+        ToolOutput::text(format!("Layout of {} in {}", gds.cell, gds.rel))
+            .with_image("image/png", b64)
+            .with_data(json!({"kind": "generic", "value": {"layout": gds.rel, "cell": gds.cell}}))
+    }
+}

@@ -582,6 +582,11 @@ pub struct SpecsInput {
     /// 1.98]}]}`.
     #[serde(default)]
     pub corners: Option<CornerSet>,
+    /// Check the specs after layout too: the layout (a GDS from the layout
+    /// tool) is extracted and put in place of the schematic's devices, and
+    /// each spec is reported before and after layout.
+    #[serde(default)]
+    pub post_layout: Option<crate::layout::PostLayout>,
 }
 
 fn yes() -> bool {
@@ -745,8 +750,91 @@ impl Tool for CheckSpecs {
             run.simulator.name(),
             spec_text(&report)
         );
-        ToolOutput::text(t).with_data(json!({"kind": "specs", "report": ui_spec_report(&report)}))
+        let Some(post) = &input.post_layout else {
+            return ToolOutput::text(t)
+                .with_data(json!({"kind": "specs", "report": ui_spec_report(&report)}));
+        };
+        let (netlist, std_libs, ex) =
+            match crate::layout::post_layout_netlist(&self.ws, &input.circuit, post, &ctx.cancel)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return ToolOutput::error(format!("{t}Post-layout: {e}")),
+            };
+        let after = match self
+            .ws
+            .runner
+            .run_netlist(
+                &p,
+                &input.circuit,
+                &netlist,
+                &std_libs,
+                input.simulator.as_deref(),
+                &ctx.cancel,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return ToolOutput::error(format!("{t}Post-layout simulation failed: {e}"));
+            }
+        };
+        let post_report = evaluate(&specs, &after.output.datasets);
+        let t = format!(
+            "{} before and after layout ({}; schematic run {}, post-layout run {} on {})\n{}{}",
+            input.circuit,
+            post.layout,
+            run.id,
+            after.id,
+            after.simulator.name(),
+            ex.to_text(),
+            pre_post_text(&report, &post_report)
+        );
+        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {
+            "pre": ui_spec_report(&report),
+            "post": ui_spec_report(&post_report),
+            "layout": post.layout,
+            "extracted": {"devices": ex.devices, "capacitors": ex.capacitors, "resistors": ex.resistors, "total_cap_ff": ex.total_cap_ff},
+        }}))
     }
+}
+
+/// Specs before and after layout side by side, with the change.
+pub fn pre_post_text(pre: &SpecReport, post: &SpecReport) -> String {
+    let mut t = format!(
+        "Schematic: {}\nAfter layout: {}\n",
+        pre.summary, post.summary
+    );
+    for a in &pre.rows {
+        let b = post.row(&a.name);
+        let show = |v: Option<f64>| {
+            v.map_or_else(
+                || "n/a".to_string(),
+                |v| aispice_sim::measure::spaced(v, &a.unit),
+            )
+        };
+        let after = b.and_then(|b| b.value);
+        let change = match (a.value, after) {
+            (Some(x), Some(y)) if x != 0.0 => format!(" ({:+.1}%)", (y - x) / x.abs() * 100.0),
+            (Some(x), Some(y)) => format!(" ({:+})", y - x),
+            _ => String::new(),
+        };
+        let verdict = |pass: Option<bool>| match pass {
+            Some(true) => "pass",
+            Some(false) => "FAIL",
+            None => "n/a",
+        };
+        t.push_str(&format!(
+            "  {}: {} {} -> {} {}{}\n",
+            a.name,
+            show(a.value),
+            verdict(Some(a.pass)),
+            show(after),
+            verdict(b.map(|b| b.pass)),
+            change
+        ));
+    }
+    t
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

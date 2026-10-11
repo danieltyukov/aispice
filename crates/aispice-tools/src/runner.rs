@@ -77,6 +77,9 @@ pub struct RunnerConfig {
     /// Where gm/Id tables are cached; `<cache dir>/aispice/gmid` when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmid_cache_dir: Option<PathBuf>,
+    /// KLayout and Magic for the layout tools; found on PATH when unset.
+    #[serde(default)]
+    pub layout_programs: aispice_layout::tools::Programs,
 }
 
 impl Default for RunnerConfig {
@@ -93,6 +96,7 @@ impl Default for RunnerConfig {
             pdks: Registry::default(),
             pdks_error: None,
             gmid_cache_dir: None,
+            layout_programs: Default::default(),
         }
     }
 }

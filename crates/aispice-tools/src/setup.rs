@@ -48,6 +48,10 @@ pub fn runner_config(cfg: &Config) -> RunnerConfig {
         embedded_models_only: cfg.embedded_models_only,
         pdks,
         pdks_error,
+        layout_programs: aispice_layout::tools::Programs {
+            klayout: cfg.klayout_path.clone(),
+            magic: cfg.magic_path.clone(),
+        },
         ..RunnerConfig::default()
     }
 }
