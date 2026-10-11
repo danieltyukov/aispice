@@ -158,12 +158,9 @@ impl Sandbox {
             },
             None => why.push("bubblewrap (bwrap) is not installed".into()),
         }
-        match landlock_abi() {
-            abi if abi >= MIN_LANDLOCK_ABI => return Ok(Sandbox::Landlock { abi }),
-            0 => why.push("the kernel has no Landlock support".into()),
-            abi => why.push(format!(
-                "the kernel's Landlock ABI {abi} is below {MIN_LANDLOCK_ABI} (no network rules)"
-            )),
+        match landlock_choice() {
+            Ok(abi) => return Ok(Sandbox::Landlock { abi }),
+            Err(e) => why.push(e),
         }
         Err(format!(
             "aispice runs xschem only inside a sandbox, and this machine has neither: {} (see docs/XSCHEM.md)",
@@ -172,20 +169,24 @@ impl Sandbox {
     }
 }
 
-/// The lowest Landlock ABI aispice uses, and the kernel's, from the
-/// confinement helper (0 off Linux).
+/// The kernel's Landlock ABI if it is usable (at least
+/// [`confine::MIN_ABI`](crate::backend::confine::MIN_ABI), which has the
+/// network rules), else why it is not. Off Linux there is no Landlock.
 #[cfg(target_os = "linux")]
-const MIN_LANDLOCK_ABI: i32 = crate::backend::confine::MIN_ABI;
-#[cfg(not(target_os = "linux"))]
-const MIN_LANDLOCK_ABI: i32 = i32::MAX;
-
-#[cfg(target_os = "linux")]
-fn landlock_abi() -> i32 {
-    crate::backend::confine::abi()
+fn landlock_choice() -> Result<i32, String> {
+    use crate::backend::confine;
+    match confine::abi() {
+        abi if abi >= confine::MIN_ABI => Ok(abi),
+        0 => Err("the kernel has no Landlock support".into()),
+        abi => Err(format!(
+            "the kernel's Landlock ABI {abi} is below {} (no network rules)",
+            confine::MIN_ABI
+        )),
+    }
 }
 #[cfg(not(target_os = "linux"))]
-fn landlock_abi() -> i32 {
-    0
+fn landlock_choice() -> Result<i32, String> {
+    Err("this platform has no Landlock".into())
 }
 
 /// Start an empty bubblewrap sandbox and run `true` in it: whether this
