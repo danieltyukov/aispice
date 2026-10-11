@@ -3,11 +3,7 @@ use crate::netlist::parse;
 
 /// A resolver that only knows aispice's built-in symbols.
 fn builtins() -> Resolver {
-    Resolver {
-        library: Vec::new(),
-        roots: Vec::new(),
-        builtins: true,
-    }
+    Resolver::new(Vec::new(), Vec::new())
 }
 
 fn run(sch: &str) -> XNetlist {
@@ -370,7 +366,59 @@ fn recursive_and_deep_hierarchies_stop() {
         "{:?}",
         n.findings
     );
+    assert!(
+        n.findings
+            .iter()
+            .any(|f| f.subject == "a" && f.message.contains("recursive (a -> a)")),
+        "{:?}",
+        n.findings
+    );
     assert!(n.sheets.len() <= MAX_DEPTH + 3);
+}
+
+/// A cycle through two schematics and their symbols is found and stops.
+#[test]
+fn cycles_across_schematics_and_symbols_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let sym = "v {xschem version=3.4.4 file_version=1.2}\nK {type=subcircuit\nformat=\"@name @pinlist @symname\"\ntemplate=\"name=x1\"}\nB 5 -2.5 -2.5 2.5 2.5 {name=p}\n";
+    std::fs::write(dir.join("a.sym"), sym).unwrap();
+    std::fs::write(dir.join("b.sym"), sym).unwrap();
+    std::fs::write(dir.join("a.sch"), "C {b.sym} 0 0 0 0 {name=x1}\n").unwrap();
+    std::fs::write(dir.join("b.sch"), "C {a.sym} 0 0 0 0 {name=x1}\n").unwrap();
+    let f = file::parse("C {a.sym} 0 0 0 0 {name=x1}\n").unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let n = netlist(&dir.join("top.sch"), &f, &r, &Options::default()).unwrap();
+    assert_eq!(n.text.matches(".subckt a ").count(), 1, "{}", n.text);
+    assert_eq!(n.text.matches(".subckt b ").count(), 1, "{}", n.text);
+    assert!(
+        n.findings
+            .iter()
+            .any(|f| f.message.contains("recursive (a -> b -> a)")),
+        "{:?}",
+        n.findings
+    );
+}
+
+/// A hierarchy that pulls in more files than one conversion reads is an
+/// error once the budget runs out.
+#[test]
+fn the_read_budget_holds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let mut top = String::new();
+    for i in 0..crate::xschem::symbol::MAX_READ_FILES + 5 {
+        std::fs::write(
+            dir.join(format!("s{i}.sym")),
+            "K {type=resistor format=\"@name @pinlist @value\"}\nB 5 0 0 1 1 {name=P}\n",
+        )
+        .unwrap();
+        top.push_str(&format!("C {{s{i}.sym}} 0 {i} 0 0 {{name=R{i}}}\n"));
+    }
+    let f = file::parse(&top).unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let err = netlist(&dir.join("top.sch"), &f, &r, &Options::default()).unwrap_err();
+    assert!(matches!(err, NetlistError::Budget(..)), "{err}");
 }
 
 #[test]

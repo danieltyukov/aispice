@@ -112,6 +112,9 @@ pub enum NetlistError {
     Parse(String, file::ParseError),
     #[error("{0}: the schematic is too large or too dense to netlist")]
     TooComplex(String),
+    /// The hierarchy reads more than one conversion may.
+    #[error("{0}: {1}")]
+    Budget(String, String),
 }
 
 /// Netlist the schematic at `path`.
@@ -121,8 +124,11 @@ pub fn netlist_file(
     opts: &Options,
 ) -> Result<XNetlist, NetlistError> {
     let shown = path.display().to_string();
-    let text =
-        super::symbol::read_limited(path).map_err(|e| NetlistError::Read(shown.clone(), e))?;
+    let text = resolver.read(path).map_err(|e| match e {
+        ResolveError::Budget(m) => NetlistError::Budget(shown.clone(), m),
+        ResolveError::Unreadable(_, m) => NetlistError::Read(shown.clone(), m),
+        e => NetlistError::Read(shown.clone(), e.to_string()),
+    })?;
     let file = file::parse(&text).map_err(|e| NetlistError::Parse(shown, e))?;
     netlist(path, &file, resolver, opts)
 }
@@ -158,11 +164,13 @@ pub fn netlist(
 }
 
 /// A subcircuit waiting to be written: its symbol, the schematic its
-/// instance was found in, and how deep that schematic is.
+/// instance was found in, how deep that schematic is, and the cells from the
+/// top down to that schematic.
 struct Pending {
     symbol: SymbolRef,
     from_dir: PathBuf,
     depth: usize,
+    chain: Vec<String>,
 }
 
 struct Netlister<'a> {
@@ -250,6 +258,9 @@ impl<'a> Netlister<'a> {
         for raw in &file.instances {
             let sym = match self.symbol(raw, &dir) {
                 Ok(s) => s,
+                Err(ResolveError::Budget(m)) => {
+                    return Err(NetlistError::Budget(path.display().to_string(), m));
+                }
                 Err(e) => {
                     let name = props::get(&raw.props, "name").unwrap_or_default();
                     self.finding(
@@ -488,7 +499,8 @@ impl<'a> Netlister<'a> {
             }
         }
         out.push('\n');
-        out.push_str(&self.body(&sheet, 0));
+        let top_cell = cell_name(&path.display().to_string());
+        out.push_str(&self.body(&sheet, 0, std::slice::from_ref(&top_cell)));
         let mut user = String::new();
         for i in &commands {
             let p = place(&sheet.insts[*i]);
@@ -534,7 +546,8 @@ impl<'a> Netlister<'a> {
     /// At the top level (`depth` 0) code blocks are written by the caller;
     /// inside a subcircuit they are written in place, and anything marked
     /// `only_toplevel` is left out.
-    fn body(&mut self, sheet: &Sheet, depth: usize) -> String {
+    /// `chain` holds the cells from the top down to this sheet.
+    fn body(&mut self, sheet: &Sheet, depth: usize, chain: &[String]) -> String {
         let top = depth == 0;
         let mut out = String::new();
         for (i, inst) in sheet.insts.iter().enumerate() {
@@ -564,7 +577,7 @@ impl<'a> Netlister<'a> {
             }
             out.push_str(&self.element(sheet, i, true));
             if kind == "subcircuit" {
-                self.enqueue(inst.sym.clone(), &sheet.dir, depth + 1);
+                self.enqueue(inst.sym.clone(), &sheet.dir, depth + 1, chain);
             }
             let model = props::get(&inst.raw.props, "device_model")
                 .filter(|m| !m.is_empty())
@@ -580,12 +593,26 @@ impl<'a> Netlister<'a> {
     }
 
     /// Queue a subcircuit whose schematic sits `depth` levels below the top.
-    fn enqueue(&mut self, symbol: SymbolRef, dir: &Path, depth: usize) {
-        if !self.queued.contains(&symbol.cell()) {
+    /// A cell already in `chain` instantiates itself, through the
+    /// schematics in between: reported, and not expanded again.
+    fn enqueue(&mut self, symbol: SymbolRef, dir: &Path, depth: usize, chain: &[String]) {
+        let cell = symbol.cell();
+        if let Some(at) = chain.iter().position(|c| *c == cell) {
+            let through = chain[at..].join(" -> ");
+            self.finding(
+                &cell,
+                format!(
+                    "the hierarchy is recursive ({through} -> {cell}); it is not expanded again"
+                ),
+            );
+            return;
+        }
+        if !self.queued.contains(&cell) {
             self.queue.push_back(Pending {
                 symbol,
                 from_dir: dir.to_path_buf(),
                 depth,
+                chain: chain.to_vec(),
             });
         }
     }
@@ -648,7 +675,7 @@ impl<'a> Netlister<'a> {
             out.push('\n');
             return Ok(out);
         }
-        let sch = self.schematic_of(sym, &p.from_dir);
+        let sch = self.schematic_of(sym, &p.from_dir)?;
         let _ = writeln!(
             out,
             "** sch_path: {}",
@@ -665,7 +692,9 @@ impl<'a> Netlister<'a> {
             Some((path, file)) => {
                 self.out.sheets.push(path.clone());
                 let sheet = self.sheet(&path, &file)?;
-                out.push_str(&self.body(&sheet, p.depth));
+                let mut chain = p.chain.clone();
+                chain.push(cell.clone());
+                out.push_str(&self.body(&sheet, p.depth, &chain));
                 if !file.spice.is_empty() {
                     out.push_str("**** begin user architecture code\n");
                     out.push_str(&file.spice);
@@ -683,48 +712,49 @@ impl<'a> Netlister<'a> {
 
     /// The schematic a subcircuit symbol stands for: its `schematic`
     /// attribute, else the symbol's path with `.sch` for `.sym`.
-    fn schematic_of(&mut self, sym: &XSymbol, from_dir: &Path) -> Option<(PathBuf, XFile)> {
-        let path = match sym.attr("schematic").filter(|s| !s.is_empty()) {
+    fn schematic_of(
+        &mut self,
+        sym: &XSymbol,
+        from_dir: &Path,
+    ) -> Result<Option<(PathBuf, XFile)>, NetlistError> {
+        let located = match sym.attr("schematic").filter(|s| !s.is_empty()) {
             Some(reference) => {
                 let base = match &sym.origin {
                     Origin::File(f) => f.parent().map(Path::to_path_buf).unwrap_or_default(),
                     _ => from_dir.to_path_buf(),
                 };
-                match self.resolver.locate(&reference, &base) {
-                    Ok(Some(p)) => p,
-                    Ok(None) => return None,
-                    Err(e) => {
-                        self.finding(sym.cell(), e.to_string());
-                        return None;
-                    }
-                }
+                self.resolver.locate(&reference, &base)
             }
             None => {
                 let Origin::File(f) = &sym.origin else {
-                    return None;
+                    return Ok(None);
                 };
-                match self.resolver.locate_path(&f.with_extension("sch")) {
-                    Ok(Some(p)) => p,
-                    Ok(None) => return None,
-                    Err(e) => {
-                        self.finding(sym.cell(), e.to_string());
-                        return None;
-                    }
-                }
+                self.resolver.locate_path(&f.with_extension("sch"))
             }
         };
-        let text = match super::symbol::read_limited(&path) {
-            Ok(t) => t,
+        let path = match located {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(None),
             Err(e) => {
-                self.finding(path.display().to_string(), e);
-                return None;
+                self.finding(sym.cell(), e.to_string());
+                return Ok(None);
+            }
+        };
+        let text = match self.resolver.read(&path) {
+            Ok(t) => t,
+            Err(ResolveError::Budget(m)) => {
+                return Err(NetlistError::Budget(path.display().to_string(), m));
+            }
+            Err(e) => {
+                self.finding(path.display().to_string(), e.to_string());
+                return Ok(None);
             }
         };
         match file::parse(&text) {
-            Ok(f) => Some((path, f)),
+            Ok(f) => Ok(Some((path, f))),
             Err(e) => {
                 self.finding(path.display().to_string(), e.to_string());
-                None
+                Ok(None)
             }
         }
     }

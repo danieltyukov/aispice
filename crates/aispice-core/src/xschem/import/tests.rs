@@ -2,11 +2,7 @@ use super::*;
 use crate::xschem::file;
 
 fn builtins() -> Resolver {
-    Resolver {
-        library: Vec::new(),
-        roots: Vec::new(),
-        builtins: true,
-    }
+    Resolver::new(Vec::new(), Vec::new())
 }
 
 fn run(sch: &str) -> Imported {
@@ -227,4 +223,85 @@ fn ihp_test_benches_import() {
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The whole deck is checked by the netlist policy before anything is
+/// drawn or written.
+#[test]
+fn the_policy_gates_the_whole_deck() {
+    for bad in [
+        "t\n.include /etc/passwd\n",
+        "t\n.control\nshell ls\n.endc\n",
+        "t\nR1 a 0 1k\n+ cmd=x\n",
+    ] {
+        let deck = crate::netlist::parse(bad);
+        assert!(
+            matches!(policy_gate(&deck), Err(ImportError::Policy(..))),
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        policy_gate(&crate::netlist::parse("t\nR1 a 0 1k\n.op\n")),
+        Ok(())
+    );
+    // Code blocks that try anyway are dropped line by line, and what is
+    // left passes as a whole.
+    let r = run(
+        "C {devices/res.sym} 0 0 0 0 {name=R1 value=1k}\nC {devices/gnd.sym} 0 30 0 0 {name=l1 lab=GND}\nC {devices/lab_pin.sym} 0 -30 0 0 {name=p1 lab=a}\nC {devices/code_shown.sym} 100 0 0 0 {name=s1 value=\".include /etc/passwd\n.include ../../x.lib\nB1 a 0 V=1 cmd=x\n.op\"}\n",
+    );
+    assert!(
+        check_lexical_deck(&crate::netlist::write(&r.asc_netlist)).is_empty(),
+        "{}",
+        crate::netlist::write(&r.asc_netlist)
+    );
+    assert!(r.findings.len() >= 3, "{:?}", r.findings);
+}
+
+/// A path in the schematic never makes the import read a file outside the
+/// project and the library folders.
+#[test]
+fn files_outside_the_project_are_never_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        root.join("outside.sch"),
+        "C {devices/res.sym} 0 0 0 0 {name=RSECRET value=42}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("outside.sym"),
+        "K {type=resistor format=\"@name @pinlist SECRET\"}\nB 5 0 0 1 1 {name=P}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("blk.sym"),
+        "K {type=subcircuit\nformat=\"@name @pinlist @symname\"\ntemplate=\"name=x1\"\nschematic=../outside.sch}\nB 5 -2.5 -2.5 2.5 2.5 {name=p}\n",
+    )
+    .unwrap();
+    let outside = root.join("outside.sym").display().to_string();
+    let sch = format!(
+        "C {{blk.sym}} 0 0 0 0 {{name=x1}}\nC {{../outside.sym}} 100 0 0 0 {{name=R2}}\nC {{{outside}}} 200 0 0 0 {{name=R3}}\nC {{devices/res.sym}} 0 100 0 0 {{name=R1 value=1k}}\nC {{devices/gnd.sym}} 0 130 0 0 {{name=l1 lab=GND}}\nC {{devices/lab_pin.sym}} 0 70 0 0 {{name=p1 lab=a}}\n"
+    );
+    let f = file::parse(&sch).unwrap();
+    let r = Resolver::new(Vec::new(), vec![project.clone()]);
+    let out = import(
+        &project.join("tb.sch"),
+        &f,
+        &r,
+        &SymbolLibrary::builtin_only(),
+        &ImportOptions::default(),
+    )
+    .unwrap();
+    assert!(!out.xschem.text.contains("SECRET"), "{}", out.xschem.text);
+    assert!(
+        out.findings
+            .iter()
+            .filter(|f| f.message.contains("outside"))
+            .count()
+            >= 2,
+        "{:?}",
+        out.findings
+    );
 }

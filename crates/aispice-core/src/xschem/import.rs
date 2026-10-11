@@ -18,7 +18,10 @@
 //! - A relative `.include` whose file is not beside the new `.asc` is kept,
 //!   with a finding.
 //! - Every other line must pass [`crate::netlist::check_lexical`]; a refused
-//!   line is dropped with a finding quoting the policy's reason.
+//!   line is dropped with a finding quoting the policy's reason. The whole
+//!   deck, and the netlist of the drawing made from it, are checked again
+//!   before anything is returned, so nothing the policy refuses is written
+//!   or simulated.
 //! - `GND` becomes `0`, xschem's numbered nets (`net3`) become LTspice's
 //!   (`N001`) so the drawing labels only the nets the designer named, and
 //!   `m=1`, SPICE's default, is dropped from R, C and L lines.
@@ -27,7 +30,9 @@ use super::file::XFile;
 use super::netlist::{self, Finding, XNetlist};
 use super::symbol::Resolver;
 use crate::layout::{LayoutError, LayoutOptions, Quality};
-use crate::netlist::{CompareOptions, Line, Netlist, check_lexical, compare_with};
+use crate::netlist::{
+    CompareOptions, Line, Netlist, check_lexical, check_lexical_deck, compare_with,
+};
 use crate::schematic::Schematic;
 use crate::symbol::SymbolLibrary;
 use serde::Serialize;
@@ -103,6 +108,8 @@ pub enum ImportError {
         "the schematic has {0} elements; the layout handles up to {1}. Put repeated blocks in subcircuits."
     )]
     TooLarge(usize, usize),
+    #[error("nothing was imported: `{0}` breaks aispice's netlist policy: {1}")]
+    Policy(String, String),
 }
 
 /// A netlist made into a deck aispice may run, and what that took.
@@ -140,6 +147,7 @@ pub fn import(
         return Err(ImportError::TooLarge(elements, max));
     }
 
+    policy_gate(&deck)?;
     let laid =
         crate::layout::from_netlist(&deck, lib, &opts.layout).map_err(ImportError::Layout)?;
     for w in &laid.warnings {
@@ -158,6 +166,7 @@ pub fn import(
         ..CompareOptions::xschem()
     };
     let (built, _) = crate::netlist::build(&laid.schematic, lib, &format!("* {name}"));
+    policy_gate(&built.netlist)?;
     let reference = crate::netlist::parse(&cleaned.text);
     let proof = Proof::new(
         "aispice's xschem netlist of the .sch against the .asc's netlist",
@@ -174,6 +183,22 @@ pub fn import(
         asc_netlist: built.netlist,
         proof,
     })
+}
+
+/// Refuse a deck the netlist policy refuses. [`clean`] checks each line
+/// and drops what fails; this checks the whole deck again, as simulators
+/// read it (a `+` line joins the line before it, and ngspice and Xyce
+/// disagree on which lines are comments), before anything is drawn,
+/// written or simulated. Code blocks, directives, model names and include
+/// lines from the schematic all pass through here.
+fn policy_gate(deck: &Netlist) -> Result<(), ImportError> {
+    match check_lexical_deck(&crate::netlist::write(deck))
+        .into_iter()
+        .next()
+    {
+        Some(v) => Err(ImportError::Policy(v.line, v.reason)),
+        None => Ok(()),
+    }
 }
 
 /// Make an xschem netlist into a deck aispice may run. The same cleaning is
@@ -323,7 +348,15 @@ fn include_finding(line: &str, out_dir: Option<&Path>) -> Option<Finding> {
     if Path::new(file).is_absolute() {
         return None;
     }
-    if out_dir.is_some_and(|d| d.join(file).is_file()) {
+    // Only a file inside the output folder counts: the path came from the
+    // schematic, so a link out of the folder is not followed.
+    let beside = |d: &Path| {
+        let (Ok(f), Ok(d)) = (d.join(file).canonicalize(), d.canonicalize()) else {
+            return false;
+        };
+        f.starts_with(d) && f.is_file()
+    };
+    if out_dir.is_some_and(beside) {
         return None;
     }
     Some(Finding {

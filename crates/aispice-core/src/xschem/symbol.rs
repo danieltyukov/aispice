@@ -21,6 +21,7 @@ use super::props;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Where a symbol definition came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +176,21 @@ fn atoi(s: &str) -> i64 {
     if neg { -v } else { v }
 }
 
+/// At most this many files are read through one [`Resolver`]: schematics
+/// and symbols of a whole hierarchy together.
+pub const MAX_READ_FILES: usize = 2048;
+/// At most this many bytes are read through one [`Resolver`].
+pub const MAX_READ_BYTES: usize = 128 << 20;
+
+/// What has been read through a resolver and its clones. Each file is
+/// capped on its own ([`MAX_FILE_BYTES`]); this caps the hierarchy, so a
+/// schematic that pulls in thousands of files is refused rather than read.
+#[derive(Debug, Default)]
+pub struct ReadBudget {
+    files: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
 /// Finds the symbols a schematic refers to.
 #[derive(Debug, Clone, Default)]
 pub struct Resolver {
@@ -185,6 +201,8 @@ pub struct Resolver {
     pub roots: Vec<PathBuf>,
     /// Use aispice's built-in definitions when nothing on disk matches.
     pub builtins: bool,
+    /// Shared by clones, so one conversion has one budget.
+    pub budget: Arc<ReadBudget>,
 }
 
 /// Why a reference did not resolve.
@@ -198,6 +216,9 @@ pub enum ResolveError {
     Unreadable(String, String),
     #[error("symbol reference `{0}` is not a file name aispice resolves")]
     BadReference(String),
+    /// The hierarchy reads more files or bytes than one conversion may.
+    #[error("{0}")]
+    Budget(String),
 }
 
 impl Resolver {
@@ -206,7 +227,28 @@ impl Resolver {
             library,
             roots,
             builtins: true,
+            budget: Arc::default(),
         }
+    }
+
+    /// Read a schematic or symbol file, counted against the budget.
+    pub fn read(&self, path: &Path) -> Result<String, ResolveError> {
+        let files = self.budget.files.fetch_add(1, Ordering::Relaxed) + 1;
+        if files > MAX_READ_FILES {
+            return Err(ResolveError::Budget(format!(
+                "the schematic pulls in more than {MAX_READ_FILES} files"
+            )));
+        }
+        let text = read_limited(path)
+            .map_err(|e| ResolveError::Unreadable(path.display().to_string(), e))?;
+        let bytes = self.budget.bytes.fetch_add(text.len(), Ordering::Relaxed) + text.len();
+        if bytes > MAX_READ_BYTES {
+            return Err(ResolveError::Budget(format!(
+                "the schematic pulls in more than {} MiB of files",
+                MAX_READ_BYTES >> 20
+            )));
+        }
+        Ok(text)
     }
 
     /// The candidate files for a reference, in xschem's order.
@@ -279,8 +321,12 @@ impl Resolver {
         let located = self.locate(reference, sch_dir);
         match located {
             Ok(Some(path)) => {
-                let text = read_limited(&path)
-                    .map_err(|e| ResolveError::Unreadable(reference.to_string(), e))?;
+                let text = self.read(&path).map_err(|e| match e {
+                    ResolveError::Unreadable(_, m) => {
+                        ResolveError::Unreadable(reference.to_string(), m)
+                    }
+                    e => e,
+                })?;
                 XSymbol::parse(reference, &text, Origin::File(path))
                     .map_err(|e| ResolveError::Unreadable(reference.to_string(), e.to_string()))
             }
@@ -487,8 +533,8 @@ mod tests {
         }
         let r = Resolver {
             library: library.clone(),
-            roots: Vec::new(),
             builtins: false,
+            ..Resolver::default()
         };
         let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut problems = Vec::new();
