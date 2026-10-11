@@ -176,13 +176,15 @@ jobs:
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
 
       # One DRC deck on a synthetic layout, then a generated current mirror
-      # through DRC and LVS, the broken-layout checks, and the files each
-      # layout tool writes on a generated OTA: about two minutes.
+      # through DRC and LVS, the broken-layout checks, blocks with their pins
+      # at the edge as macro packages have them, and the files each layout
+      # tool writes on a generated OTA: about two minutes. Macro export and
+      # chip assembly need Magic, so they run where it is installed.
       - name: Layout tests
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-layout --test drc_ihp -- --nocapture
-          cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact
+          cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact edge_pinned
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
 
   shell:

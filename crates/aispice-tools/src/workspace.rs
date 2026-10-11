@@ -115,8 +115,8 @@ impl Workspace {
     /// output resolver (inside the project, no `..`, not through a link);
     /// the user approves the whole set once, as for an edit; and each file
     /// is recorded in the history so it can be undone. Folders a path needs
-    /// are made after the approval, one level at a time, never through a
-    /// link. Returns the project-relative paths written.
+    /// are made after the approval, one level at a time, and only in the
+    /// project. Returns the project-relative paths written.
     pub async fn write_files(
         &self,
         tool: &dyn Tool,

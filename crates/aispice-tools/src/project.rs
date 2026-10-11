@@ -258,8 +258,8 @@ impl Project {
     /// The folders of an output path that do not exist yet, outermost first,
     /// after checking the path as [`Project::resolve_output`] would once they
     /// do: given without `..`, `~` or a drive, inside the project and outside
-    /// `.aispice/`, and every folder of it that exists a plain folder, not a
-    /// link.
+    /// `.aispice/`, and every folder of it that exists either a folder or a
+    /// link that leads to a folder of the project.
     pub fn missing_dirs(&self, rel: &str) -> Result<Vec<PathBuf>, ProjectError> {
         let rel = rel.trim();
         let outside = || ProjectError::Outside(rel.to_string());
@@ -288,28 +288,44 @@ impl Project {
         let mut cur = self.root.clone();
         let mut missing = Vec::new();
         for d in dirs {
-            cur = cur.join(d);
+            let next = cur.join(d);
             if !missing.is_empty() {
-                missing.push(cur.clone());
+                missing.push(next.clone());
+                cur = next;
                 continue;
             }
-            match std::fs::symlink_metadata(&cur) {
-                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            match std::fs::symlink_metadata(&next) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => cur = next,
+                // A linked folder is followed, as the output resolver does,
+                // and must lead to a folder of the project.
+                Ok(m) if m.file_type().is_symlink() => {
+                    let real = std::fs::canonicalize(&next).map_err(|_| outside())?;
+                    if !real.is_dir()
+                        || !real.starts_with(&self.root)
+                        || real.starts_with(self.root.join(STATE_DIR))
+                    {
+                        return Err(outside());
+                    }
+                    cur = real;
+                }
                 Ok(_) => {
                     return Err(ProjectError::Other(format!(
-                        "{} is not a plain folder; aispice does not write through it",
-                        self.relative(&cur)
+                        "{} is not a folder",
+                        self.relative(&next)
                     )));
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(cur.clone()),
-                Err(e) => return Err(io(&cur, e)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(next.clone());
+                    cur = next;
+                }
+                Err(e) => return Err(io(&next, e)),
             }
         }
         Ok(missing)
     }
 
     /// Make the folders [`Project::missing_dirs`] lists, one level at a time:
-    /// a folder that appears in between as a link or a file stops it.
+    /// one that appears in between as a link or a file stops it.
     pub fn create_missing_dirs(&self, rel: &str) -> Result<(), ProjectError> {
         for d in self.missing_dirs(rel)? {
             match std::fs::create_dir(&d) {
@@ -832,7 +848,12 @@ mod tests {
             let elsewhere = tempfile::tempdir().unwrap();
             std::os::unix::fs::symlink(elsewhere.path(), p.root().join("link")).unwrap();
             let e = p.missing_dirs("link/new/x.gds").unwrap_err().to_string();
-            assert!(e.contains("not a plain folder"), "{e}");
+            assert!(e.contains("outside"), "{e}");
+            // A link to a folder of the project is followed.
+            std::fs::create_dir(p.root().join("real")).unwrap();
+            std::os::unix::fs::symlink(p.root().join("real"), p.root().join("alias")).unwrap();
+            p.create_missing_dirs("alias/a/b.gds").unwrap();
+            assert!(p.root().join("real/a").is_dir());
             assert!(p.create_missing_dirs("link/new/x.gds").is_err());
             assert!(!elsewhere.path().join("new").exists());
         }

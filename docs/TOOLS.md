@@ -1755,6 +1755,11 @@ Edits your files: each write is approved in ask-before-applying mode and can be 
           "default": "common_centroid",
           "description": "How matched devices are ordered in a row."
         },
+        "pin_edge": {
+          "default": false,
+          "description": "Bring every pin to the block's bottom edge on a Metal4 column of its\nown, 1.2 um apart on a grid fixed to the block's origin, as a macro\npackage needs (default false: pins are labels on the Metal3 tracks).",
+          "type": "boolean"
+        },
         "row_gap": {
           "default": 1.0,
           "description": "Space between the routing channels of two rows, um (default 1).",
@@ -1979,6 +1984,214 @@ Read-only: writes nothing of yours, only aispice's own folders.
   },
   "required": [
     "path"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `macro_export`
+
+Export a generated block as a macro package (macro/v1), the format chips place blocks from: aispice's chip tool and ChipLeap both read it. The block is drawn again from its layout record with every pin brought to its bottom edge on Metal4 and ground (net 0) named as a pin, then checked with the PDK's DRC and LVS decks, extracted, and its specs measured at every corner before and after layout; every post-layout value must meet its limits. The package holds macro.toml (pins with directions and kinds, supply domain, corners, PDK and commit), the GDS, a LEF abstract from Magic, a liberty view with pin capacitance from extraction, a Verilog model (blackbox or wreal), the LVS netlist, the extracted netlist, the measured spec table, and DRC, LVS, extraction and simulation evidence with the hashes of the files they checked. It is checked with the same rules as check_macro before anything is written, then written into the project in one approved, undoable step. Needs a layout made by the layout tool.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "circuit": {
+      "description": "The circuit the block comes from, with its test bench: a schematic or\nnetlist of the project.",
+      "type": "string"
+    },
+    "corners": {
+      "description": "The corners to characterize at, as for check_specs; default tt at\n27 C.",
+      "properties": {
+        "process": {
+          "default": [],
+          "description": "Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or\nfamily=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,\ndio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "supplies": {
+          "default": [],
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`. At most 200 corners in all.",
+          "items": {
+            "description": "Values for one supply: a voltage source or a `.param`.",
+            "properties": {
+              "target": {
+                "description": "A source (`VDD`) or `.param` name.",
+                "type": "string"
+              },
+              "values": {
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`), at most 64.",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 64,
+                "type": "array"
+              }
+            },
+            "required": [
+              "target",
+              "values"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "temperatures": {
+          "default": [],
+          "description": "Temperatures in degrees Celsius.",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "description": {
+      "description": "A line about the block for `macro.toml`.",
+      "type": "string"
+    },
+    "ground": {
+      "description": "The name of the ground pin, which is net 0 in the circuit; default\n`vss`.",
+      "type": "string"
+    },
+    "layout": {
+      "description": "The block's layout from the layout tool: a GDS of the project with its\n`.layout.json` record beside it.",
+      "type": "string"
+    },
+    "name": {
+      "description": "The macro's name; default the layout's cell. Letters, digits and\nunderscores, starting with a letter.",
+      "type": "string"
+    },
+    "out": {
+      "description": "The package folder; default `macros/<name>.macro`.",
+      "type": "string"
+    },
+    "pins": {
+      "additionalProperties": {
+        "description": "A change to what export found for a pin.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "input",
+              "output",
+              "inout",
+              null
+            ],
+            "type": "string"
+          },
+          "kind": {
+            "description": "signal, clock or analog. Supplies are found by name.",
+            "enum": [
+              "signal",
+              "clock",
+              "analog",
+              null
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "description": "Changes to the pins found from the circuit, by pin name, e.g.\n`{\"clk\": {\"kind\": \"clock\"}, \"out\": {\"description\": \"Output, 1 pF\"}}`.",
+      "type": "object"
+    },
+    "resistance": {
+      "default": false,
+      "description": "Extract resistor networks as well as capacitance (default false).",
+      "type": "boolean"
+    },
+    "simulator": {
+      "type": "string"
+    },
+    "specs": {
+      "description": "Specs to measure, one per line; default the circuit's `.specs` file.",
+      "type": "string"
+    },
+    "verilog": {
+      "description": "The Verilog model: `blackbox` (default) or `wreal`.",
+      "enum": [
+        "blackbox",
+        "wreal",
+        null
+      ],
+      "type": "string"
+    },
+    "voltage": {
+      "description": "The block's supply in volts; default the circuit's supply source,\nelse 1.2.",
+      "type": "number"
+    }
+  },
+  "required": [
+    "circuit",
+    "layout"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `chip`
+
+Assemble an analog-on-top chip on the project's PDK (IHP SG13G2) from macro packages: aispice blocks exported with macro_export, and hardened digital blocks (ChipLeap packages). The chip description is a TOML file in the project: `name`, optional `pad_pitch_um` (default 100), `[[macros]]` with `instance`, `package` (a .macro folder of the project), optional `at_um = [x, y]` in the core and `nets = { pin = "net" }` (pins not listed join the net of their own name), and `[[pads]]` with `net`, `side` (north, east, south, west) and `kind`: analog (sg13g2_IOPadAnalog, its clamps and diodes; `resistor = true` connects through its secondary protection), input (sg13g2_IOPadIn), output (sg13g2_IOPadOut4mA), vdd, vss (core supplies), iovdd, iovss (the IO ring's supplies; at least one pad of each supply kind). Every package is checked with check_macro's rules against the project's PDK before use. `plan` gives the floorplan (die size, pad ring with corners and fillers, bond pads, seal ring, block placement) and the top-level routes (Metal3 and Metal4 on a 0.6 um grid, clean by construction) without running anything. `assemble` draws the chip with KLayout and IHP's pcells (bond pads, seal ring), adds Magic's metal and active fill, runs IHP's DRC decks (main, extra, antenna, density) on the finished chip and IHP's LVS deck on the chip without its pad cells against a netlist of the blocks with the pad nets as ports, then writes <name>.gds, <name>.lvs.spice, <name>.chip.json and DRC and LVS evidence into the output folder. When a block does not fit or a net cannot be routed, move blocks with at_um, change pad sides or pitch, and plan again.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "description": "Lay the chip out on paper: floorplan and routes, no files.",
+          "enum": [
+            "plan"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Draw, fill and check the chip, and write it into the project.",
+          "enum": [
+            "assemble"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "check": {
+      "default": true,
+      "description": "assemble: run full-chip DRC and LVS (default true).",
+      "type": "boolean"
+    },
+    "out": {
+      "description": "assemble: the folder the results go to; default `<name>.chip`\nbeside the description.",
+      "type": "string"
+    },
+    "spec": {
+      "description": "The chip description: a `.chip.toml` file of the project.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action",
+    "spec"
   ],
   "type": "object"
 }
