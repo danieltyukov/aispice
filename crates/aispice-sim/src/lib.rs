@@ -4,6 +4,7 @@ pub mod backend;
 pub mod dataset;
 pub mod dialect;
 pub mod expr;
+pub mod gmid;
 pub mod log;
 pub mod measure;
 pub mod models;
