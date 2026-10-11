@@ -351,3 +351,31 @@ async fn a_missing_contact_fails_lvs_and_a_sliver_fails_drc() {
     );
     keep(dir);
 }
+
+const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n";
+
+#[tokio::test]
+async fn a_generated_comparator_is_drc_and_lvs_clean() {
+    let Some((programs, files)) = setup() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let n = parse(STRONGARM);
+    let c = generate_and_check(
+        &programs,
+        &files,
+        &n,
+        Template::Comparator,
+        &Params::default(),
+        dir.path(),
+        "comparator",
+    )
+    .await;
+    assert!(c.drc.clean(), "{}", c.drc.to_text());
+    assert!(c.lvs.matched, "{}", c.lvs.to_text());
+    assert_eq!(
+        c.generated.meta.ports,
+        ["0", "clk", "inm", "inp", "outn", "outp", "vdd"]
+    );
+    keep(dir);
+}

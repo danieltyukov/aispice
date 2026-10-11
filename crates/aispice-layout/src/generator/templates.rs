@@ -23,6 +23,10 @@ pub enum Template {
     /// Five-transistor OTA: roles `pair`, `load` (a mirror), `tail` and
     /// optionally `bias` (the diode that mirrors into the tail).
     Ota5t,
+    /// StrongARM latch comparator: roles `tail` (the clocked foot), `pair`
+    /// (the inputs), `latch_n` and `latch_p` (the cross-coupled pairs) and
+    /// `reset` (the clocked precharge devices).
+    Comparator,
 }
 
 impl Template {
@@ -31,6 +35,7 @@ impl Template {
             Template::CurrentMirror => "current_mirror",
             Template::DiffPair => "diff_pair",
             Template::Ota5t => "ota5t",
+            Template::Comparator => "comparator",
         }
     }
 }
@@ -255,6 +260,8 @@ fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
                 Template::DiffPair => r#"{"pair": ["M1", "M2"]}"#,
                 Template::Ota5t =>
                     r#"{"pair": ["M1", "M2"], "load": ["M3", "M4"], "tail": "M5", "bias": "M6"}"#,
+                Template::Comparator =>
+                    r#"{"tail": "M0", "pair": ["M1", "M2"], "latch_n": ["M3", "M4"], "latch_p": ["M5", "M6"], "reset": ["M7", "M8", "M9", "M10"]}"#,
             }
         )
     };
@@ -330,8 +337,79 @@ fn auto_roles(template: Template, mos: &[Mos]) -> Result<Roles, String> {
                 r.insert("bias".into(), names(&[bias]));
             }
         }
+        Template::Comparator => {
+            // The input pair is the one whose source a third device of its
+            // type drives: the clocked tail.
+            let tailed: Vec<(&Mos, &Mos, &Mos)> = pairs
+                .iter()
+                .filter_map(|(a, b)| {
+                    let t: Vec<&Mos> = mos
+                        .iter()
+                        .filter(|m| m.kind == a.kind && m.dev.d == a.dev.s && m != a && m != b)
+                        .collect();
+                    match t.as_slice() {
+                        [t] => Some((*a, *b, *t)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let [(a, b, tail)] = tailed.as_slice() else {
+                return Err(ask("input pair and its clocked tail"));
+            };
+            let drains = [&a.dev.d, &b.dev.d];
+            let latch_n: Vec<&Mos> = mos
+                .iter()
+                .filter(|m| m.kind == a.kind && drains.contains(&&m.dev.s))
+                .collect();
+            if latch_n.len() != 2 {
+                return Err(ask("cross-coupled NMOS pair"));
+            }
+            let outs = [&latch_n[0].dev.d, &latch_n[1].dev.d];
+            let latch_p: Vec<&Mos> = mos
+                .iter()
+                .filter(|m| {
+                    m.kind != a.kind && outs.contains(&&m.dev.d) && outs.contains(&&m.dev.g)
+                })
+                .collect();
+            let reset: Vec<&Mos> = mos
+                .iter()
+                .filter(|m| m.kind != a.kind && m.dev.g == tail.dev.g)
+                .collect();
+            r.insert("tail".into(), names(&[tail]));
+            r.insert("pair".into(), names(&[a, b]));
+            r.insert("latch_n".into(), names(&latch_n));
+            r.insert("latch_p".into(), names(&latch_p));
+            r.insert("reset".into(), names(&reset));
+        }
     }
     Ok(r)
+}
+
+/// A row of islands, one per device, each on its own source net.
+fn split_row(name: &str, devs: &[&Mos], sources: &[&String]) -> Result<RowSpec, String> {
+    let kind = same_kind(devs, name)?;
+    let bulk = common_bulk(devs, name)?;
+    Ok(RowSpec {
+        name: name.to_string(),
+        kind,
+        islands: devs
+            .iter()
+            .zip(sources)
+            .map(|(d, s)| Island {
+                devices: vec![d.dev.clone()],
+                source: (*s).clone(),
+            })
+            .collect(),
+        off: bulk.clone(),
+        bulk,
+    })
+}
+
+/// Whether two devices are cross-coupled: each one's gate is the other's
+/// drain.
+fn cross_coupled(a: &Mos, b: &Mos, src_a: &str, src_b: &str) -> bool {
+    let (da, db) = (drain(a, src_a), drain(b, src_b));
+    &a.dev.g == db && &b.dev.g == da
 }
 
 /// Check a circuit against a template and lay its devices into rows.
@@ -345,6 +423,7 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
         Template::CurrentMirror => &["ref", "out"],
         Template::DiffPair => &["pair"],
         Template::Ota5t => &["pair", "load", "tail", "bias"],
+        Template::Comparator => &["tail", "pair", "latch_n", "latch_p", "reset"],
     };
     if let Some(k) = roles.keys().find(|k| !expected.contains(&k.as_str())) {
         return Err(format!(
@@ -463,6 +542,82 @@ pub fn block(template: Template, mos: &[Mos], given: &Roles) -> Result<Block, St
                 rows.into_iter().rev().collect()
             }
         }
+        Template::Comparator => {
+            let tail = need(mos, &roles, "tail", Some(1))?[0];
+            let pair = need(mos, &roles, "pair", Some(2))?;
+            let latch_n = need(mos, &roles, "latch_n", Some(2))?;
+            let latch_p = need(mos, &roles, "latch_p", Some(2))?;
+            let reset = need(mos, &roles, "reset", None)?;
+            let s = check_pair(&pair)?;
+            if pair[0].kind != Kind::Nmos {
+                return Err("the comparator generator takes an NMOS input pair".into());
+            }
+            if tail.kind != Kind::Nmos || (tail.dev.d != s && tail.dev.s != s) {
+                return Err(format!(
+                    "the tail {} should be an NMOS on the pair's source net {s}",
+                    tail.short()
+                ));
+            }
+            let pd: Vec<&String> = pair.iter().map(|p| drain(p, &s)).collect();
+            // Each NMOS latch device sits on one input device's drain.
+            let mut srcs: Vec<&String> = Vec::new();
+            for m in &latch_n {
+                let src = pd
+                    .iter()
+                    .find(|d| ***d == m.dev.s || ***d == m.dev.d)
+                    .ok_or_else(|| {
+                        format!(
+                            "the NMOS latch device {} does not sit on a pair drain ({} or {})",
+                            m.short(),
+                            pd[0],
+                            pd[1]
+                        )
+                    })?;
+                srcs.push(src);
+            }
+            if srcs[0] == srcs[1] {
+                return Err("the NMOS latch devices sit on the same pair drain".into());
+            }
+            if !cross_coupled(latch_n[0], latch_n[1], srcs[0], srcs[1]) {
+                return Err(format!(
+                    "{} and {} are not cross-coupled",
+                    latch_n[0].short(),
+                    latch_n[1].short()
+                ));
+            }
+            let vdd = common_source(&latch_p, "latch_p")?;
+            if latch_p.iter().any(|m| m.kind != Kind::Pmos)
+                || !cross_coupled(latch_p[0], latch_p[1], &vdd, &vdd)
+            {
+                return Err(format!(
+                    "{} and {} should be cross-coupled PMOS",
+                    latch_p[0].short(),
+                    latch_p[1].short()
+                ));
+            }
+            for m in &reset {
+                if m.dev.g != tail.dev.g || m.kind != Kind::Pmos {
+                    return Err(format!(
+                        "the reset device {} should be a PMOS clocked like the tail ({})",
+                        m.short(),
+                        tail.dev.g
+                    ));
+                }
+            }
+            common_source(&reset, "reset")?;
+            used.push(tail);
+            used.extend(&pair);
+            used.extend(&latch_n);
+            used.extend(&latch_p);
+            used.extend(&reset);
+            vec![
+                row("tail", &[tail])?,
+                row("pair", &pair)?,
+                split_row("latch_n", &latch_n, &srcs)?,
+                row("latch_p", &latch_p)?,
+                row("reset", &reset)?,
+            ]
+        }
     };
     let mut seen = BTreeMap::new();
     for u in &used {
@@ -569,6 +724,39 @@ mod tests {
         assert!(e.contains("not one of diff_pair's"), "{e}");
         let e = lookup(&mos, "M9").err().unwrap();
         assert!(e.contains("M1, M2"), "{e}");
+    }
+
+    pub const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n";
+
+    #[test]
+    fn the_comparator_roles_are_found_and_split_into_islands() {
+        let mos = mosfets(&parse(STRONGARM)).unwrap();
+        let b = block(Template::Comparator, &mos, &Roles::new()).unwrap();
+        assert_eq!(b.roles["tail"], RoleDevices::One("M0".into()));
+        assert_eq!(
+            b.roles["reset"],
+            RoleDevices::Many(vec!["M7".into(), "M8".into(), "M9".into(), "M10".into()])
+        );
+        let names: Vec<&str> = b.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["tail", "pair", "latch_n", "latch_p", "reset"]);
+        let sources: Vec<&str> = b.rows[2]
+            .islands
+            .iter()
+            .map(|i| i.source.as_str())
+            .collect();
+        assert_eq!(sources, ["xp", "xn"]);
+        assert_eq!(b.elements.len(), 11);
+        let mut roles = b.roles.clone();
+        roles.insert(
+            "latch_p".into(),
+            RoleDevices::Many(vec!["M5".into(), "M7".into()]),
+        );
+        roles.insert(
+            "reset".into(),
+            RoleDevices::Many(vec!["M6".into(), "M8".into()]),
+        );
+        let e = block(Template::Comparator, &mos, &roles).err().unwrap();
+        assert!(e.contains("cross-coupled"), "{e}");
     }
 
     #[test]
