@@ -639,11 +639,12 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
           "items": {
             "type": "string"
           },
+          "maxItems": 64,
           "type": "array"
         },
         "supplies": {
           "default": [],
-          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`. At most 200 corners in all.",
           "items": {
             "description": "Values for one supply: a voltage source or a `.param`.",
             "properties": {
@@ -652,10 +653,11 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
                 "type": "string"
               },
               "values": {
-                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`), at most 64.",
                 "items": {
                   "type": "number"
                 },
+                "maxItems": 64,
                 "type": "array"
               }
             },
@@ -665,6 +667,7 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
             ],
             "type": "object"
           },
+          "maxItems": 8,
           "type": "array"
         },
         "temperatures": {
@@ -673,6 +676,7 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
           "items": {
             "type": "number"
           },
+          "maxItems": 64,
           "type": "array"
         }
       },
@@ -1083,11 +1087,12 @@ Monte Carlo analysis: vary component values within their tolerances, device para
           "items": {
             "type": "string"
           },
+          "maxItems": 64,
           "type": "array"
         },
         "supplies": {
           "default": [],
-          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`. At most 200 corners in all.",
           "items": {
             "description": "Values for one supply: a voltage source or a `.param`.",
             "properties": {
@@ -1096,10 +1101,11 @@ Monte Carlo analysis: vary component values within their tolerances, device para
                 "type": "string"
               },
               "values": {
-                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`), at most 64.",
                 "items": {
                   "type": "number"
                 },
+                "maxItems": 64,
                 "type": "array"
               }
             },
@@ -1109,6 +1115,7 @@ Monte Carlo analysis: vary component values within their tolerances, device para
             ],
             "type": "object"
           },
+          "maxItems": 8,
           "type": "array"
         },
         "temperatures": {
@@ -1117,6 +1124,7 @@ Monte Carlo analysis: vary component values within their tolerances, device para
           "items": {
             "type": "number"
           },
+          "maxItems": 64,
           "type": "array"
         }
       },
@@ -1234,11 +1242,12 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
           "items": {
             "type": "string"
           },
+          "maxItems": 64,
           "type": "array"
         },
         "supplies": {
           "default": [],
-          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`. At most 200 corners in all.",
           "items": {
             "description": "Values for one supply: a voltage source or a `.param`.",
             "properties": {
@@ -1247,10 +1256,11 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
                 "type": "string"
               },
               "values": {
-                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`), at most 64.",
                 "items": {
                   "type": "number"
                 },
+                "maxItems": 64,
                 "type": "array"
               }
             },
@@ -1260,6 +1270,7 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
             ],
             "type": "object"
           },
+          "maxItems": 8,
           "type": "array"
         },
         "temperatures": {
@@ -1268,6 +1279,7 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
           "items": {
             "type": "number"
           },
+          "maxItems": 64,
           "type": "array"
         }
       },
