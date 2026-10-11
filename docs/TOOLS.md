@@ -409,7 +409,7 @@ Run electrical rule checks on a schematic: missing ground, floating pins, dangli
 
 ## `netlist`
 
-Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models). Useful to check exactly what will be simulated.
+Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models), with the PDK's model header in a PDK project. Useful to check exactly what will be simulated.
 
 <details><summary>Input schema</summary>
 

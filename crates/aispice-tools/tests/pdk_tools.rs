@@ -104,3 +104,38 @@ async fn only_registered_pdks_can_be_used() {
     assert!(!err && text.contains("No PDK is registered"), "{text}");
     assert!(!ws.project().unwrap().root().join(PROJECT_FILE).exists());
 }
+
+#[tokio::test]
+async fn the_netlist_tool_shows_the_model_header() {
+    let (_d, ws) = workspace(true);
+    let root = ws.project().unwrap().root().to_path_buf();
+    std::fs::write(root.join(PROJECT_FILE), "pdk = \"ihp-sg13g2\"\n").unwrap();
+    std::fs::write(
+        root.join("m.asc"),
+        "Version 4\nSHEET 1 880 680\nFLAG 48 0 d\nFLAG 0 48 g\nFLAG 48 96 0\nFLAG 48 48 0\nSYMBOL sg13g2\\sg13_lv_nmos 0 0 R0\nSYMATTR InstName M1\nTEXT 0 160 Left 2 !.op\n",
+    )
+    .unwrap();
+    let reg = registry(ws.clone());
+    let out = reg
+        .get("netlist")
+        .unwrap()
+        .call(&ToolContext::default(), json!({"circuit": "m.asc"}))
+        .await;
+    let text = out.text_content();
+    assert!(
+        text.contains("XM1 d g 0 0 sg13_lv_nmos w=0.15u l=0.13u ng=1 m=1"),
+        "{text}"
+    );
+    assert!(text.contains("cornerMOSlv.lib mos_tt"), "{text}");
+    std::fs::write(root.join(PROJECT_FILE), "pdk = \"missing\"\n").unwrap();
+    let out = reg
+        .get("netlist")
+        .unwrap()
+        .call(&ToolContext::default(), json!({"circuit": "m.asc"}))
+        .await;
+    let text = out.text_content();
+    assert!(
+        !out.is_error && text.contains("* warning: this project uses PDK `missing`"),
+        "{text}"
+    );
+}

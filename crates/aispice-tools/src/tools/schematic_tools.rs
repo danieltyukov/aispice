@@ -492,7 +492,7 @@ impl Tool for NetlistTool {
     fn spec(&self) -> ToolSpec {
         spec::<CircuitInput>(
             "netlist",
-            "Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models). Useful to check exactly what will be simulated.",
+            "Show the SPICE netlist of a schematic, derived the way LTspice does it (instance names, node order, default models), with the PDK's model header in a PDK project. Useful to check exactly what will be simulated.",
         )
     }
 
@@ -505,10 +505,25 @@ impl Tool for NetlistTool {
         blocking(move || {
             let p = ws.project().map_err(|e| e.to_string())?;
             let (sch, _) = p.load(&input.circuit).map_err(|e| e.to_string())?;
-            let (built, _) =
-                aispice_core::netlist::build(&sch, p.library(), &format!("* {}", input.circuit));
-            let mut text = aispice_core::netlist::write(&built.netlist);
-            for w in &built.warnings {
+            // The runner's netlist, which in a PDK project ends with the
+            // PDK's model header; the bare schematic netlist when the PDK
+            // the project names cannot be opened, with the reason.
+            let (netlist, mut warnings) = match ws.runner.netlist_for(&p, &input.circuit) {
+                Ok((n, _, w)) => (n, w),
+                Err(e) => {
+                    let (built, _) = aispice_core::netlist::build(
+                        &sch,
+                        p.library(),
+                        &format!("* {}", input.circuit),
+                    );
+                    let mut w = built.warnings;
+                    w.push(e.to_string());
+                    (built.netlist, w)
+                }
+            };
+            warnings.dedup();
+            let mut text = aispice_core::netlist::write(&netlist);
+            for w in &warnings {
                 text.push_str(&format!("* warning: {w}\n"));
             }
             Ok(ToolOutput::text(text))
