@@ -76,6 +76,7 @@ fn every_tool_declares_what_it_does_to_files() {
         ("templates", Edit),
         ("pdk", Edit),
         ("gm_id", ReadOnly),
+        ("check_macro", ReadOnly),
     ]
     .into_iter()
     .map(|(n, a)| (n.to_string(), a))

@@ -57,6 +57,10 @@ fn confined(dir: &Path, root: &Path) -> Result<(), String> {
 
 #[async_trait]
 impl Tool for CheckMacro {
+    fn access(&self) -> aispice_agent::Access {
+        aispice_agent::Access::ReadOnly
+    }
+
     fn spec(&self) -> ToolSpec {
         spec::<CheckMacroInput>("check_macro", DESCRIPTION)
     }

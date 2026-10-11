@@ -1665,11 +1665,303 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 </details>
 
+## `layout`
+
+Analog layout on the project's PDK (IHP SG13G2), drawn with the PDK's own pcells. `generate` lays out a circuit's transistors with a generator: current_mirror (roles ref, out), diff_pair (pair), ota5t (pair, load, tail, bias), two_stage, a Miller op-amp (the ota5t roles plus cs, sink and cc, its cap_cmim capacitor, drawn as a MIM pcell with both plates brought down to the routing), or comparator, a StrongARM latch (tail, pair, latch_n, latch_p, reset); roles are found from the topology when not given. Each matched group becomes a row of two-finger units in a common-centroid or interdigitated pattern with dummy fingers at both ends and a guard ring; nets run on Metal3 tracks, joined across rows on Metal4, and pin nets are labelled. It draws the block, runs DRC and LVS, and when DRC fails on a rule a parameter addresses (routing spacing, wells, latch-up) it changes that parameter and draws again, up to `attempts` times; then it writes <cell>.gds and <cell>.layout.json (how it was made) and returns every remaining violation with a hint on which parameter to change. Parameters: pattern (common_centroid, interdigitated), dummies (0 to 4 per row end), guard_ring, fingers (of the smallest device in a row, even), track_pitch and row_gap in um. GDS is never edited by hand: when a check fails, change parameters or roles and generate again. `render` draws a layout as a PNG.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "description": "Lay out a circuit's transistors with a generator, then check it.",
+          "enum": [
+            "generate"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Draw a layout as an image.",
+          "enum": [
+            "render"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "attempts": {
+      "description": "generate: how many times to draw it, changing the parameter that\nusually fixes a failed DRC between tries (default 3, at most 5).",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cell": {
+      "description": "The cell name; default the circuit's file name.",
+      "type": "string"
+    },
+    "check": {
+      "default": true,
+      "description": "generate: run DRC and LVS on the result (default true).",
+      "type": "boolean"
+    },
+    "circuit": {
+      "description": "generate: the circuit to lay out.",
+      "type": "string"
+    },
+    "layout": {
+      "description": "generate: the GDS to write, default `<cell>.gds` beside the circuit.\nrender: the GDS to draw.",
+      "type": "string"
+    },
+    "params": {
+      "description": "generate: pattern, dummies, guard_ring, fingers, track_pitch, row_gap.",
+      "properties": {
+        "dummies": {
+          "default": 1,
+          "description": "Dummy fingers at each end of every island (0 to 4, default 1).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fingers": {
+          "description": "Fingers of the smallest device in each row (even); the others get\nthe same finger width. By default the fewest that keep fingers at\nmost 2 um wide.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "guard_ring": {
+          "default": true,
+          "description": "A full guard ring around each row (default); false draws a tap bar\nunder the row only.",
+          "type": "boolean"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "description": "`ABAB`: units alternate.",
+              "enum": [
+                "interdigitated"
+              ],
+              "type": "string"
+            },
+            {
+              "description": "`ABBA`: units mirror about the row's centre.",
+              "enum": [
+                "common_centroid"
+              ],
+              "type": "string"
+            }
+          ],
+          "default": "common_centroid",
+          "description": "How matched devices are ordered in a row."
+        },
+        "row_gap": {
+          "default": 1.0,
+          "description": "Space between the routing channels of two rows, um (default 1).",
+          "type": "number"
+        },
+        "track_pitch": {
+          "default": 0.6,
+          "description": "Centre-to-centre pitch of the routing tracks, um (default 0.6, at\nleast 0.51).",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "roles": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "A role's devices: one instance name or several."
+      },
+      "description": "generate: which instances play which part, e.g. {\"pair\": [\"M1\",\n\"M2\"], \"load\": [\"M3\", \"M4\"], \"tail\": \"M5\", \"bias\": \"M6\"}. Found from\nthe topology when omitted.",
+      "type": "object"
+    },
+    "size": {
+      "description": "render: image width and height in pixels (default 1200 x 900).",
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "template": {
+      "description": "generate: current_mirror, diff_pair, ota5t, two_stage or comparator.",
+      "oneOf": [
+        {
+          "description": "Roles `ref` (the diode-connected device) and `out` (one or more).",
+          "enum": [
+            "current_mirror"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Role `pair` (two devices sharing a source).",
+          "enum": [
+            "diff_pair"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Five-transistor OTA: roles `pair`, `load` (a mirror), `tail` and\noptionally `bias` (the diode that mirrors into the tail).",
+          "enum": [
+            "ota5t"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "StrongARM latch comparator: roles `tail` (the clocked foot), `pair`\n(the inputs), `latch_n` and `latch_p` (the cross-coupled pairs) and\n`reset` (the clocked precharge devices).",
+          "enum": [
+            "comparator"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Two-stage Miller op-amp: the OTA's roles plus `cs` (the second\nstage), `sink` (its current source, mirrored from the tail) and `cc`\n(the cap_cmim compensation capacitor).",
+          "enum": [
+            "two_stage"
+          ],
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `drc`
+
+Design rule check of a layout (GDS) with the PDK's own KLayout rule decks: the main rules, IHP's extra rules and antenna rules by default. Each violation comes with its rule, the layer, a description and where it is (box in um). For a layout made by the layout tool, the report says which generator parameter usually fixes each rule family; change it and generate again. Never edit GDS by hand.
+
+Read-only: writes nothing of yours, only aispice's own folders.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "antenna": {
+      "default": true,
+      "description": "Antenna rules (default true).",
+      "type": "boolean"
+    },
+    "cell": {
+      "description": "The cell to check; default the file's one top cell.",
+      "type": "string"
+    },
+    "density": {
+      "default": false,
+      "description": "Density rules, which apply to a whole chip (default false).",
+      "type": "boolean"
+    },
+    "extra": {
+      "default": true,
+      "description": "IHP's extra rules beyond the main set (default true).",
+      "type": "boolean"
+    },
+    "layout": {
+      "description": "The layout: a GDS file in the project.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "layout"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `lvs`
+
+Layout versus schematic with the PDK's KLayout LVS deck: compares the devices and nets extracted from a layout (GDS) with the circuit's PDK devices. For a layout the layout tool made, only the devices it drew are compared, with its dummy transistors added to the schematic side. Reports every net, device and pin that does not match, by its name in the schematic and in the layout. Pin nets must be labelled in the layout; the generators do that.
+
+Read-only: writes nothing of yours, only aispice's own folders.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "cell": {
+      "description": "The cell; default the file's one top cell.",
+      "type": "string"
+    },
+    "circuit": {
+      "description": "The circuit it should match: a schematic or netlist of the project.",
+      "type": "string"
+    },
+    "layout": {
+      "description": "The layout: a GDS file in the project.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "layout",
+    "circuit"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `extract`
+
+Extract a layout's parasitics with Magic and the PDK's tech file: every transistor finger, coupling and ground capacitance and, with resistance, a resistor network per net. Returns the extracted subcircuit. To simulate it, run check_specs with post_layout, which puts the extracted layout in place of the schematic's devices and reports each spec before and after layout.
+
+Read-only: writes nothing of yours, only aispice's own folders.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "cell": {
+      "type": "string"
+    },
+    "layout": {
+      "description": "The layout: a GDS file in the project.",
+      "type": "string"
+    },
+    "resistance": {
+      "default": false,
+      "description": "Resistor networks as well as capacitance (default false).",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "layout"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
 ## `check_macro`
 
 Check a macro package before a chip places it. A macro package (macro/v1) is the format aispice and ChipLeap use to hand hardened blocks to each other: macro.toml plus GDS, LEF, liberty, a Verilog model, a SPICE netlist, a measured spec table for analog blocks, and DRC and LVS evidence. The check covers macro.toml against its schema, the files each kind needs, every pin across the GDS, LEF, liberty, Verilog and SPICE views with its direction, the size, timing arcs of digital outputs, measured specs against their limits, and evidence that passes, matches the package files and names the same PDK. Returns every finding with its rule id, severity, file and message; the package passes when there are no errors. ChipLeap's `chipleap macro check` reports the same findings.
 
-Edits your files: each write is approved in ask-before-applying mode and can be undone.
+Read-only: writes nothing of yours, only aispice's own folders.
 
 <details><summary>Input schema</summary>
 
