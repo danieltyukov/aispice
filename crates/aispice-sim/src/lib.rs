@@ -10,6 +10,7 @@ pub mod models;
 pub mod montecarlo;
 pub mod oppoint;
 pub mod optimize;
+pub mod pdk;
 pub mod plot;
 pub mod polezero;
 pub mod raw;
