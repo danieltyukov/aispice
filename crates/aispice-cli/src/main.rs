@@ -245,6 +245,12 @@ enum Command {
         #[command(subcommand)]
         action: MacroAction,
     },
+    /// Analog-on-top chips: blocks from macro packages, IHP's pad ring,
+    /// bond pads, seal ring and fill, checked with full-chip DRC and LVS.
+    Chip {
+        #[command(subcommand)]
+        action: ChipAction,
+    },
     /// Check simulators, LTspice's library and model provider keys.
     Doctor,
     /// Manage model provider API keys (kept in the OS keychain).
@@ -357,6 +363,29 @@ enum MacroAction {
     },
     /// Print the JSON schema of macro.toml.
     Schema,
+}
+
+#[derive(Subcommand)]
+enum ChipAction {
+    /// Floorplan and routes of a chip description, without drawing or
+    /// writing anything (exit code 1 when it cannot be placed or routed).
+    Plan {
+        /// The chip description (.chip.toml), in a project whose
+        /// aispice.toml names the PDK.
+        spec: PathBuf,
+    },
+    /// Draw, fill and check a chip and write it beside its description
+    /// (exit code 1 when DRC or LVS fails).
+    Assemble {
+        spec: PathBuf,
+        /// The results folder, relative to the project (default:
+        /// <name>.chip beside the description).
+        #[arg(long)]
+        out: Option<String>,
+        /// Skip full-chip DRC and LVS.
+        #[arg(long)]
+        no_check: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -595,6 +624,16 @@ fn run(cli: Cli) -> Result<ExitCode> {
             }),
             cli.json,
         ),
+        Command::Chip { action } => match action {
+            ChipAction::Plan { spec } => {
+                cmd_layout::chip(&spec, "plan", None, true, &cli.symbols, cli.json)
+            }
+            ChipAction::Assemble {
+                spec,
+                out,
+                no_check,
+            } => cmd_layout::chip(&spec, "assemble", out, !no_check, &cli.symbols, cli.json),
+        },
         Command::Macro { action } => match action {
             MacroAction::Check { dir, pdk, strict } => {
                 cmd_macro::check(&dir, pdk, strict, cli.json)

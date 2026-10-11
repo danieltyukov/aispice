@@ -17,7 +17,7 @@
 //! everything is routed again, up to 8 times. The same problem always gives
 //! the same routes.
 
-use super::geom::{Facing, LayerRect, METAL2, METAL3, METAL4, Rect, VIA2, VIA3};
+use super::geom::{Facing, LayerRect, METAL1, METAL2, METAL3, METAL4, Rect, VIA1, VIA2, VIA3};
 use serde::Serialize;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
@@ -208,9 +208,9 @@ fn access(g: &Grid, t: &Terminal) -> Result<Access, String> {
         )
     })?;
     let layer = t.pin.layer;
-    if !matches!(layer, METAL2 | METAL3 | METAL4) {
+    if !matches!(layer, METAL1 | METAL2 | METAL3 | METAL4) {
         return Err(format!(
-            "{} is on a layer the chip router does not use; it routes on Metal3 and Metal4 and reaches pins on Metal2 to Metal4",
+            "{} is on a layer the chip router does not use; it routes on Metal3 and Metal4 and reaches pins on Metal1 to Metal4",
             t.name
         ));
     }
@@ -254,19 +254,28 @@ fn access(g: &Grid, t: &Terminal) -> Result<Access, String> {
             rect: Rect::new(cx, cy, nx, ny).expand(HALF),
         });
     }
-    let node_layer = if layer == METAL2 {
+    // A pin below Metal3 reaches it through a stack of vias at the node,
+    // each with a pad on the metals it joins.
+    let node_layer = if matches!(layer, METAL1 | METAL2) {
+        let stack: &[(i16, i16)] = if layer == METAL1 {
+            &[(VIA1, METAL2), (VIA2, METAL3)]
+        } else {
+            &[(VIA2, METAL3)]
+        };
         shapes.push(LayerRect {
-            layer: VIA2,
-            rect: rect_around(nx, ny, VIA / 2),
-        });
-        shapes.push(LayerRect {
-            layer: METAL2,
+            layer,
             rect: rect_around(nx, ny, HALF),
         });
-        shapes.push(LayerRect {
-            layer: METAL3,
-            rect: rect_around(nx, ny, HALF),
-        });
+        for (via, metal) in stack {
+            shapes.push(LayerRect {
+                layer: *via,
+                rect: rect_around(nx, ny, VIA / 2),
+            });
+            shapes.push(LayerRect {
+                layer: *metal,
+                rect: rect_around(nx, ny, HALF),
+            });
+        }
         0
     } else {
         layer_of(layer).expect("Metal3 or Metal4")
@@ -422,7 +431,8 @@ pub fn route(p: &Problem) -> Result<Routed, String> {
     // Stubs of different nets must keep the spacing rule between them.
     for (k, (na, ta, a)) in stub_shapes.iter().enumerate() {
         for (nb, tb, b) in &stub_shapes[k + 1..] {
-            if na != nb && a.layer == b.layer && a.rect.distance(&b.rect) < 210.0 {
+            let rule = if a.layer == METAL1 { 180.0 } else { 210.0 };
+            if na != nb && a.layer == b.layer && a.rect.distance(&b.rect) < rule {
                 return Err(format!(
                     "the pins {ta} and {tb} are too close for the chip router to reach both; move one of the blocks"
                 ));
@@ -641,10 +651,11 @@ pub fn check(routed: &Routed, terminals: &[Terminal]) -> Vec<String> {
     let s = &routed.shapes;
     for (k, (na, a)) in s.iter().enumerate() {
         for (nb, b) in &s[k + 1..] {
-            let rule = if matches!(a.layer, VIA2 | VIA3) {
-                220.0
-            } else {
-                210.0
+            // Metal1 0.18 um, Metal2 to Metal4 0.21 um, vias 0.22 um.
+            let rule = match a.layer {
+                VIA1 | VIA2 | VIA3 => 220.0,
+                METAL1 => 180.0,
+                _ => 210.0,
             };
             if na != nb && a.layer == b.layer && a.rect.distance(&b.rect) < rule {
                 out.push(format!(
@@ -666,7 +677,7 @@ pub fn check(routed: &Routed, terminals: &[Terminal]) -> Vec<String> {
         }
     }
     let joins = |a: &LayerRect, b: &LayerRect| {
-        let cut = |l: i16| matches!(l, VIA2 | VIA3);
+        let cut = |l: i16| matches!(l, VIA1 | VIA2 | VIA3);
         let touch = a.rect.touches(&b.rect);
         touch
             && (a.layer == b.layer
@@ -689,7 +700,17 @@ pub fn check(routed: &Routed, terminals: &[Terminal]) -> Vec<String> {
             }
         }
         if seen.iter().any(|s| !s) {
-            out.push(format!("net {net} is not connected"));
+            let apart: Vec<String> = rects
+                .iter()
+                .zip(&seen)
+                .filter(|(_, s)| !**s)
+                .take(4)
+                .map(|(r, _)| format!("{} {:?}", r.layer, r.rect.um()))
+                .collect();
+            out.push(format!(
+                "net {net} is not connected (apart: {})",
+                apart.join(", ")
+            ));
         }
     }
     out
@@ -698,7 +719,12 @@ pub fn check(routed: &Routed, terminals: &[Terminal]) -> Vec<String> {
 fn via_joins(via: i16, metal: i16) -> bool {
     matches!(
         (via, metal),
-        (VIA2, METAL2) | (VIA2, METAL3) | (VIA3, METAL3) | (VIA3, METAL4)
+        (VIA1, METAL1)
+            | (VIA1, METAL2)
+            | (VIA2, METAL2)
+            | (VIA2, METAL3)
+            | (VIA3, METAL3)
+            | (VIA3, METAL4)
     )
 }
 

@@ -90,6 +90,8 @@ fn every_tool_declares_what_it_does_to_files() {
         ("check_macro", ReadOnly),
         // Writes a package into the project after one approval.
         ("macro_export", Edit),
+        // Writes the chip, its netlist and evidence after one approval.
+        ("chip", Edit),
     ]
     .into_iter()
     .map(|(n, a)| (n.to_string(), a))

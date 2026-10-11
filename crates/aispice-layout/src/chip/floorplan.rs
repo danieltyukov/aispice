@@ -287,11 +287,7 @@ pub fn plan(spec: &ChipSpec, io: &IoLibrary, macros: &[MacroGeom]) -> Result<Flo
     for m in macros {
         let (llx, lly) = match m.at {
             Some((ax, ay)) => (core.x1 + ax, core.y1 + ay),
-            None => {
-                let at = (x, row_y);
-                x += m.size.0 + MACRO_GAP;
-                at
-            }
+            None => (x, row_y),
         };
         // The cell's origin lands on the router's grid, so pins drawn on a
         // grid fixed to it (aispice's edge pins) do too.
@@ -304,6 +300,9 @@ pub fn plan(spec: &ChipSpec, io: &IoLibrary, macros: &[MacroGeom]) -> Result<Flo
             dx - m.origin.0 + m.size.0,
             dy - m.origin.1 + m.size.1,
         );
+        if m.at.is_none() {
+            x = bbox.x2 + MACRO_GAP;
+        }
         let inner = Rect::new(
             core.x1 + MACRO_GAP / 2,
             core.y1 + MACRO_GAP / 2,

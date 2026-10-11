@@ -250,3 +250,34 @@ pub fn check_post_layout(a: PostLayoutArgs) -> Result<ExitCode> {
         .unwrap_or(false);
     done(&out, a.json_mode, pass)
 }
+
+/// `aispice chip plan|assemble`: the `chip` tool on the description's
+/// project. Exit code 1 when the chip cannot be planned, or when assembled
+/// and checked it fails DRC or LVS.
+pub fn chip(
+    spec: &Path,
+    action: &str,
+    out: Option<String>,
+    check: bool,
+    symbols: &[PathBuf],
+    json_mode: bool,
+) -> Result<ExitCode> {
+    let (ws, spec) = workspace_for(spec, symbols)?;
+    let out = run_tool(
+        &ws,
+        "chip",
+        json!({"action": action, "spec": spec, "out": out, "check": check}),
+    )?;
+    if out.is_error {
+        println!("{}", crate::cmd_agent::terminal_safe(&out.text_content()));
+        return Ok(ExitCode::from(1));
+    }
+    let r = out.data.as_ref().map(|d| &d["value"]["result"]);
+    let ok = action == "plan"
+        || !check
+        || r.is_some_and(|r| {
+            r["drc"]["rules"].as_array().is_some_and(Vec::is_empty)
+                && r["lvs"]["matched"].as_bool() == Some(true)
+        });
+    done(&out, json_mode, ok)
+}

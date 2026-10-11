@@ -75,6 +75,12 @@ pub struct PdkLayoutFiles {
     pub python: PathBuf,
     pub lyp: PathBuf,
     pub magicrc: PathBuf,
+    /// Magic's tech file that keeps every GDS layer as drawn, for fill.
+    pub magic_gds_tech: PathBuf,
+    /// The PDK's folder, for its IO and standard-cell libraries.
+    pub root: PathBuf,
+    /// IHP's standard-cell netlist (CDL), for chip LVS.
+    pub stdcell_cdl: PathBuf,
 }
 
 impl PdkLayoutFiles {
@@ -94,6 +100,11 @@ impl PdkLayoutFiles {
             python: pdk.root.join("libs.tech/klayout/python"),
             lyp: tech.join("sg13g2.lyp"),
             magicrc: pdk.root.join("libs.tech/magic/ihp-sg13g2.magicrc"),
+            magic_gds_tech: pdk.root.join("libs.tech/magic/ihp-sg13g2-GDS.tech"),
+            root: pdk.root.clone(),
+            stdcell_cdl: pdk
+                .root
+                .join("libs.ref/sg13g2_stdcell/cdl/sg13g2_stdcell.cdl"),
         };
         for (what, path) in [
             ("KLayout DRC deck", &f.drc_deck),
@@ -204,6 +215,37 @@ pub async fn klayout(
             message: e.to_string(),
         })?;
     Ok(out)
+}
+
+/// Run Magic without graphics on a Tcl script of aispice's with a tech file
+/// instead of a start-up file (fill uses the PDK's GDS tech file).
+pub async fn magic_tech(
+    programs: &Programs,
+    dir: &Path,
+    tech: &Path,
+    script: &Path,
+    env: &[(&str, String)],
+    cancel: &CancellationToken,
+) -> Result<ProcessOutput, LayoutError> {
+    let exe = programs.magic()?;
+    let mut spec = ProcessSpec::new(&exe, dir)
+        .env("HOME", dir)
+        .env("TMPDIR", dir)
+        .env("MAGTYPE", "mag")
+        .arg("-dnull")
+        .arg("-noconsole")
+        .arg("-T")
+        .arg(tech)
+        .arg(script);
+    for (k, v) in env {
+        spec = spec.env(*k, v);
+    }
+    process::run(&spec, TIMEOUT, cancel)
+        .await
+        .map_err(|e| LayoutError::Failed {
+            program: "Magic".into(),
+            message: e.to_string(),
+        })
 }
 
 /// Run Magic without graphics on a Tcl script of aispice's, with the

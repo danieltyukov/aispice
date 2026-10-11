@@ -25,6 +25,8 @@ pub fn layer_by_name(name: &str) -> Option<i16> {
     })
 }
 
+pub const METAL1: i16 = 8;
+pub const VIA1: i16 = 19;
 pub const METAL2: i16 = 10;
 pub const VIA2: i16 = 29;
 pub const METAL3: i16 = 30;
