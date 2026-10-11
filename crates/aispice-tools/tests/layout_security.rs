@@ -27,6 +27,17 @@ async fn call(ws: &Arc<Workspace>, tool: &str, input: Value) -> ToolOutput {
         .await
 }
 
+const SPECS: &str = "gbw = unity_gain_freq(V(out)) >= 1Meg\n";
+
+async fn generate_to(ws: &Arc<Workspace>, layout: &str) -> ToolOutput {
+    call(
+        ws,
+        "layout",
+        json!({"action": "generate", "circuit": "ota.cir", "template": "ota5t", "layout": layout}),
+    )
+    .await
+}
+
 fn gds(path: &Path) {
     let cell = TestCell {
         name: "blk".into(),
@@ -97,6 +108,11 @@ async fn a_gds_outside_the_project_is_refused() {
         ("extract", json!({"layout": abs})),
         ("lvs", json!({"layout": abs, "circuit": "x.cir"})),
         ("layout", json!({"action": "render", "layout": abs})),
+        (
+            "check_specs",
+            json!({"circuit": "x.cir", "specs": SPECS, "save": false,
+                   "post_layout": {"layout": abs}}),
+        ),
     ] {
         let out = call(&ws, tool, input).await;
         assert!(out.is_error, "{tool}: {}", out.text_content());
@@ -136,21 +152,15 @@ async fn an_output_path_with_dotdot_is_refused() {
     let project = parent.path().join("proj");
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("ota.cir"), "* ota\n.op\n").unwrap();
+    std::fs::create_dir(project.join("sub")).unwrap();
     let ws = workspace(&project);
-    let absolute = parent.path().join("evil.gds").display().to_string();
     for bad in [
         "../evil.gds",
         "sub/../../evil.gds",
+        "sub/../ota.gds",
         "~/evil.gds",
-        "/etc/evil.gds",
-        absolute.as_str(),
     ] {
-        let out = call(
-            &ws,
-            "layout",
-            json!({"action": "generate", "circuit": "ota.cir", "template": "ota5t", "layout": bad}),
-        )
-        .await;
+        let out = generate_to(&ws, bad).await;
         assert!(out.is_error, "{bad}: {}", out.text_content());
         assert!(
             out.text_content().contains("outside"),
@@ -159,6 +169,7 @@ async fn an_output_path_with_dotdot_is_refused() {
         );
     }
     assert!(!parent.path().join("evil.gds").exists());
+    assert!(!project.join("ota.gds").exists());
     // A cell name cannot carry a path either.
     let out = call(
         &ws,
@@ -168,6 +179,132 @@ async fn an_output_path_with_dotdot_is_refused() {
     .await;
     assert!(out.is_error, "{}", out.text_content());
     assert!(!parent.path().join("evil.gds").exists());
+}
+
+#[tokio::test]
+async fn an_absolute_output_path_outside_the_project_is_refused() {
+    let parent = tempfile::tempdir().unwrap();
+    let project = parent.path().join("proj");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("ota.cir"), "* ota\n.op\n").unwrap();
+    let ws = workspace(&project);
+    let beside = parent.path().join("evil.gds").display().to_string();
+    let root = if cfg!(windows) {
+        "C:\\evil.gds"
+    } else {
+        "/evil.gds"
+    };
+    // On Windows `/etc/evil.gds` has a root but no drive: the current
+    // drive's, not the project's.
+    for bad in [beside.as_str(), root, "/etc/evil.gds"] {
+        let out = generate_to(&ws, bad).await;
+        assert!(out.is_error, "{bad}: {}", out.text_content());
+        assert!(
+            out.text_content().contains("outside"),
+            "{bad}: {}",
+            out.text_content()
+        );
+    }
+    assert!(!parent.path().join("evil.gds").exists());
+}
+
+#[tokio::test]
+async fn an_output_inside_aispice_state_folder_is_refused() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("ota.cir"), "* ota\n.op\n").unwrap();
+    std::fs::create_dir_all(project.path().join(".aispice/layout")).unwrap();
+    let ws = workspace(project.path());
+    for bad in [".aispice/ota.gds", ".aispice/layout/ota.gds"] {
+        let out = generate_to(&ws, bad).await;
+        assert!(out.is_error, "{bad}: {}", out.text_content());
+        assert!(
+            out.text_content().contains("outside"),
+            "{bad}: {}",
+            out.text_content()
+        );
+    }
+    let err = ws
+        .write_files(&Writer, &[file(".aispice/blk.gds", b"x")], "test", "")
+        .await
+        .unwrap_err();
+    assert!(err.contains("outside"), "{err}");
+    assert!(!project.path().join(".aispice/blk.gds").exists());
+}
+
+#[tokio::test]
+async fn a_file_the_layout_tool_did_not_make_is_never_replaced() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("ota.cir"), "* ota\n.op\n").unwrap();
+    std::fs::write(project.path().join("ota.gds"), b"the user's layout").unwrap();
+    let ws = workspace(project.path());
+    // Refused before any PDK, program or approval is involved.
+    let out = generate_to(&ws, "ota.gds").await;
+    assert!(out.is_error, "{}", out.text_content());
+    assert!(
+        out.text_content()
+            .contains("was not made by the layout tool"),
+        "{}",
+        out.text_content()
+    );
+    assert_eq!(
+        std::fs::read(project.path().join("ota.gds")).unwrap(),
+        b"the user's layout"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_output_folder_that_links_outside_is_refused() {
+    let project = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("ota.cir"), "* ota\n.op\n").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), project.path().join("out")).unwrap();
+    let ws = workspace(project.path());
+    let out = generate_to(&ws, "out/ota.gds").await;
+    assert!(out.is_error, "{}", out.text_content());
+    assert!(
+        out.text_content().contains("outside"),
+        "{}",
+        out.text_content()
+    );
+    let err = ws
+        .write_files(&Writer, &[file("out/blk.gds", b"x")], "test", "")
+        .await
+        .unwrap_err();
+    assert!(err.contains("outside"), "{err}");
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn check_specs_does_not_save_specs_through_a_link() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("ota.cir"), "* ota\n.op\n").unwrap();
+    std::fs::write(project.path().join("notes.txt"), b"keep").unwrap();
+    std::os::unix::fs::symlink(
+        project.path().join("notes.txt"),
+        project.path().join("ota.specs"),
+    )
+    .unwrap();
+    let ws = workspace(project.path());
+    // The simulation that follows may fail without a simulator; the save
+    // comes first either way.
+    call(
+        &ws,
+        "check_specs",
+        json!({"circuit": "ota.cir", "specs": SPECS, "save": true}),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(project.path().join("notes.txt")).unwrap(),
+        b"keep"
+    );
+    assert!(
+        std::fs::symlink_metadata(project.path().join("ota.specs"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[cfg(unix)]

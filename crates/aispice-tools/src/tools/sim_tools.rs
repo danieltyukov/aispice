@@ -85,7 +85,9 @@ async fn save_specs(ws: &Workspace, p: &crate::project::Project, circuit: &str, 
     {
         return;
     }
-    if let Ok(path) = p.resolve(&file) {
+    // The output resolver, not the reader's: a `.specs` that is a link to
+    // another file of the project must not get the specs written into it.
+    if let Ok(path) = p.resolve_output(&file) {
         let _ = crate::project::atomic_write(&path, text.as_bytes());
     }
 }

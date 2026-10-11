@@ -7,10 +7,13 @@
 
 use aispice_agent::ToolContext;
 use aispice_tools::pdk::{PROJECT_FILE, Registry};
-use aispice_tools::{Project, Runner, RunnerConfig, Workspace};
+use aispice_tools::{Approver, Hooks, Project, Runner, RunnerConfig, Workspace};
+use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A five-transistor OTA: NMOS pair, PMOS mirror load, NMOS tail biased from
 /// a 20 uA diode, a MIM load capacitor. Open loop, inputs at 0.6 V, AC on
@@ -99,13 +102,23 @@ const TWO_STAGE: &str = "* two-stage Miller op-amp\nVDD vdd 0 1.2\nVM inm 0 0.6 
 const SPECS: &str = "gain = gain_db_at(V(out), 10) >= 20\ngbw = unity_gain_freq(V(out)) >= 1Meg\npm = phase_margin(V(out)) >= 45\n";
 
 fn workspace() -> Option<(tempfile::TempDir, Arc<Workspace>)> {
+    let programs = aispice_layout::tools::Programs::default();
+    if programs.magic().is_err() {
+        eprintln!("skipped: Magic is needed");
+        return None;
+    }
+    workspace_with_klayout()
+}
+
+/// The project, for tests that need KLayout but not Magic.
+fn workspace_with_klayout() -> Option<(tempfile::TempDir, Arc<Workspace>)> {
     let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {
         eprintln!("skipped: AISPICE_PDK_IHP is not set");
         return None;
     };
     let programs = aispice_layout::tools::Programs::default();
-    if programs.klayout().is_err() || programs.magic().is_err() {
-        eprintln!("skipped: KLayout and Magic are needed");
+    if programs.klayout().is_err() {
+        eprintln!("skipped: KLayout is needed");
         return None;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -235,6 +248,137 @@ async fn the_ota_is_laid_out_checked_extracted_and_simulated_after_layout() {
         gbw1 / 1e6
     );
     assert!(gbw1 < gbw0, "{gbw0} {gbw1}");
+}
+
+/// Every file of the project outside aispice's own `.aispice/`, with its
+/// contents.
+fn user_files(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+            let path = e.path();
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == ".aispice" {
+                continue;
+            }
+            if e.file_type().unwrap().is_dir() {
+                walk(root, &path, out);
+            } else {
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// Approves every write and counts the requests.
+#[derive(Default)]
+struct Counting(AtomicUsize);
+
+#[async_trait]
+impl Approver for Counting {
+    async fn approve(&self, _circuit: &str, _summary: &str, _diff: &str) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+}
+
+struct Decline;
+
+#[async_trait]
+impl Approver for Decline {
+    async fn approve(&self, _circuit: &str, _summary: &str, _diff: &str) -> bool {
+        false
+    }
+}
+
+/// What each layout tool's access class promises, on real runs: `layout`
+/// (Edit) writes the GDS and its record and nothing else, after one
+/// approval, and nothing when declined; `drc`, `lvs`, `extract`, `layout
+/// render` and `check_specs` with `post_layout` (and `save` off) write
+/// nothing of the user's and ask for nothing, keeping their reports in
+/// `.aispice/layout/`. Extraction is checked when Magic is installed.
+#[tokio::test]
+async fn each_layout_tool_writes_only_what_its_access_class_allows() {
+    let Some((dir, ws)) = workspace_with_klayout() else {
+        return;
+    };
+    let approvals = Arc::new(Counting::default());
+    ws.set_hooks(Hooks {
+        approver: Some(approvals.clone()),
+        after_save: None,
+    });
+    let before = user_files(dir.path());
+
+    let generate =
+        json!({"action": "generate", "circuit": "ota.asc", "template": "ota5t", "check": false});
+    call(&ws, "layout", generate.clone()).await;
+    assert_eq!(approvals.0.load(Ordering::SeqCst), 1, "one approval");
+    let after = user_files(dir.path());
+    let mut expected = before.clone();
+    expected.insert("ota.gds".into(), after["ota.gds"].clone());
+    expected.insert("ota.layout.json".into(), after["ota.layout.json"].clone());
+    assert_eq!(
+        after.keys().collect::<Vec<_>>(),
+        expected.keys().collect::<Vec<_>>()
+    );
+    assert!(after == expected, "layout changed a file it did not name");
+
+    let mut read_only = vec![
+        ("drc", json!({"layout": "ota.gds"})),
+        ("lvs", json!({"layout": "ota.gds", "circuit": "ota.asc"})),
+        ("layout", json!({"action": "render", "layout": "ota.gds"})),
+    ];
+    if aispice_layout::tools::Programs::default().magic().is_ok() {
+        read_only.push(("extract", json!({"layout": "ota.gds"})));
+        read_only.push((
+            "check_specs",
+            json!({"circuit": "ota.asc", "specs": SPECS, "save": false,
+                   "post_layout": {"layout": "ota.gds"}}),
+        ));
+    } else {
+        eprintln!("extract and check_specs post_layout skipped: Magic is not installed");
+    }
+    for (tool, input) in read_only {
+        call(&ws, tool, input).await;
+        assert!(
+            user_files(dir.path()) == after,
+            "{tool} changed the user's files"
+        );
+        assert_eq!(
+            approvals.0.load(Ordering::SeqCst),
+            1,
+            "{tool} asked to write"
+        );
+    }
+    let runs = std::fs::read_dir(dir.path().join(".aispice/layout")).unwrap();
+    assert!(runs.count() >= 3, "reports in .aispice/layout");
+
+    // Declined, generating again leaves the layout as it was.
+    ws.set_hooks(Hooks {
+        approver: Some(Arc::new(Decline)),
+        after_save: None,
+    });
+    let out = aispice_tools::registry(ws.clone())
+        .get("layout")
+        .unwrap()
+        .call(&ToolContext::default(), generate)
+        .await;
+    assert!(out.is_error, "{}", out.text_content());
+    assert!(
+        out.text_content().contains("declined"),
+        "{}",
+        out.text_content()
+    );
+    assert!(
+        user_files(dir.path()) == after,
+        "a declined layout was written"
+    );
 }
 
 #[tokio::test]

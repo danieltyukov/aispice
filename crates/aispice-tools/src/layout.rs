@@ -134,16 +134,28 @@ pub fn open_gds(
 static RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// A fresh folder for one layout run's reports: `.aispice/layout/<id>`.
+/// It is always made here, never reused: a project can ship a `.aispice`
+/// folder, and a run folder it planted could hold links that the reports,
+/// written by KLayout and Magic, would follow out of the project.
 pub fn run_dir(p: &Project) -> Result<(String, PathBuf), String> {
-    let id = format!(
-        "{}-{}",
-        crate::project::now_ms(),
-        RUNS.fetch_add(1, Ordering::Relaxed)
-    );
-    let dir = p
-        .state_subdir(&["layout", &id])
-        .map_err(|e| e.to_string())?;
-    Ok((id, dir))
+    let base = p.state_subdir(&["layout"]).map_err(|e| e.to_string())?;
+    for _ in 0..64 {
+        let id = format!(
+            "{}-{}",
+            crate::project::now_ms(),
+            RUNS.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = base.join(&id);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok((id, dir)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!(
+        "no new run folder could be made in {}",
+        base.display()
+    ))
 }
 
 /// The netlist names of the devices a layout holds: the generator's record,
