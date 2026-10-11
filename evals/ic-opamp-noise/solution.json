@@ -1,0 +1,5 @@
+[
+  {"tools": [{"name": "read_schematic", "input": {"circuit": "opamp.asc"}}]},
+  {"tools": [{"name": "simulate", "input": {"circuit": "opamp.asc", "analysis": ".noise V(out) VINM dec 20 1 100Meg", "measurements": ["n1k = input_noise_at(1k)", "n1meg = input_noise_at(1Meg)", "n10 = input_noise_at(10)"]}}]},
+  {"answer": "Referred to VINM, the input noise density is 425 nV/√Hz at 1 kHz and 29.2 nV/√Hz at 1 MHz (noise analysis on ngspice with the PDK's typical models at 27 C). At 1 kHz flicker noise dominates: the density is 4.2 uV/√Hz at 10 Hz and falls tenfold over the two decades to 1 kHz, as 1/f noise does. By 1 MHz it has reached the thermal floor of the input pair and the mirror load."}
+]

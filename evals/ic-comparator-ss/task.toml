@@ -1,0 +1,22 @@
+id = "ic-comparator-ss"
+title = "Fix a comparator that is too slow at the slow corner"
+difficulty = "medium"
+pdk = "ihp-sg13g2"
+prompt = """
+comparator.asc is a StrongARM latch comparator on IHP SG13G2, clocked at 500 MHz with inputs 1 mV apart that swap between two decisions. At the typical corner outn falls through 0.6 V within 250 ps of the start, but at the slow corner it is too slow. Resize the transistors so that it decides correctly both ways, resets fully, and outn falls through 0.6 V within 250 ps at every process corner (tt, ss, ff, sf, fs) at -40 C, 27 C and 125 C. Keep the clock, the inputs, the 5 fF loads CN and CP and the 1.2 V supply as they are.
+"""
+circuit = "comparator.asc"
+analysis = ".tran 1p 3n"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
+specs = """
+first = value_at(V(outp,outn), 0.95n) >= 1
+second = value_at(V(outp,outn), 2.95n) <= -1
+reset = value_at(V(outp), 1.95n) >= 1.1
+tdec = crossing(V(outn), 0.6, fall) <= 250p
+"""
+max_steps = 20
+constraints = [
+  { kind = "value", name = "CN", equals = "5f" },
+  { kind = "value", name = "CP", equals = "5f" },
+  { kind = "value", name = "VDD", equals = "1.2" },
+]
