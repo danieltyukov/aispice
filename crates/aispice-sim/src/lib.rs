@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod behavioral;
+pub mod budget;
 pub mod corner;
 pub mod dataset;
 pub mod dialect;
@@ -22,5 +23,6 @@ pub mod raw;
 pub mod spec;
 pub mod stimulus;
 pub mod sweep;
+pub mod trim;
 
 pub use dataset::{AnalysisKind, Complex, Dataset, Quantity, Step, Vector, VectorData};
