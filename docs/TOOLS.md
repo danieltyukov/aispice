@@ -549,7 +549,7 @@ List the simulators installed on this machine (ngspice, LTspice, Xyce, Spectre) 
 
 ## `simulate`
 
-Simulate a circuit and report what came back: analyses, vector names, operating point, the simulator's own .meas results, warnings and errors, plus any measurements you ask for. Fix lint errors first. Use the run id with measure, plot and read_waveform. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+Simulate a circuit and report what came back: analyses, vector names, operating point, the simulator's own .meas results, warnings and errors, plus any measurements you ask for. Fix lint errors first. Use the run id with measure, plot and read_waveform. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
 <details><summary>Input schema</summary>
 
@@ -587,7 +587,7 @@ Simulate a circuit and report what came back: analyses, vector names, operating 
 
 ## `measure`
 
-Take measurements on a simulation result without re-running it. Without a run id it uses the circuit's latest run, and simulates the circuit again (with that run's analysis) when the circuit has changed since, so numbers always describe the circuit as it is; the answer says when that happened. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+Take measurements on a simulation result without re-running it. Without a run id it uses the circuit's latest run, and simulates the circuit again (with that run's analysis) when the circuit has changed since, so numbers always describe the circuit as it is; the answer says when that happened. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
 <details><summary>Input schema</summary>
 
@@ -620,7 +620,7 @@ Take measurements on a simulation result without re-running it. Without a run id
 
 ## `check_specs`
 
-Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
 <details><summary>Input schema</summary>
 
@@ -629,6 +629,54 @@ Simulate the circuit and check it against a spec table, reporting pass or fail a
   "properties": {
     "circuit": {
       "type": "string"
+    },
+    "corners": {
+      "description": "Check at every corner of this set and report each spec's worst value,\nits margin and the corner where it occurred, plus every spec at every\ncorner. For example `{\"process\": [\"tt\", \"ss\", \"ff\"], \"temperatures\":\n[-40, 27, 125], \"supplies\": [{\"target\": \"VDD\", \"values\": [1.62,\n1.98]}]}`.",
+      "properties": {
+        "process": {
+          "default": [],
+          "description": "Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or\nfamily=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,\ndio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supplies": {
+          "default": [],
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "items": {
+            "description": "Values for one supply: a voltage source or a `.param`.",
+            "properties": {
+              "target": {
+                "description": "A source (`VDD`) or `.param` name.",
+                "type": "string"
+              },
+              "values": {
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "target",
+              "values"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "temperatures": {
+          "default": [],
+          "description": "Temperatures in degrees Celsius.",
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "save": {
       "default": true,
@@ -861,7 +909,7 @@ Check bias: the DC operating point with each semiconductor device's small-signal
 
 ## `sweep`
 
-Sweep component values or .param values (several parameters give every combination, at most 200 runs) and tabulate measurements for each. Works with every simulator. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
+Sweep component values or .param values (several parameters give every combination, at most 200 runs) and tabulate measurements for each. Works with every simulator. Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().
 
 <details><summary>Input schema</summary>
 
@@ -1016,7 +1064,7 @@ Sweep component values or .param values (several parameters give every combinati
 
 ## `monte_carlo`
 
-Monte Carlo tolerance analysis: vary component values within their tolerances, simulate each sample, and report the yield against the specs with per-spec spread and the worst run. Seeded and reproducible. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`.
+Monte Carlo analysis: vary component values within their tolerances, device parameters through the PDK's mismatch or statistical model sections (`mismatch`), or both; simulate each sample and report the yield against the specs with per-spec spread and the worst run. Seeded and reproducible. With corners, every corner runs the same samples and reports its own yield. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.
 
 <details><summary>Input schema</summary>
 
@@ -1026,8 +1074,75 @@ Monte Carlo tolerance analysis: vary component values within their tolerances, s
     "circuit": {
       "type": "string"
     },
+    "corners": {
+      "description": "Run the analysis at every corner of this set, `runs` times each, and\nreport the yield per corner as well.",
+      "properties": {
+        "process": {
+          "default": [],
+          "description": "Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or\nfamily=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,\ndio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supplies": {
+          "default": [],
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "items": {
+            "description": "Values for one supply: a voltage source or a `.param`.",
+            "properties": {
+              "target": {
+                "description": "A source (`VDD`) or `.param` name.",
+                "type": "string"
+              },
+              "values": {
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "target",
+              "values"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "temperatures": {
+          "default": [],
+          "description": "Temperatures in degrees Celsius.",
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "mismatch": {
+      "description": "Device mismatch from the circuit's corner libraries: `local` switches\ntheir `.lib` sections to `_mismatch`, `global` to `_stat` (process\nspread plus mismatch, typical corner only). The simulator draws the\nparameters with its own seed per run; needs ngspice or Xyce.",
+      "oneOf": [
+        {
+          "description": "`_mismatch` sections: device mismatch around the process corner.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`_stat` sections: global process spread plus mismatch, defined\naround the typical corner.",
+          "enum": [
+            "global"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "runs": {
-      "description": "Number of runs (default 50, at most 500).",
+      "description": "Number of runs (default 50, at most 500 in all).",
       "minimum": 0,
       "type": "integer"
     },
@@ -1043,7 +1158,8 @@ Monte Carlo tolerance analysis: vary component values within their tolerances, s
       "type": "string"
     },
     "tolerances": {
-      "description": "Tolerances: target is an element name or a glob such as `R*` or `C*`,\n`tol_pct` a percentage, `distribution` uniform (default) or gaussian\n(3 sigma = tolerance).",
+      "default": [],
+      "description": "Tolerances: target is an element name or a glob such as `R*` or `C*`,\n`tol_pct` a percentage, `distribution` uniform (default) or gaussian\n(3 sigma = tolerance). May be empty when `mismatch` is set.",
       "items": {
         "properties": {
           "distribution": {
@@ -1084,8 +1200,7 @@ Monte Carlo tolerance analysis: vary component values within their tolerances, s
     }
   },
   "required": [
-    "circuit",
-    "tolerances"
+    "circuit"
   ],
   "type": "object"
 }
@@ -1095,7 +1210,7 @@ Monte Carlo tolerance analysis: vary component values within their tolerances, s
 
 ## `optimize`
 
-Size component values to meet a spec table with the simulator in the loop (Nelder-Mead or CMA-ES over log-scaled ranges), then round to standard E-series values and re-check. You choose the parameters and sensible ranges; the optimizer does the search. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`.
+Size component values to meet a spec table with the simulator in the loop (Nelder-Mead or CMA-ES over log-scaled ranges), then round to standard E-series values and re-check. You choose the parameters and sensible ranges; the optimizer does the search. With corners it optimizes the worst case over every corner; the budget counts candidates, each simulated at every corner. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.
 
 <details><summary>Input schema</summary>
 
@@ -1109,6 +1224,54 @@ Size component values to meet a spec table with the simulator in the loop (Nelde
     },
     "circuit": {
       "type": "string"
+    },
+    "corners": {
+      "description": "Meet the specs at every corner of this set: each candidate is\nsimulated at every corner and scored on its worst case.",
+      "properties": {
+        "process": {
+          "default": [],
+          "description": "Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or\nfamily=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,\ndio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "supplies": {
+          "default": [],
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`.",
+          "items": {
+            "description": "Values for one supply: a voltage source or a `.param`.",
+            "properties": {
+              "target": {
+                "description": "A source (`VDD`) or `.param` name.",
+                "type": "string"
+              },
+              "values": {
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`).",
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "target",
+              "values"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "temperatures": {
+          "default": [],
+          "description": "Temperatures in degrees Celsius.",
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "goal": {
       "description": "Optionally also minimise or maximise one spec's value once all pass.",

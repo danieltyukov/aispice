@@ -56,9 +56,12 @@ Running simulators and reading what they return.
 | `dialect` | Translates the LTspice-flavoured netlist for the simulator in use |
 | `raw`, `log`, `dataset` | Binary and ASCII raw files, logs and `.meas` results, as one dataset type |
 | `expr` | Expressions over vectors (`V(out)/V(in)`, `db()`, `ph()`) |
-| `measure` | Named measurements: values, extremes, rise and fall time, overshoot, settling, crossings, gain, bandwidth, unity-gain frequency, phase and gain margin, peaking and the Q of a second-order lowpass |
+| `measure` | Named measurements: values, extremes, rise and fall time, overshoot, settling, crossings, gain, bandwidth, unity-gain frequency, phase and gain margin, peaking, the Q of a second-order lowpass, noise densities and integrated noise, PSRR and CMRR |
+| `noise` | Noise results in one shape from every simulator (Xyce's `_noise.dat` included), and integration of a noise density over a band |
+| `stimulus` | The derived AC run PSRR and CMRR compare with: every AC stimulus removed and `AC 1` on one source |
 | `spec` | Spec tables: a measurement plus limits, evaluated to pass or fail with a margin |
-| `sweep`, `montecarlo`, `optimize` | Parameter sweeps, tolerance analysis with yield, and sizing parameters within bounds to meet specs |
+| `corner` | Corner sets (process sections of corner libraries, temperatures, supplies) as netlist variants, the worst case per spec, and inlining of library sections for simulators that cannot select them |
+| `sweep`, `montecarlo`, `optimize` | Parameter sweeps, tolerance and mismatch analysis with yield, and sizing parameters within bounds to meet specs, also in the worst case over corners |
 | `pdk` | An installed PDK: checking its folder, its compiled models, the model header a netlist needs and the git commit it is at |
 | `gmid` | gm/Id lookup tables for a PDK's transistors, built on ngspice and cached, and sizing from them checked by simulation |
 | `plot` | SVG plots of waveforms |
@@ -106,7 +109,7 @@ Where circuits meet the agent.
 2. The model reads the circuit with `read_schematic`, which returns parts, the net on each pin and the directives, so it never has to reason about coordinates.
 3. It calls `edit_schematic` with typed operations such as "set R1 to 2.2k" or "connect R2.A to out". aispice places parts on the grid and routes wires, recomputing connectivity for every candidate route so a wire joins only the pins it was asked to join.
 4. If the user chose "ask before applying", the front end shows the diff and waits. Otherwise the edit is saved at once, with a snapshot for undo, and LTspice is shown the new file.
-5. The model proves the change with `simulate`, `measure` and `check_specs`, and can size parts with `optimize` or check robustness with `monte_carlo`.
+5. The model proves the change with `simulate`, `measure` and `check_specs`, and can size parts with `optimize` or check robustness with `monte_carlo` and corner sets.
 6. Every tool returns text for the model and structured data for the interface (diffs, waveforms, spec tables), which the chat shows as cards.
 
 ## Security model

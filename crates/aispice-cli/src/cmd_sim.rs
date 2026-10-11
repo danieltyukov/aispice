@@ -1,5 +1,5 @@
 //! `aispice sim` and `aispice check`: simulate a circuit, or check it against
-//! its specs with an exit code CI can use.
+//! its specs (at corners, if asked) with an exit code CI can use.
 
 use aispice_agent::{ToolContext, ToolOutput};
 use aispice_tools::setup::open_workspace;
@@ -71,11 +71,38 @@ pub fn sim(
     })
 }
 
+/// The corner set the command line describes, or `None` without corners.
+pub fn corners(
+    process: &[String],
+    temperatures: &[String],
+    supplies: &[String],
+) -> Result<Option<Value>> {
+    if process.is_empty() && temperatures.is_empty() && supplies.is_empty() {
+        return Ok(None);
+    }
+    // Numbers stay text: the tool reads SPICE numbers such as `1.8` or
+    // `900m` and names a bad one.
+    let mut supply_list = Vec::new();
+    for s in supplies {
+        let (target, values) = s
+            .split_once('=')
+            .with_context(|| format!("--supply `{s}` should look like VDD=1.62,1.8,1.98"))?;
+        let values: Vec<&str> = values.split(',').map(str::trim).collect();
+        supply_list.push(json!({"target": target.trim(), "values": values}));
+    }
+    Ok(Some(json!({
+        "process": process.iter().map(|p| p.trim()).collect::<Vec<_>>(),
+        "temperatures": temperatures.iter().map(|t| t.trim()).collect::<Vec<_>>(),
+        "supplies": supply_list,
+    })))
+}
+
 pub fn check(
     file: &Path,
     symbols: &[PathBuf],
     specs: Option<PathBuf>,
     simulator: Option<String>,
+    corners: Option<Value>,
     json_mode: bool,
 ) -> Result<ExitCode> {
     let (ws, circuit) = workspace_for(file, symbols)?;
@@ -91,7 +118,7 @@ pub fn check(
     let out = rt.block_on(call(
         &ws,
         "check_specs",
-        json!({"circuit": circuit, "specs": spec_text, "save": false, "simulator": simulator}),
+        json!({"circuit": circuit, "specs": spec_text, "save": false, "simulator": simulator, "corners": corners}),
     ))?;
     print(&out, json_mode);
     if out.is_error {

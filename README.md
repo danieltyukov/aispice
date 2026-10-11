@@ -42,9 +42,9 @@ What the agent can do with your circuits:
 - read a schematic as parts, the net on every pin and the directives, so it reasons about circuits and not coordinates
 - edit with typed operations (add, remove, move, rotate, set values, connect pins, label nets, change directives); aispice places parts and routes wires so the result stays readable in LTspice
 - turn a SPICE netlist, or a circuit it reads from a picture, into a readable LTspice schematic, checked to netlist back to the same circuit
-- simulate on **ngspice, LTspice, Xyce or Cadence Spectre**, and measure gain, bandwidth, phase margin, overshoot, settling time, rise time, RMS and more
-- check a spec table and report pass or fail with margins
-- sweep parameters, run Monte Carlo tolerance analysis with yield, and optimise part values to meet several specs at once
+- simulate on **ngspice, LTspice, Xyce or Cadence Spectre**, and measure gain, bandwidth, phase margin, overshoot, settling time, rise time, RMS, noise density and integrated noise, PSRR, CMRR and more
+- check a spec table and report pass or fail with margins, at one operating point or across process, voltage and temperature corners, naming the worst corner of each spec
+- sweep parameters, run Monte Carlo analysis over part tolerances and device mismatch with yield, and optimise part values to meet several specs at once, at every corner if asked
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
 - design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, and size transistors by gm/Id from tables aispice builds and caches
 - undo any edit; every change is saved as a snapshot
@@ -55,6 +55,7 @@ Things you can ask:
 - Why does the output clip? Check the bias point.
 - Size R1 and R2 for 20 dB of gain and at least 100 kHz of bandwidth.
 - Run a Monte Carlo with 1% resistors and 10% capacitors and tell me the yield.
+- Check the specs at the ss, tt and ff corners from -40 C to 125 C and tell me the worst corner.
 - Add a 100k load at the output and show me what it does to the response.
 
 ## Quick start
@@ -102,7 +103,7 @@ Measurements:
 |---|---|
 | `aispice chat` | Talk to the agent about a folder of circuits, with one prompt or interactively |
 | `aispice sim <file>` | Simulate and print results; `-m` adds measurements, `--simulator` picks one |
-| `aispice check <file>` | Check a circuit against its `.specs` file; exits 1 when a spec fails |
+| `aispice check <file>` | Check a circuit against its `.specs` file, across corners with `--process`, `--temp` and `--supply`; exits 1 when a spec fails |
 | `aispice netlist <file>` | Print the SPICE netlist of a schematic |
 | `aispice lint <file>` | Report wiring problems; exits 1 on errors |
 | `aispice show <file>` | Describe a schematic: parts, the net on every pin, directives |
@@ -124,7 +125,7 @@ bw   = bandwidth_3db(V(out)) >= 100k
 pm   = phase_margin(V(out)) >= 45
 ```
 
-`aispice check amp.asc` runs the simulation and fails the build when a spec does not pass, so circuits can be tested in CI like code.
+`aispice check amp.asc` runs the simulation and fails the build when a spec does not pass, so circuits can be tested in CI like code. `aispice check amp.asc --process tt,ss,ff --temp=-40,27,125 --supply VDD=1.62,1.98` checks every corner and names the worst one for each spec.
 
 ## IC design on a PDK
 

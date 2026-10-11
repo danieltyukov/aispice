@@ -12,11 +12,23 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - `pdk` tool: list registered PDKs, describe one (compiled models, corner libraries and their sections, the header aispice adds), list its devices, and make the open project use one.
 - `gm_id` tool and `aispice gmid`: size a PDK transistor by gm/Id from a lookup table built on ngspice over L, VDS and VGS and cached under the user cache folder by PDK commit, then checked and corrected by simulating the device at the size found.
 - `xyce_path` setting for a Xyce built with plugin support.
+- Noise analysis (`.noise`) on ngspice, Xyce, LTspice and Spectre, read the same way from each as `V(onoise)` and `V(inoise)`, with the measurements `output_noise_at`, `input_noise_at`, `output_noise_rms` and `input_noise_rms`.
+- `psrr_db_at` and `cmrr_db_at` measurements: aispice adds a second AC run with the stimulus moved to the named supply or common-mode source and compares it with the circuit's own.
+- Corner sets for `check_specs`, `optimize` and `monte_carlo`: process corners (presets tt, ss, ff, sf, fs or family maps, applied to `.lib <file> <family>_<corner>` lines), temperatures and supply values. Reports give each spec's worst value, margin and corner and the full table; `optimize` minimises the worst case. `aispice check` takes `--process`, `--temp` and `--supply`.
+- Mismatch Monte Carlo: `monte_carlo` with `mismatch` set to `local` or `global` switches corner libraries to their `_mismatch` or `_stat` sections, with a simulator seed per run, on ngspice and Xyce, alone or with part tolerances and corners.
+- Design tasks `noise-tia` and `temp-corners`; task files take a `corners` set the judge checks every spec at.
 
 ### Security
 
 - A PDK folder is checked again, symlinks resolved, every time it is used, and a filesystem root, the home folder or a folder above it cannot be registered. A registered folder replaced by a link afterwards is no longer trusted.
 - The netlist policy trusts registered PDK folders as include roots, still checking their files with every rule except the path heuristic their expressions trip (`w/ng`). Includes of compiled libraries (`.osdi`, `.so`, `.dll`, `.dylib`, `.cm`) and `osdi` lines are refused; `pre_osdi`, `codemodel` and `.control` stay refused. Compiled models load only from inside a registered PDK, after a check that rejects paths through symlinks or with quotes, commas or `$`.
+
+### Fixed
+
+- An `.include` of a file beside the circuit was dropped before ngspice and Xyce ran.
+- Xyce ignored `.temp`; it is now written as Xyce's device temperature option.
+- ngspice could not read library sections (`.lib <file> <section>`) in the LTspice mode aispice runs it in; aispice now inlines the section for ngspice and LTspice.
+- AC measurements could read a noise analysis, which also has a frequency axis.
 
 ## [0.2.0]
 
