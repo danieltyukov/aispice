@@ -140,6 +140,42 @@ async fn the_netlist_tool_shows_the_model_header() {
     );
 }
 
+/// A project's `aispice.toml` shipped as a link to a file elsewhere is not
+/// read: no tool quotes it, and `use` does not write through it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_linked_project_file_is_not_read_or_written() {
+    let (d, ws) = workspace(true);
+    let root = ws.project().unwrap().root().to_path_buf();
+    let secret = d.path().join("secret.env");
+    std::fs::write(&secret, "API_KEY=sk-live-0123456789\n").unwrap();
+    std::os::unix::fs::symlink(&secret, root.join(PROJECT_FILE)).unwrap();
+    std::fs::write(
+        root.join("r.asc"),
+        "Version 4\nSHEET 1 880 680\nFLAG 0 0 a\nSYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\nTEXT 0 160 Left 2 !.op\n",
+    )
+    .unwrap();
+    let reg = registry(ws.clone());
+    let out = reg
+        .get("netlist")
+        .unwrap()
+        .call(&ToolContext::default(), json!({"circuit": "r.asc"}))
+        .await;
+    let text = out.text_content();
+    assert!(!text.contains("sk-live") && text.contains("link"), "{text}");
+
+    // A link to another project file: `use` must not overwrite that file.
+    std::fs::remove_file(root.join(PROJECT_FILE)).unwrap();
+    std::fs::write(root.join("notes.toml"), "keep = 1\n").unwrap();
+    std::os::unix::fs::symlink(root.join("notes.toml"), root.join(PROJECT_FILE)).unwrap();
+    let (text, err) = call(&ws, json!({"action": "use", "name": "ihp-sg13g2"})).await;
+    assert!(err && text.contains("link"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.toml")).unwrap(),
+        "keep = 1\n"
+    );
+}
+
 /// Registering a PDK trusts its compiled code, so no tool can do it: the
 /// pdk tool only lists, shows, lists devices and opts a project in.
 #[tokio::test]

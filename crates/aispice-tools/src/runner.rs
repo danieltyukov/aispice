@@ -927,6 +927,63 @@ mod tests {
         assert!(out.contains(".include \"m.lib\" extra\n"), "{out}");
     }
 
+    /// An include that climbs out of the circuit's folder is left as
+    /// written, never turned into the full path of a file outside it.
+    #[test]
+    fn includes_that_climb_out_are_not_made_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("project");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "x\n").unwrap();
+        let deck = ".include ../secret.txt\nR1 a 0 1k\n.inc \"../secret.txt\"\n";
+        assert_eq!(absolutize_includes(deck, &base), deck);
+    }
+
+    /// A circuit file whose first line includes a file outside the project
+    /// is refused before it runs: ngspice reads an `.include` on the title
+    /// line, and would quote the file's lines in the run's errors and log.
+    #[tokio::test]
+    async fn a_first_line_include_cannot_read_files_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, "TOKEN=sk-live-0123456789\nsecond secret line\n").unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let body = "V1 a 0 1\nR1 a 0 1k\n.op\n.end\n";
+        std::fs::write(
+            root.join("abs.cir"),
+            format!(".include {}\n{body}", secret.display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("rel.cir"),
+            format!(".include ../secret.txt\n{body}"),
+        )
+        .unwrap();
+        let project = Project::open(&root, Default::default()).unwrap();
+        let runner = Runner::default();
+        for circuit in ["abs.cir", "rel.cir"] {
+            let result = runner
+                .run_circuit(
+                    &project,
+                    circuit,
+                    Some("ngspice"),
+                    &RunMods::default(),
+                    &CancellationToken::new(),
+                )
+                .await;
+            match result {
+                Err(RunError::Policy(msg)) => {
+                    assert!(!msg.contains("sk-live") && !msg.contains("second"), "{msg}")
+                }
+                // Nothing to run it on here; the policy test covers the check.
+                Err(RunError::Unavailable(_)) => return,
+                Err(e) => panic!("{circuit}: not refused by the policy: {e}"),
+                Ok(run) => panic!("{circuit}: ran:\n{}", run.output.log),
+            }
+        }
+    }
+
     /// Was machine-dependent: a model the netlist names was pulled from an
     /// installed LTspice library, with no way to turn that off. With
     /// embedded_models_only the deck gets aispice's own models only.
