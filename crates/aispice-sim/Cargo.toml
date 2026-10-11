@@ -25,5 +25,10 @@ tempfile.workspace = true
 tokio-util = "0.7"
 async-trait = "0.1"
 
+# Linux-only: the Landlock sandbox that confines xschem (backend::confine).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+landlock.workspace = true
+
 [lints]
 workspace = true

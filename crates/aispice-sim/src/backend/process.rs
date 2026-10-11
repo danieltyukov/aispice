@@ -24,7 +24,29 @@ pub const OUTPUT_CAP: usize = 1 << 20;
 /// it started (wineserver) may hold them open indefinitely.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone)]
+/// A Landlock domain to confine a child to before it execs: it may read and
+/// execute `read_exec`, read `read`, write under `write`, and (always) make
+/// no TCP bind or connection. Built in the parent and enforced in the
+/// child's `pre_exec` hook by [`super::confine`] (Linux only).
+#[derive(Debug, Clone, Default)]
+pub struct Landlock {
+    pub read_exec: Vec<PathBuf>,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+/// How a child is confined on Linux: resource limits, and an optional
+/// Landlock domain. Ignored on other systems, where it is never set.
+#[derive(Debug, Clone, Default)]
+pub struct Confinement {
+    pub landlock: Option<Landlock>,
+    /// `RLIMIT_FSIZE`: the largest file the child may write.
+    pub rlimit_fsize: Option<u64>,
+    /// `RLIMIT_AS`: the child's address space.
+    pub rlimit_as: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ProcessSpec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
@@ -33,6 +55,8 @@ pub struct ProcessSpec {
     /// Start from an empty environment instead of aispice's own, so the
     /// child sees only `env`.
     pub clear_env: bool,
+    /// How to confine the child before it runs (Linux only).
+    pub confine: Option<Confinement>,
 }
 
 impl ProcessSpec {
@@ -43,6 +67,7 @@ impl ProcessSpec {
             cwd: cwd.into(),
             env: Vec::new(),
             clear_env: false,
+            confine: None,
         }
     }
 
@@ -166,6 +191,17 @@ pub async fn run(
     }
     #[cfg(unix)]
     cmd.process_group(0);
+    // Confine the child before it runs (resource limits, and a Landlock
+    // domain when one is given). The ruleset is built here, in the parent;
+    // the pre_exec hook only enforces it. On other systems a confinement is
+    // never set.
+    #[cfg(target_os = "linux")]
+    if let Some(c) = &spec.confine {
+        super::confine::apply(&mut cmd, c).map_err(|e| SimError::Spawn {
+            program: spec.program.display().to_string(),
+            message: format!("could not confine the process: {e}"),
+        })?;
+    }
     let start = Instant::now();
     let mut child = cmd.spawn().map_err(|e| SimError::Spawn {
         program: spec.program.display().to_string(),
