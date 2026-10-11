@@ -155,7 +155,7 @@ pub async fn run_task(
     opts: &EvalOptions,
     attempt: u32,
 ) -> TaskRun {
-    let run = blank_run(task, model, attempt);
+    let mut run = blank_run(task, model, attempt);
     // The registered PDK of the kind the task is drawn in.
     let pdk = match &task.pdk {
         None => None,
@@ -171,7 +171,6 @@ pub async fn run_task(
             }
         },
     };
-    let mut run = run;
     let tmp = match tempfile::Builder::new().prefix("aispice-eval-").tempdir() {
         Ok(t) => t,
         Err(e) => return failed_setup(run, format!("could not make a temporary folder: {e}")),
