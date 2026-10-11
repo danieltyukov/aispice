@@ -1194,15 +1194,21 @@ impl Tool for MonteCarlo {
             all.extend(reports);
         }
         let failed_runs = results.len() - all.len();
+        let first_failure = results
+            .iter()
+            .find_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
+            .unwrap_or_default();
+        // A yield over no runs says nothing; the reason the runs failed does.
+        if all.is_empty() {
+            return ToolOutput::error(format!(
+                "every one of the {failed_runs} runs failed to simulate; the first, {first_failure}"
+            ));
+        }
         let y = montecarlo::summarize(&all);
         let mut t = format!("{}\n", y.summary);
         if failed_runs > 0 {
-            let first = results
-                .iter()
-                .find_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
-                .unwrap_or_default();
             t.push_str(&format!(
-                "  {failed_runs} run(s) failed to simulate; the first, {first}\n"
+                "  {failed_runs} run(s) failed to simulate; the first, {first_failure}\n"
             ));
         }
         for note in &notes {

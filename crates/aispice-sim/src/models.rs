@@ -317,20 +317,10 @@ fn references(n: &Netlist) -> Vec<(String, RefKind)> {
 }
 
 /// The file named by `.lib file`, `.lib file section`, `.include file` or
-/// `.inc file`, without quotes.
+/// `.inc file`, without quotes, read as the netlist policy reads it: a line
+/// in any other form names nothing here and is refused before a run.
 fn include_target(directive: &str) -> Option<String> {
-    let mut words = directive.split_whitespace();
-    let kw = words.next()?.to_ascii_lowercase();
-    if !matches!(kw.as_str(), ".lib" | ".include" | ".inc") {
-        return None;
-    }
-    let rest = directive.trim()[kw.len()..].trim();
-    let file = if let Some(q) = rest.strip_prefix('"') {
-        q.split('"').next().unwrap_or("")
-    } else {
-        rest.split_whitespace().next().unwrap_or("")
-    };
-    (!file.is_empty()).then(|| file.to_string())
+    Some(aispice_core::netlist::parse_include(directive)?.ok()?.file)
 }
 
 /// Lazily indexed LTspice library folders and parsed files.
@@ -392,10 +382,8 @@ impl Library {
 
     fn load(&mut self, path: &Path) -> Option<&Netlist> {
         if !self.parsed.contains_key(path) {
-            let n = std::fs::read(path).ok().map(|bytes| {
-                let (text, _) = aispice_core::encoding::decode(&bytes);
-                parse(&format!("* {}\n{text}", path.display()))
-            });
+            let n = crate::library::read_library(path)
+                .map(|text| parse(&format!("* {}\n{text}", path.display())));
             self.parsed.insert(path.to_path_buf(), n);
         }
         self.parsed.get(path).and_then(Option::as_ref)

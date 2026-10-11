@@ -175,7 +175,7 @@ pub fn section_uses(netlist: &Netlist) -> Vec<SectionUse> {
             let Line::Directive { text } = item else {
                 return None;
             };
-            let inc = parse_include(text)?;
+            let inc = parse_include(text)?.ok()?;
             if !inc.keyword.eq_ignore_ascii_case(".lib") {
                 return None;
             }
@@ -891,12 +891,12 @@ mod tests {
     use crate::spec::parse_specs;
     use aispice_core::netlist::{parse, write};
 
-    const DECK: &str = "* corners\n.lib /pdk/corner.lib mos_tt\n.LIB \"/pdk/res lib.lib\" RES_TYP_MISMATCH\n.lib /pdk/dio.lib dio_tt\n.lib opamp.sub\nVDD vdd 0 1.8\nR1 vdd out {rload}\n.param rload=1k vref=0.9\n.options reltol=1m temp=50\n.temp 85\n.ac dec 10 1 1Meg\n.end\n";
+    const DECK: &str = "* corners\n.lib /pdk/corner.lib mos_tt\n.LIB \"/pdk/res-lib.lib\" RES_TYP_MISMATCH\n.lib /pdk/dio.lib dio_tt\n.lib opamp.sub\nVDD vdd 0 1.8\nR1 vdd out {rload}\n.param rload=1k vref=0.9\n.options reltol=1m temp=50\n.temp 85\n.ac dec 10 1 1Meg\n.end\n";
 
     fn sections(file: &str) -> Result<Option<LibraryInfo>, String> {
         let list: &[&str] = match file {
             "/pdk/corner.lib" => &["mos_tt", "mos_ss", "mos_ff", "mos_sf", "mos_fs"],
-            "/pdk/res lib.lib" => &[
+            "/pdk/res-lib.lib" => &[
                 "res_typ",
                 "res_wcs",
                 "res_bcs",
@@ -1046,7 +1046,7 @@ mod tests {
         assert!(out.contains(".lib /pdk/corner.lib mos_ss\n"), "{out}");
         // The suffix and the case of the line are kept.
         assert!(
-            out.contains(".LIB \"/pdk/res lib.lib\" RES_WCS_MISMATCH\n"),
+            out.contains(".LIB \"/pdk/res-lib.lib\" RES_WCS_MISMATCH\n"),
             "{out}"
         );
         // Not readable: rewritten, and the simulator has the last word.

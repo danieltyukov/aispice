@@ -208,7 +208,7 @@ async fn inverter_dc_transfer_on_ngspice_and_xyce() {
     let (_dir, runner, project) = setup(&pdk, &[("inv.asc", INVERTER)]);
     let ng = run(&runner, &project, "inv.asc", SimId::Ngspice).await;
     assert!(
-        ng.deck.contains("cornerMOSlv.lib mos_tt"),
+        ng.deck.contains("cornerMOSlv.lib\" mos_tt"),
         "header missing: {}",
         ng.deck
     );
@@ -236,7 +236,7 @@ async fn inverter_dc_transfer_on_ngspice_and_xyce() {
     assert_eq!(xy.simulator, SimId::Xyce);
     assert!(
         xy.deck
-            .contains("libs.tech/xyce/models/cornerMOSlv.lib mos_tt")
+            .contains("libs.tech/xyce/models/cornerMOSlv.lib\" mos_tt")
     );
     assert!(
         xy.notes
@@ -364,7 +364,7 @@ async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
     let Some(pdk) = ihp() else { return };
     let (_dir, runner, project) = setup(&pdk, &[("ota.asc", OTA)]);
     let ng = run(&runner, &project, "ota.asc", SimId::Ngspice).await;
-    assert!(ng.deck.contains("cornerCAP.lib cap_typ"), "{}", ng.deck);
+    assert!(ng.deck.contains("cornerCAP.lib\" cap_typ"), "{}", ng.deck);
     let (gain_ng, ugf_ng) = gain_and_ugf(ng.output.dataset(AnalysisKind::Ac).unwrap());
     assert!(gain_ng > 20.0, "gain {gain_ng} dB");
     assert!((1e6..1e10).contains(&ugf_ng), "unity gain at {ugf_ng} Hz");
@@ -376,7 +376,7 @@ async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
     assert_eq!(xy.simulator, SimId::Xyce);
     assert!(
         xy.deck
-            .contains("libs.tech/xyce/models/cornerCAP.lib cap_typ")
+            .contains("libs.tech/xyce/models/cornerCAP.lib\" cap_typ")
     );
     let (gain_x, ugf_x) = gain_and_ugf(xy.output.dataset(AnalysisKind::Ac).unwrap());
     eprintln!(
@@ -494,20 +494,11 @@ async fn inverter_threshold_spreads_with_mismatch() {
     assert!(local > 0.2e-3, "no mismatch spread: {local}");
     assert!(global > local, "global {global} vs local {local}");
     if xyce_ready(&runner) {
-        // IHP's Xyce models have `_stat` sections but no `_mismatch` ones,
-        // and the sections are checked in the library Xyce reads. Xyce
-        // draws from its own generator, so only the size of the spread
-        // compares.
-        let (xmean, xglobal) = spread("xyce", "global", 1).await;
-        eprintln!(
-            "Xyce: threshold mean {xmean:.4} V, std global {:.2} mV",
-            xglobal * 1e3
-        );
-        assert!((xmean - mean).abs() < 10e-3, "{xmean} vs {mean}");
-        assert!(
-            xglobal > 0.5 * global && xglobal < 2.0 * global,
-            "{xglobal} vs {global}"
-        );
+        // IHP's Xyce corner libraries have no `_mismatch` sections, and the
+        // sections are checked in the library Xyce reads, so local mismatch
+        // is refused before anything runs. (Their `_stat` sections leave
+        // `mc_ok` and the `*_vfbo_mm` multipliers undefined, so global
+        // variation fails on Xyce too, with Xyce's reason.)
         let out = mc
             .call(
                 &ToolContext::default(),

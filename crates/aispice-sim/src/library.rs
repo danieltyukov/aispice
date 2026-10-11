@@ -52,6 +52,9 @@ pub struct LibraryFiles<'r> {
     project: Option<PathBuf>,
     read: Reader<'r>,
     texts: RefCell<HashMap<PathBuf, Option<Rc<str>>>>,
+    /// What [`LibraryFiles::sections`] answered for each file name, so a
+    /// corner set asks each library once however many corners it has.
+    infos: RefCell<HashMap<String, Result<Option<LibraryInfo>, String>>>,
     bytes: Cell<u64>,
 }
 
@@ -72,6 +75,7 @@ impl<'r> LibraryFiles<'r> {
             project: std::fs::canonicalize(project).ok(),
             read,
             texts: RefCell::new(HashMap::new()),
+            infos: RefCell::new(HashMap::new()),
             bytes: Cell::new(0),
         }
     }
@@ -127,13 +131,20 @@ impl<'r> LibraryFiles<'r> {
     /// when it refuses the file. Nothing is opened before the policy has
     /// approved the resolved path.
     pub fn sections(&self, file: &str) -> Result<Option<LibraryInfo>, String> {
-        let Some(path) = self.resolve(file, &self.policy.base_dir)? else {
-            return Ok(None);
+        if let Some(known) = self.infos.borrow().get(file) {
+            return known.clone();
+        }
+        let info = match self.resolve(file, &self.policy.base_dir) {
+            Ok(Some(path)) => Ok(self.text(&path).ok().map(|text| LibraryInfo {
+                sections: lib_sections(&text),
+                listable: self.listable(&path),
+            })),
+            other => other.map(|_| None),
         };
-        Ok(self.text(&path).ok().map(|text| LibraryInfo {
-            sections: lib_sections(&text),
-            listable: self.listable(&path),
-        }))
+        self.infos
+            .borrow_mut()
+            .insert(file.to_string(), info.clone());
+        info
     }
 }
 
@@ -160,8 +171,8 @@ pub fn read_library(path: &Path) -> Option<String> {
 /// lines, read as the policy reads lines.
 pub fn lib_sections(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for line in logical_lines(text) {
-        if let Some(inc) = parse_include(&line)
+    for line in logical_lines(text, false) {
+        if let Some(Ok(inc)) = parse_include(&line)
             && inc.keyword.eq_ignore_ascii_case(".lib")
             && inc.section.is_none()
             && !out.iter().any(|o| o.eq_ignore_ascii_case(&inc.file))
@@ -177,13 +188,12 @@ pub fn lib_sections(text: &str) -> Vec<String> {
 fn section_body(text: &str, section: &str) -> Result<Option<String>, String> {
     let mut body = String::new();
     let mut inside = false;
-    for line in logical_lines(text) {
+    for line in logical_lines(text, false) {
         if !inside {
-            inside = parse_include(&line).is_some_and(|inc| {
-                inc.keyword.eq_ignore_ascii_case(".lib")
+            inside = matches!(parse_include(&line), Some(Ok(inc))
+                if inc.keyword.eq_ignore_ascii_case(".lib")
                     && inc.section.is_none()
-                    && inc.file.eq_ignore_ascii_case(section)
-            });
+                    && inc.file.eq_ignore_ascii_case(section));
             continue;
         }
         let kw = line.split_whitespace().next().unwrap_or("");
@@ -221,8 +231,12 @@ fn expand(
     files: &LibraryFiles,
     out: &mut String,
 ) -> Result<(), String> {
-    for line in logical_lines(text) {
-        let include = parse_include(&line);
+    for line in logical_lines(text, depth == 0) {
+        let include = match parse_include(&line) {
+            Some(Ok(inc)) => Some(inc),
+            // Left for the policy check after inlining to refuse.
+            _ => None,
+        };
         if let Some(inc) = &include
             && inc.keyword.eq_ignore_ascii_case(".lib")
             && let Some(section) = &inc.section
@@ -269,11 +283,10 @@ fn expand(
                 .resolve(&inc.file, base)
                 .map_err(|reason| format!("`{}`: {reason}", inc.file))?
         {
-            out.push_str(&format!("{} \"{}\"", inc.keyword, path.display()));
-            if let Some(tail) = &inc.section {
-                out.push(' ');
-                out.push_str(tail);
-            }
+            let path = path
+                .to_str()
+                .ok_or_else(|| format!("`{}`: the path is not valid text", inc.file))?;
+            out.push_str(&inc.line_for(path));
             out.push('\n');
             continue;
         }
@@ -387,13 +400,17 @@ mod tests {
     fn lines_are_read_as_the_policy_reads_them() {
         let text =
             ".LiB \"lib/corner.lib\"\n+ RES_TYP\n.lib\tlib/x.lib  mos_tt\n.Lib lib/x.lib a b\n";
-        let lines = logical_lines(text);
-        let incs: Vec<_> = lines.iter().filter_map(|l| parse_include(l)).collect();
+        let lines = logical_lines(text, false);
+        let incs: Vec<_> = lines
+            .iter()
+            .filter_map(|l| parse_include(l)?.ok())
+            .collect();
         assert_eq!(incs[0].file, "lib/corner.lib");
         assert_eq!(incs[0].written_file, "\"lib/corner.lib\"");
         assert_eq!(incs[0].section.as_deref(), Some("RES_TYP"));
         assert_eq!(incs[1].section.as_deref(), Some("mos_tt"));
-        assert_eq!(incs[2].section, None);
+        // Two words after the file: not one section, so not read at all.
+        assert_eq!(incs.len(), 2);
         assert_eq!(
             lib_sections(".lib a\r\n+ \n.endl\n.LIB  b \n.lib x.lib y\n"),
             vec!["a", "b"]
