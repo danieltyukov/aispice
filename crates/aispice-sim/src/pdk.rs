@@ -536,12 +536,13 @@ mod tests {
         assert_eq!(
             lines,
             [
-                format!(".lib {}/cornerMOSlv.lib mos_tt", models.display()),
-                format!(".lib {}/cornerMOShv.lib mos_tt", models.display()),
-                format!(".lib {}/cornerRES.lib res_typ", models.display()),
-                format!(".lib {}/cornerHBT.lib hbt_typ", models.display()),
+                lib_line(&models.join("cornerMOSlv.lib"), "mos_tt"),
+                lib_line(&models.join("cornerMOShv.lib"), "mos_tt"),
+                lib_line(&models.join("cornerRES.lib"), "res_typ"),
+                lib_line(&models.join("cornerHBT.lib"), "hbt_typ"),
             ]
         );
+        assert!(lines[0].starts_with(".lib ") && lines[0].ends_with("cornerMOSlv.lib mos_tt"));
         for l in &lines {
             let (path, section) = parse_lib_line(l).unwrap();
             assert!(path.is_absolute() && path.is_file(), "{l}");
@@ -559,8 +560,8 @@ mod tests {
         let (_d, pdk) = fake();
         let models = pdk.root.join("libs.tech/ngspice/models");
         let mut n = parse(&format!(
-            "t\nXM1 d g 0 0 sg13_lv_nmos\nXC1 a 0 cap_cmim\n.lib {}/cornerMOSlv.lib mos_ss\n.lib cornerCAP.lib cap_typ\n.op\n",
-            models.display()
+            "t\nXM1 d g 0 0 sg13_lv_nmos\nXC1 a 0 cap_cmim\n{}\n.lib cornerCAP.lib cap_typ\n.op\n",
+            lib_line(&models.join("cornerMOSlv.lib"), "mos_ss")
         ));
         assert!(pdk.header_for(&n).is_empty());
         let before = write(&n);
@@ -574,20 +575,10 @@ mod tests {
         let mut n = parse("t\nXM1 d g 0 0 sg13_lv_nmos\nXQ1 c b 0 0 npn13G2\n.op\n");
         pdk.add_header(&mut n);
         let x = write(&pdk.retarget(&n, Target::Xyce));
-        assert!(
-            x.contains(&format!(
-                "{}/cornerMOSlv.lib mos_tt",
-                pdk.root.join("libs.tech/xyce/models").display()
-            )),
-            "{x}"
-        );
-        assert!(
-            x.contains(&format!(
-                "{}/cornerHBT.lib hbt_typ",
-                pdk.root.join("libs.tech/ngspice/models").display()
-            )),
-            "{x}"
-        );
+        let xyce = pdk.models_dir(Target::Xyce).join("cornerMOSlv.lib");
+        let hbt = pdk.models_dir(Target::Ngspice).join("cornerHBT.lib");
+        assert!(x.contains(&lib_line(&xyce, "mos_tt")), "{x}");
+        assert!(x.contains(&lib_line(&hbt, "hbt_typ")), "{x}");
         assert_eq!(write(&pdk.retarget(&n, Target::Ngspice)), write(&n));
     }
 

@@ -1033,11 +1033,14 @@ mod tests {
         let hv = Grid::default_for(pdk.kit, pdk.kit.device("sg13_hv_nmos").unwrap());
         assert_eq!((hv.vgs().len(), hv.vds().len()), (133, 16));
         assert!((hv.l[0] - 0.45e-6).abs() < 1e-15);
-        let policy = aispice_core::netlist::Policy {
-            base_dir: dir.path().to_path_buf(),
-            trusted_dirs: vec![pdk.root.clone()],
-            ..Default::default()
-        };
-        assert_eq!(aispice_core::netlist::check_policy(&d, &policy), vec![]);
+        // The policy refuses every absolute Windows path.
+        if cfg!(not(windows)) {
+            let policy = aispice_core::netlist::Policy {
+                base_dir: dir.path().to_path_buf(),
+                trusted_dirs: vec![pdk.root.clone()],
+                ..Default::default()
+            };
+            assert_eq!(aispice_core::netlist::check_policy(&d, &policy), vec![]);
+        }
     }
 }

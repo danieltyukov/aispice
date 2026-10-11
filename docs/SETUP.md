@@ -86,7 +86,7 @@ Spectre 19 and older do not run `.meas` statements in SPICE syntax. aispice's ow
 
 ## PDKs for IC design
 
-aispice designs transistor-level circuits on a process design kit you install. It never ships or copies a PDK: it reads the models where they are. IHP SG13G2 (130 nm SiGe BiCMOS, from [IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK)) is the first one it knows.
+aispice designs transistor-level circuits on a process design kit you install. It never ships or copies a PDK: it reads the models where they are. IHP SG13G2 (130 nm SiGe BiCMOS, from [IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK)) is the first one it knows. PDK projects run on Linux and macOS; on Windows the netlist policy refuses the absolute paths a PDK's model header needs.
 
 ### Install IHP SG13G2
 

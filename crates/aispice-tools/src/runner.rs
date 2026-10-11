@@ -247,23 +247,28 @@ impl Runner {
         let wanted = requested
             .map(str::to_string)
             .unwrap_or_else(|| self.config().simulator);
-        let id = match wanted.to_ascii_lowercase().as_str() {
+        let mut id = match wanted.to_ascii_lowercase().as_str() {
             "ngspice" => Some(SimId::Ngspice),
             "xyce" => Some(SimId::Xyce),
             "ltspice" => Some(SimId::Ltspice),
             "spectre" => Some(SimId::Spectre),
             _ => None,
         };
-        if let (Some(pdk), Some(id @ (SimId::Ltspice | SimId::Spectre))) = (pdk, id) {
-            let why = if id == SimId::Ltspice {
-                "LTspice cannot load its compiled (OSDI) device models"
-            } else {
-                "aispice has no Spectre models for it"
-            };
-            return Err(RunError::Pdk(format!(
-                "this project uses PDK `{}` and {why}; simulate with ngspice or Xyce",
-                pdk.name
-            )));
+        if let (Some(pdk), Some(sim @ (SimId::Ltspice | SimId::Spectre))) = (pdk, id) {
+            // Asked for by name: say why not. Only the configured default:
+            // choose as `auto` would, since that default is for board work.
+            if requested.is_some() {
+                let why = if sim == SimId::Ltspice {
+                    "LTspice cannot load its compiled (OSDI) device models"
+                } else {
+                    "aispice has no Spectre models for it"
+                };
+                return Err(RunError::Pdk(format!(
+                    "this project uses PDK `{}` and {why}; simulate with ngspice or Xyce",
+                    pdk.name
+                )));
+            }
+            id = None;
         }
         if let Some(id) = id {
             return if self.available(id).await {
@@ -393,6 +398,11 @@ impl Runner {
         remember: bool,
     ) -> Result<Arc<StoredRun>, RunError> {
         let pdk = self.project_pdk(project)?;
+        if cfg!(windows) && pdk.is_some() {
+            return Err(RunError::Pdk(
+                "PDK projects run on Linux and macOS: the netlist policy refuses the absolute Windows paths a PDK's model header needs".into(),
+            ));
+        }
         if pdk.is_none()
             && let Some(msg) = pdk_devices_without_pdk(netlist)
         {
@@ -670,6 +680,18 @@ fn pdk_devices_without_pdk(netlist: &Netlist) -> Option<String> {
                 _ => {}
             }
         }
+    }
+    // A deck that includes libraries may define the subcircuit itself, or
+    // read a PDK by hand; the run's own hint covers the latter.
+    if netlist.directives().any(|d| {
+        let kw = d
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        matches!(kw.as_str(), ".lib" | ".include" | ".inc")
+    }) {
+        return None;
     }
     let (mut calls, mut defined) = (Vec::new(), Vec::new());
     walk(&netlist.items, &mut calls, &mut defined);
@@ -949,14 +971,9 @@ mod tests {
         let (_d, runner, project, pdk) = pdk_setup(Some("pdk = \"ihp\"\n"));
         let (n, _, _) = runner.netlist_for(&project, "inv.cir").unwrap();
         let text = netlist::write(&n);
-        let models = pdk.root.join("libs.tech/ngspice/models");
-        assert!(
-            text.contains(&format!(
-                ".lib {}/cornerMOSlv.lib mos_tt\n",
-                models.display()
-            )),
-            "{text}"
-        );
+        let corner = pdk.models_dir(Target::Ngspice).join("cornerMOSlv.lib");
+        let line = aispice_sim::pdk::lib_line(&corner, "mos_tt");
+        assert!(text.contains(&format!("{line}\n")), "{text}");
         assert_eq!(
             text.lines().filter(|l| l.starts_with(".lib")).count(),
             1,
@@ -980,11 +997,14 @@ mod tests {
                 !notes.iter().any(|n| n.contains("no definition")),
                 "PDK devices are not looked up: {notes:?}"
             );
-            let folder = if id == SimId::Xyce { "xyce" } else { "ngspice" };
-            assert!(
-                deck.contains(&format!("libs.tech/{folder}/models/cornerMOSlv.lib mos_tt")),
-                "{deck}"
-            );
+            let corner = pdk.models_dir(id.target()).join("cornerMOSlv.lib");
+            let line = aispice_sim::pdk::lib_line(&corner, "mos_tt");
+            assert!(deck.contains(&line), "{deck}");
+            // The policy refuses every absolute Windows path, so PDK runs
+            // are not offered there (see run_netlist_with).
+            if cfg!(windows) {
+                continue;
+            }
             let policy = Policy {
                 base_dir: project.root().to_path_buf(),
                 trusted_dirs: runner.config().pdks.roots(),
@@ -1007,6 +1027,15 @@ mod tests {
             let err = runner.choose_for(Some(sim), Some(&pdk)).await.unwrap_err();
             assert!(matches!(err, RunError::Pdk(_)), "{sim}: {err}");
             assert!(err.to_string().contains("ngspice or Xyce"), "{err}");
+        }
+        // A configured default of LTspice is for board work: a PDK project
+        // chooses as `auto` would instead of failing.
+        let mut cfg = runner.config();
+        cfg.simulator = "ltspice".into();
+        runner.set_config(cfg);
+        match runner.choose_for(None, Some(&pdk)).await {
+            Ok(id) => assert!(matches!(id, SimId::Ngspice | SimId::Xyce), "{id:?}"),
+            Err(e) => assert!(matches!(e, RunError::NoSimulator), "{e}"),
         }
     }
 
@@ -1032,6 +1061,10 @@ mod tests {
             "t\nXM1 a b 0 0 sg13_lv_nmos\n.subckt sg13_lv_nmos d g s b\nR1 d s 1k\n.ends\n.op\n",
         );
         assert!(pdk_devices_without_pdk(&own).is_none());
+        let lib = netlist::parse("t\nXR1 a b 0 rhigh\n.lib mine.lib\n.op\n");
+        assert!(pdk_devices_without_pdk(&lib).is_none());
+        let bare = netlist::parse("t\nXR1 a b 0 rhigh\n.op\n");
+        assert!(pdk_devices_without_pdk(&bare).is_some());
     }
 
     #[test]

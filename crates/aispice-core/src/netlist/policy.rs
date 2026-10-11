@@ -793,6 +793,8 @@ mod tests {
         }
     }
 
+    /// Not on Windows, where the policy refuses every absolute drive path.
+    #[cfg(not(windows))]
     #[test]
     fn pdk_libraries_pass_only_from_a_registered_folder() {
         let (pdk, proj) = fake_pdk("lib");
