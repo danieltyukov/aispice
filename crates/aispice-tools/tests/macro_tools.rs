@@ -102,29 +102,31 @@ async fn check_macro_reports_the_shared_findings() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn check_macro_stays_in_the_project() {
-    let (dir, ws) = workspace();
+    let (_dir, ws) = workspace();
     for path in ["../elsewhere.macro", "missing.macro", ""] {
         let out = call(&ws, json!({"path": path})).await;
         assert!(out.is_error, "{path}: {}", text_of(&out));
     }
     let out = call(&ws, json!({"path": "macros", "pdk": "x@not-hex"})).await;
     assert!(out.is_error);
+}
 
-    #[cfg(unix)]
-    {
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::write(outside.path().join("secret.lef"), "SECRET ;\n").unwrap();
-        let pkg = dir.path().join("linked.macro");
-        copy_dir(&fixtures().join("tiny_ota.macro"), &pkg);
-        std::fs::remove_file(pkg.join("tiny_ota.lef")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret.lef"), pkg.join("tiny_ota.lef"))
-            .unwrap();
-        let out = call(&ws, json!({"path": "linked.macro"})).await;
-        let text = text_of(&out);
-        assert!(
-            out.is_error && text.contains("outside the project"),
-            "{text}"
-        );
-        assert!(!text.contains("SECRET"));
-    }
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn check_macro_refuses_links_out_of_the_project() {
+    let (dir, ws) = workspace();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.lef"), "SECRET ;\n").unwrap();
+    let pkg = dir.path().join("linked.macro");
+    copy_dir(&fixtures().join("tiny_ota.macro"), &pkg);
+    std::fs::remove_file(pkg.join("tiny_ota.lef")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("secret.lef"), pkg.join("tiny_ota.lef"))
+        .unwrap();
+    let out = call(&ws, json!({"path": "linked.macro"})).await;
+    let text = text_of(&out);
+    assert!(
+        out.is_error && text.contains("outside the project"),
+        "{text}"
+    );
+    assert!(!text.contains("SECRET"));
 }
