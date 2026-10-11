@@ -8,4 +8,5 @@
 
 pub mod drc;
 pub mod gds;
+pub mod lvs;
 pub mod tools;
