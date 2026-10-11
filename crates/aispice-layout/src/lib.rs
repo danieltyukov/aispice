@@ -11,5 +11,6 @@ pub mod extract;
 pub mod gds;
 pub mod generator;
 pub mod lvs;
+pub mod macro_export;
 pub mod render;
 pub mod tools;
