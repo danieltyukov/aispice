@@ -1618,7 +1618,11 @@ mod tests {
         let both = Objective::default().score_worst(&[fast.clone(), slow.clone()]);
         assert!(!both.feasible);
         assert_eq!(both.value, Objective::default().score(&slow).value);
-        assert!(Objective::default().score_worst(std::slice::from_ref(&fast)).feasible);
+        assert!(
+            Objective::default()
+                .score_worst(std::slice::from_ref(&fast))
+                .feasible
+        );
         assert!(!Objective::default().score_worst(&[]).feasible);
         let goal = |sense| Objective {
             goal: Some(Goal {

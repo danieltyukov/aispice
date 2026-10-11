@@ -76,12 +76,14 @@ fn without_ac(rest: &str) -> String {
     while end < words.len() && end <= k + 2 && numeric(words[end]) {
         end += 1;
     }
-    words[..k]
+    let rest = words[..k]
         .iter()
         .chain(&words[end..])
         .copied()
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    // A source line needs a value; some simulators refuse one without.
+    if rest.is_empty() { "0".into() } else { rest }
 }
 
 fn strip(items: &mut [Line]) {
@@ -148,8 +150,8 @@ mod tests {
         assert!(out.contains("Vin in 0 SINE(0 1 1k)\n"), "{out}");
         assert!(out.contains("VDD vdd 0 1.8 AC 1\n"), "{out}");
         assert!(out.contains("Vcm cm 0 DC 0.9 Rser=1\n"), "{out}");
-        assert!(out.contains("I1 vdd x\n"), "{out}");
-        assert!(out.contains("V9 a 0\n"), "{out}");
+        assert!(out.contains("I1 vdd x 0\n"), "{out}");
+        assert!(out.contains("V9 a 0 0\n"), "{out}");
         assert_eq!(out.matches("AC 1").count(), 1, "{out}");
         let out = write(&ac_on(&n, "Vcm").unwrap());
         assert!(out.contains("Vcm cm 0 DC 0.9 Rser=1 AC 1\n"), "{out}");

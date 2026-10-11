@@ -410,11 +410,7 @@ impl Runner {
         }
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         let lib_dirs = self.model_lib_dirs();
-        let circuit_path = project.resolve(circuit)?;
-        let base = circuit_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| project.root().to_path_buf());
+        let base = Self::base_dir(project, circuit)?;
         // Model resolution keeps only includes it can find, and the simulator
         // runs in a private folder, so files beside the circuit are named by
         // their full path from here on. The policy checks those paths below.
@@ -447,17 +443,8 @@ impl Runner {
         }
         let deck = text.0;
 
-        let mut allowed = project.allowed_dirs();
-        allowed.extend(lib_dirs.iter().cloned());
-        // Every registered PDK folder may be included from, so a hand-written
-        // deck can name a PDK's libraries itself.
-        let trusted = self.config().pdks.trusted_roots();
-        let policy = Policy {
-            base_dir: base.clone(),
-            allowed_dirs: allowed,
-            allow_control_blocks: self.config().allow_control_blocks,
-            trusted_dirs: trusted.clone(),
-        };
+        let policy = self.policy_for(project, &base);
+        let trusted = policy.trusted_dirs.clone();
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations
@@ -552,6 +539,32 @@ impl Runner {
             self.remember(run.clone());
         }
         Ok(run)
+    }
+
+    /// The netlist policy for a deck whose relative paths start at `base`:
+    /// the project, the model folders and the registered PDKs are the places
+    /// it may read.
+    pub fn policy_for(&self, project: &Project, base: &Path) -> Policy {
+        let mut allowed = project.allowed_dirs();
+        allowed.extend(self.model_lib_dirs());
+        Policy {
+            base_dir: base.to_path_buf(),
+            allowed_dirs: allowed,
+            allow_control_blocks: self.config().allow_control_blocks,
+            // Every registered PDK folder that still checks out may be
+            // included from, so a hand-written deck can name a PDK's
+            // libraries itself.
+            trusted_dirs: self.config().pdks.trusted_roots(),
+        }
+    }
+
+    /// The folder a circuit's relative paths start at.
+    pub fn base_dir(project: &Project, circuit: &str) -> Result<PathBuf, RunError> {
+        let circuit_path = project.resolve(circuit)?;
+        Ok(circuit_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project.root().to_path_buf()))
     }
 
     /// The deck text for a simulator, or the reason it cannot run there.
