@@ -1,0 +1,16 @@
+* A Verilog-A comparator drives a co-simulated Verilog counter
+* inp ramps from 0 to 1 V over 10 us against 0.5 V. The counter counts the
+* 1 MHz clock edges while the comparator's output is high: those at 5.5,
+* 6.5, 7.5, 8.5 and 9.5 us, so it reads 5 (q = 0101) at 10 us.
+Vinp inp 0 PWL(0 0 10u 1)
+Vinn inn 0 0.5
+Vclk clk_a 0 PULSE(0 1 0.5u 1n 1n 0.5u 1u)
+N1 inp inn cmp comparator
+.model comparator comparator_va(vdd=1 gain=1e3)
+Aclk [clk_a cmp] [clk en] tobit
+.model tobit adc_bridge(in_low=0.3 in_high=0.7)
+Acnt [clk en] [q3 q2 q1 q0] null counter
+Aout [q3 q2 q1 q0] [vq3 vq2 vq1 vq0] toana
+.model toana dac_bridge(out_low=0 out_high=1)
+.tran 10n 10u
+.end
