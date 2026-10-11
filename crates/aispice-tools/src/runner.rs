@@ -13,6 +13,7 @@ use aispice_sim::backend::spectre::{Spectre, SpectreConfig};
 use aispice_sim::backend::xyce::Xyce;
 use aispice_sim::backend::{self, Detection, SimId, SimJob, SimOutput, Simulator};
 use aispice_sim::dialect::{self, Target};
+use aispice_sim::library::{LibraryFiles, expand_lib_sections};
 use aispice_sim::models;
 use aispice_sim::pdk::{Pdk, PdkRun};
 use serde::{Deserialize, Serialize};
@@ -455,10 +456,11 @@ impl Runner {
             return Err(RunError::Policy(msg));
         }
         // ngspice in its LTspice mode, and LTspice, cannot select a section
-        // of a library file, so aispice selects it: the policy above has
-        // read every library the deck names.
+        // of a library file, so aispice inlines it, reading only files the
+        // policy approves; the check below sees the result.
         let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) {
-            aispice_sim::corner::expand_lib_sections(&deck, &base).map_err(RunError::Netlist)?
+            let files = LibraryFiles::new(policy.clone(), project.root());
+            expand_lib_sections(&deck, &files).map_err(RunError::Netlist)?
         } else {
             deck
         };

@@ -596,8 +596,8 @@ fn spec_measures(specs: &[Spec]) -> Vec<(String, Measure)> {
         .collect()
 }
 
-/// The circuit's corner variants. The section lookup reads files and is not
-/// `Send`, so it lives only here, never across an await.
+/// The circuit's corner variants. The library reader is not `Send`, so it
+/// lives only here, never across an await.
 fn corner_variants(
     ws: &Workspace,
     p: &crate::project::Project,
@@ -605,7 +605,8 @@ fn corner_variants(
     netlist: &Netlist,
     set: &CornerSet,
 ) -> Result<Vec<(String, Netlist)>, String> {
-    let lookup = analysis::section_lookup(ws, p, circuit);
+    let files = analysis::library_files(ws, p, circuit)?;
+    let lookup = |f: &str| files.sections(f);
     corner::variants(netlist, set, &lookup).map_err(|e| format!("corners: {e}"))
 }
 
@@ -1134,7 +1135,11 @@ impl Tool for MonteCarlo {
         let seed = input.seed.unwrap_or(1);
         let mut labelled: Vec<(String, Netlist)> = Vec::with_capacity(n * bases.len());
         {
-            let lookup = analysis::section_lookup(&self.ws, &p, &input.circuit);
+            let files = match analysis::library_files(&self.ws, &p, &input.circuit) {
+                Ok(f) => f,
+                Err(e) => return ToolOutput::error(e),
+            };
+            let lookup = |f: &str| files.sections(f);
             for (name, base) in &bases {
                 let (variants, more) = match montecarlo::variants_with(
                     base,

@@ -123,6 +123,8 @@ pub enum McError {
     StatNeedsTypical(String),
     #[error("none of the circuit's corner libraries has a {0} section")]
     NoStatisticalSections(String),
+    #[error("`{file}`: {reason}")]
+    Refused { file: String, reason: String },
 }
 
 /// A seedable xoshiro256** generator.
@@ -373,14 +375,23 @@ pub fn statistical(
             switched += 1;
             continue;
         }
-        if corner::defines(lookup, &u.file, &next.name()) == Some(false) {
-            notes.push(format!(
-                "{} has no {} section, so {} does not vary",
-                u.file,
-                next.name(),
-                u.section.name()
-            ));
-            continue;
+        match corner::find_section(lookup, &u.file, &next.name()) {
+            Err(reason) => {
+                return Err(McError::Refused {
+                    file: u.file.clone(),
+                    reason,
+                });
+            }
+            Ok(corner::Found::No(_)) => {
+                notes.push(format!(
+                    "{} has no {} section, so {} does not vary",
+                    u.file,
+                    next.name(),
+                    u.section.name()
+                ));
+                continue;
+            }
+            Ok(corner::Found::Yes | corner::Found::Unknown) => {}
         }
         corner::set_section(&mut n, u, &next);
         switched += 1;
@@ -859,7 +870,7 @@ mod tests {
 
     const PDK_DECK: &str = "t\n.lib /pdk/mos.lib mos_tt\n.lib /pdk/res.lib res_typ\n.lib /pdk/dio.lib dio_tt\nR1 a 0 1k\nC1 a 0 1n\n.op\n.end\n";
 
-    fn pdk_sections(file: &str) -> Option<Vec<String>> {
+    fn pdk_sections(file: &str) -> Result<Option<crate::library::LibraryInfo>, String> {
         let list: &[&str] = match file {
             "/pdk/mos.lib" => &[
                 "mos_tt",
@@ -870,9 +881,13 @@ mod tests {
             ],
             "/pdk/res.lib" => &["res_typ", "res_typ_mismatch", "res_typ_stat"],
             "/pdk/dio.lib" => &["dio_tt", "dio_ss", "dio_tt_stat"],
-            _ => return None,
+            "/etc/passwd" => return Err("`/etc/passwd` is outside the project".into()),
+            _ => return Ok(None),
         };
-        Some(list.iter().map(|s| s.to_string()).collect())
+        Ok(Some(crate::library::LibraryInfo {
+            sections: list.iter().map(|s| s.to_string()).collect(),
+            listable: true,
+        }))
     }
 
     #[test]
@@ -960,6 +975,11 @@ mod tests {
             statistical(&dio, Mismatch::Local, &pdk_sections),
             Err(McError::NoStatisticalSections("_mismatch".into()))
         );
+        let evil = parse("t\n.lib /etc/passwd mos_tt\n.op\n.end\n");
+        assert!(matches!(
+            statistical(&evil, Mismatch::Local, &pdk_sections),
+            Err(McError::Refused { .. })
+        ));
         // Unreadable libraries are switched; the simulator has the last word.
         let (n2, notes) = statistical(&dio, Mismatch::Local, &corner::no_lookup).unwrap();
         assert!(aispice_core::netlist::write(&n2).contains("dio_tt_mismatch"));

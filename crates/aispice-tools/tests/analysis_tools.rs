@@ -379,3 +379,96 @@ async fn mismatch_monte_carlo_spreads_as_the_library_says() {
         out.text_content()
     );
 }
+
+/// Corner libraries are read only where the policy lets a simulation read:
+/// a path that climbs out, a link to a file outside the project and an
+/// absolute path elsewhere are refused with the policy's reason before
+/// anything runs, and nothing of those files appears in the answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn corner_libraries_go_through_the_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        dir.path().join("secret.lib"),
+        ".lib private_res_section\n.endl\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("secret.lib"), root.join("link.lib")).unwrap();
+    let rc = |lib: &str| {
+        format!(
+            "* rc\n.lib {lib} res_typ\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 100n\n.ac dec 10 1 1Meg\n.end\n"
+        )
+    };
+    let files = [
+        ("up.cir", rc("../secret.lib")),
+        ("link.cir", rc("link.lib")),
+        ("abs.cir", rc("/etc/passwd")),
+    ];
+    for (name, text) in &files {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+    let project = Project::open(&root, ProjectOptions::default()).unwrap();
+    let ws = Arc::new(Workspace::with_project(project));
+    for (name, _) in &files {
+        if *name == "link.cir" && cfg!(not(unix)) {
+            continue;
+        }
+        let out = call(
+            &ws,
+            "check_specs",
+            json!({"circuit": name, "save": false, "specs": "bw = bandwidth_3db(V(out)) >= 1k",
+                   "corners": {"process": ["ss"]}}),
+        )
+        .await;
+        let text = out.text_content();
+        assert!(out.is_error, "{name}: {text}");
+        assert!(
+            text.contains("outside the project") || text.contains("climbs out"),
+            "{name}: {text}"
+        );
+        assert!(!text.contains("private_res_section"), "{name}: {text}");
+    }
+}
+
+/// Oversized corner requests fail at once with a clear error.
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_corner_requests_fail_fast() {
+    let (_dir, ws) = project(&[(
+        "rc.cir",
+        "* rc\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 100n\n.ac dec 10 1 1Meg\n.end\n",
+    )]);
+    let temps: Vec<i64> = (0..10_000).collect();
+    let started = std::time::Instant::now();
+    let out = call(
+        &ws,
+        "check_specs",
+        json!({"circuit": "rc.cir", "save": false, "specs": "bw = bandwidth_3db(V(out)) >= 1k",
+               "corners": {"temperatures": temps}}),
+    )
+    .await;
+    assert!(out.is_error);
+    assert!(
+        out.text_content().contains("at most 64 values"),
+        "{}",
+        out.text_content()
+    );
+    let temps: Vec<i64> = (0..60).collect();
+    let out = call(
+        &ws,
+        "monte_carlo",
+        json!({"circuit": "rc.cir", "tolerances": [{"target": "R1", "tol_pct": 1}],
+               "specs": "bw = bandwidth_3db(V(out)) >= 1k",
+               "corners": {"temperatures": temps, "supplies": [{"target": "V1", "values": [0, 1, 2, 3]}]}}),
+    )
+    .await;
+    assert!(out.is_error);
+    assert!(
+        out.text_content()
+            .contains("240 corners is more than the limit of 200"),
+        "{}",
+        out.text_content()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}

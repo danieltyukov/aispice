@@ -29,6 +29,7 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - Xyce ignored `.temp`; it is now written as Xyce's device temperature option.
 - ngspice could not read library sections (`.lib <file> <section>`) in the LTspice mode aispice runs it in; aispice now inlines the section for ngspice and LTspice.
 - AC measurements could read a noise analysis, which also has a frequency axis.
+- The netlist policy read a `+` continuation after a CRLF line end as a separate line instead of part of the include before it.
 
 ## [0.2.0]
 

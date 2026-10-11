@@ -60,7 +60,8 @@ Running simulators and reading what they return.
 | `noise` | Noise results in one shape from every simulator (Xyce's `_noise.dat` included), and integration of a noise density over a band |
 | `stimulus` | The derived AC run PSRR and CMRR compare with: every AC stimulus removed and `AC 1` on one source |
 | `spec` | Spec tables: a measurement plus limits, evaluated to pass or fail with a margin |
-| `corner` | Corner sets (process sections of corner libraries, temperatures, supplies) as netlist variants, the worst case per spec, and inlining of library sections for simulators that cannot select them |
+| `corner` | Corner sets (process sections of corner libraries, temperatures, supplies) as netlist variants, and the worst case per spec |
+| `library` | Corner library files read through the netlist policy (its line reader and resolver, size and count limits), and inlining of library sections for simulators that cannot select them |
 | `sweep`, `montecarlo`, `optimize` | Parameter sweeps, tolerance and mismatch analysis with yield, and sizing parameters within bounds to meet specs, also in the worst case over corners |
 | `pdk` | An installed PDK: checking its folder, its compiled models, the model header a netlist needs and the git commit it is at |
 | `gmid` | gm/Id lookup tables for a PDK's transistors, built on ngspice and cached, and sizing from them checked by simulation |

@@ -199,18 +199,7 @@ fn check_inner(
         });
         return;
     }
-    let mut logical: Vec<String> = Vec::new();
-    for raw in text.split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) {
-        let line = raw.trim();
-        if let Some(cont) = line.strip_prefix('+')
-            && let Some(last) = logical.last_mut()
-        {
-            last.push(' ');
-            last.push_str(cont.trim());
-            continue;
-        }
-        logical.push(line.to_string());
-    }
+    let logical = logical_lines(text);
     let mut in_control = false;
     let skip = usize::from(has_title);
     for line in logical.iter().skip(skip) {
@@ -249,10 +238,9 @@ fn check_inner(
             });
             continue;
         }
-        if INCLUDES.contains(&first)
-            && let Some(arg) = path_argument(line)
-        {
-            if is_compiled(&arg) {
+        if let Some(include) = parse_include(line) {
+            let arg = &include.file;
+            if is_compiled(arg) {
                 out.push(Violation {
                     line: line.clone(),
                     reason: format!(
@@ -261,7 +249,7 @@ fn check_inner(
                 });
                 continue;
             }
-            match resolve(&arg, base, policy) {
+            match resolve(arg, base, policy) {
                 Err(reason) => out.push(Violation {
                     line: line.clone(),
                     reason,
@@ -352,15 +340,99 @@ pub fn check_lexical(text: &str) -> Vec<Violation> {
     check(&format!("* directive\n{text}"), &policy)
 }
 
-/// The first argument after the directive keyword, unquoted.
-fn path_argument(line: &str) -> Option<String> {
-    let rest = line.split_once(char::is_whitespace)?.1.trim();
-    for q in ['"', '\''] {
-        if let Some(inner) = rest.strip_prefix(q) {
-            return inner.split(q).next().map(str::to_string);
+/// The logical lines of a deck or library as the policy reads them: split
+/// at every line break a simulator might honour, trimmed, with `+`
+/// continuation lines joined to the line before. Anything else that reads
+/// include lines (corner rewrites, section inlining) must read them this way
+/// too, so it never sees a line the policy did not.
+///
+/// A CRLF pair is one break, and blank lines after the first are dropped,
+/// so a continuation joins the line a simulator joins it to: with blank
+/// lines kept, `.include\r\n+ file` read as two unrelated lines. The first
+/// line is always kept, blank or not, since it is the title.
+pub fn logical_lines(text: &str) -> Vec<String> {
+    let text = text.replace("\r\n", "\n");
+    let mut logical: Vec<String> = Vec::new();
+    for (i, raw) in text
+        .split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'])
+        .enumerate()
+    {
+        let line = raw.trim();
+        if i > 0 && line.is_empty() {
+            continue;
         }
+        if let Some(cont) = line.strip_prefix('+')
+            && i > 0
+            && let Some(last) = logical.last_mut()
+        {
+            last.push(' ');
+            last.push_str(cont.trim());
+            continue;
+        }
+        logical.push(line.to_string());
     }
-    rest.split_whitespace().next().map(str::to_string)
+    logical
+}
+
+/// An `.include`, `.inc` or `.lib` line, taken apart as the policy reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    /// The keyword as written (`.lib`, `.LIB`, `.include`).
+    pub keyword: String,
+    /// The file, unquoted.
+    pub file: String,
+    /// The file as written, with its quotes if it had any.
+    pub written_file: String,
+    /// The one word after the file, for a `.lib <file> <section>` line.
+    /// `None` when nothing follows the file, or more than one word does.
+    pub section: Option<String>,
+}
+
+/// Read a logical line as an include line, or `None` if it is not one.
+pub fn parse_include(line: &str) -> Option<Include> {
+    let line = line.trim();
+    let (keyword, rest) = line.split_once(char::is_whitespace)?;
+    if !INCLUDES.contains(&keyword.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    let rest = rest.trim();
+    let (file, written, tail) = match rest.chars().next()? {
+        q @ ('"' | '\'') => {
+            let inner = &rest[1..];
+            match inner.find(q) {
+                Some(end) => (&inner[..end], &rest[..end + 2], &inner[end + 1..]),
+                None => (inner, rest, ""),
+            }
+        }
+        _ => {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (&rest[..end], &rest[..end], &rest[end..])
+        }
+    };
+    let mut words = tail.split_whitespace();
+    let section = match (words.next(), words.next()) {
+        (Some(s), None) => Some(s.to_string()),
+        _ => None,
+    };
+    Some(Include {
+        keyword: keyword.to_string(),
+        file: file.to_string(),
+        written_file: written.to_string(),
+        section,
+    })
+}
+
+/// Resolve a file an include line names, exactly as the policy does:
+/// `Ok(Some(path))` for an existing file inside `base` or an allowed folder
+/// (symbolic links followed first), `Ok(None)` for a bare name that does not
+/// exist next to `base` (the simulator looks it up on its own library
+/// path), and the reason otherwise. Read a file only after this approved it.
+pub fn resolve_include(
+    path: &str,
+    base: &Path,
+    policy: &Policy,
+) -> Result<Option<PathBuf>, String> {
+    resolve(path, base, policy)
 }
 
 const FILE_KEYS: &[&str] = &[
@@ -591,6 +663,37 @@ mod tests {
             allow_control_blocks: false,
             trusted_dirs: vec![],
         }
+    }
+
+    /// Was a parser differential: with CRLF line ends each break left a
+    /// blank line behind, and a `+` continuation joined the blank line
+    /// instead of the include before it.
+    #[test]
+    fn continuations_join_across_crlf_and_blank_lines() {
+        assert_eq!(
+            logical_lines("t\r\n.include\r\n+ a.lib\r\n\r\n+ b\n"),
+            vec!["t", ".include a.lib b"]
+        );
+        assert_eq!(logical_lines("\nR1 a 0 1\n"), vec!["", "R1 a 0 1"]);
+        let d = temp("crlf");
+        let v = check("t\r\n.include\r\n+ ../x.lib\r\n", &policy_at(&d));
+        assert!(v.iter().any(|v| v.reason.contains("climbs out")), "{v:?}");
+    }
+
+    #[test]
+    fn include_lines_parse_one_way() {
+        let i = parse_include(".LIB \"my lib.lib\" MOS_TT").unwrap();
+        assert_eq!(
+            (i.keyword.as_str(), i.file.as_str(), i.written_file.as_str()),
+            (".LIB", "my lib.lib", "\"my lib.lib\"")
+        );
+        assert_eq!(i.section.as_deref(), Some("MOS_TT"));
+        let i = parse_include(".include 'a.inc'").unwrap();
+        assert_eq!((i.file.as_str(), i.section), ("a.inc", None));
+        assert_eq!(parse_include(".lib x.lib a b").unwrap().section, None);
+        assert_eq!(parse_include(".lib \"unclosed").unwrap().file, "unclosed");
+        assert!(parse_include(".param a=1").is_none());
+        assert!(parse_include(".lib").is_none());
     }
 
     #[test]

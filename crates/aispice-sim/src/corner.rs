@@ -11,19 +11,20 @@
 //! the `<corner>` part and keeps the rest, so it works on any library
 //! written that way, a PDK or one of the user's own.
 //!
-//! ngspice cannot read library sections in the LTspice compatibility mode
-//! aispice runs it in (it takes the one-argument `.lib name` section headers
-//! for includes), so [`expand_lib_sections`] inlines them for ngspice and
-//! LTspice; Xyce and Spectre read sections themselves.
+//! `.lib` lines are read with the netlist policy's own parser, and the
+//! libraries they name are read only through [`crate::library`], which asks
+//! the policy first.
 
+use crate::library::LibraryInfo;
 use crate::measure::{human, lenient, plain};
 use crate::spec::{Spec, SpecReport, SpecRow, evaluate};
 use crate::sweep::{self, SweepError};
-use aispice_core::netlist::{Line, Netlist};
+use aispice_core::netlist::{Line, Netlist, parse_include};
 use aispice_core::units;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use serde::de::{Error as _, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::marker::PhantomData;
 
 /// Model families with corner sections.
 pub const FAMILIES: &[&str] = &["mos", "res", "cap", "dio", "hbt"];
@@ -32,16 +33,26 @@ pub const FAMILIES: &[&str] = &["mos", "res", "cap", "dio", "hbt"];
 /// where fewer values were meant.
 pub const MAX_CORNERS: usize = 200;
 
-/// Library files larger than this are not read for their sections.
-const MAX_LIBRARY_BYTES: u64 = 16 * 1024 * 1024;
+/// The most process corners, temperatures, or values of one supply a set
+/// may list. Longer lists are refused while they are read.
+pub const MAX_LIST: usize = 64;
 
-/// Library sections nest at most this deep when expanded.
-const MAX_SECTION_DEPTH: usize = 8;
+/// The most supplies a set may vary.
+pub const MAX_SUPPLIES: usize = 8;
+
+/// A process corner's text is at most this long.
+const MAX_PROCESS_TEXT: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CornerError {
     #[error("the corner set is empty: give process corners, temperatures or supply values")]
     Empty,
+    #[error("{what}: at most {limit}, found {count}")]
+    ListTooLong {
+        what: &'static str,
+        count: usize,
+        limit: usize,
+    },
     #[error("{count} corners is more than the limit of {limit}; use fewer values")]
     TooMany { count: usize, limit: usize },
     #[error(
@@ -60,18 +71,29 @@ pub enum CornerError {
         wanted: String,
         found: String,
     },
-    #[error("{file} has no section `{section}`; it has {}", .available.join(", "))]
+    #[error("{file} has no section `{section}`{}", listed(.available))]
     MissingSection {
         file: String,
         section: String,
+        /// The library's sections, only for a library inside the project.
         available: Vec<String>,
     },
+    #[error("`{file}`: {reason}")]
+    Refused { file: String, reason: String },
     #[error("temperature {0} is not a temperature in Celsius")]
     BadTemperature(f64),
     #[error("supply {0}: {1}")]
     BadSupply(String, String),
     #[error(transparent)]
     Netlist(#[from] SweepError),
+}
+
+fn listed(available: &[String]) -> String {
+    if available.is_empty() {
+        String::new()
+    } else {
+        format!("; it has {}", available.join(", "))
+    }
 }
 
 /// Whether a section is the plain corner, its mismatch variant or its
@@ -130,55 +152,6 @@ pub fn parse_section(name: &str) -> Option<LibSection> {
     })
 }
 
-/// The section names a library file defines: its one-argument `.lib name`
-/// lines.
-pub fn lib_sections(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let mut w = line.split_whitespace();
-        if w.next().is_some_and(|k| k.eq_ignore_ascii_case(".lib"))
-            && let (Some(name), None) = (w.next(), w.next())
-            && !out.iter().any(|o| o.eq_ignore_ascii_case(name))
-        {
-            out.push(name.to_string());
-        }
-    }
-    out
-}
-
-/// A two-argument `.lib`: its keyword as written, the file (unquoted and as
-/// written) and the section.
-fn lib_line(text: &str) -> Option<(String, String, String, String)> {
-    let t = text.trim();
-    let kw_end = t.find(char::is_whitespace)?;
-    let kw = &t[..kw_end];
-    if !kw.eq_ignore_ascii_case(".lib") {
-        return None;
-    }
-    let rest = t[kw_end..].trim_start();
-    let (file, written, tail) = match rest.chars().next()? {
-        q @ ('"' | '\'') => {
-            let end = rest[1..].find(q)? + 1;
-            (&rest[1..end], &rest[..=end], &rest[end + 1..])
-        }
-        _ => {
-            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-            (&rest[..end], &rest[..end], &rest[end..])
-        }
-    };
-    let mut words = tail.split_whitespace();
-    let section = words.next()?;
-    if words.next().is_some() || file.is_empty() {
-        return None;
-    }
-    Some((
-        kw.to_string(),
-        file.to_string(),
-        written.to_string(),
-        section.to_string(),
-    ))
-}
-
 /// A top-level corner-library line of a netlist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SectionUse {
@@ -202,14 +175,18 @@ pub fn section_uses(netlist: &Netlist) -> Vec<SectionUse> {
             let Line::Directive { text } = item else {
                 return None;
             };
-            let (keyword, file, written_file, written_section) = lib_line(text)?;
+            let inc = parse_include(text)?;
+            if !inc.keyword.eq_ignore_ascii_case(".lib") {
+                return None;
+            }
+            let written_section = inc.section?;
             let section = parse_section(&written_section)?;
             Some(SectionUse {
                 index,
-                file,
+                file: inc.file,
                 section,
-                keyword,
-                written_file,
+                keyword: inc.keyword,
+                written_file: inc.written_file,
                 written_section,
             })
         })
@@ -227,18 +204,43 @@ pub fn set_section(netlist: &mut Netlist, at: &SectionUse, section: &LibSection)
     };
 }
 
-/// Lists the sections of a library file named in a netlist, or `None` when
-/// the file cannot be read (the simulator then has the last word).
-pub type SectionLookup<'a> = &'a dyn Fn(&str) -> Option<Vec<String>>;
+/// What a library a netlist names defines, as
+/// [`crate::library::LibraryFiles::sections`] answers: `Ok(None)` when that
+/// cannot be told (the simulator then has the last word), the policy's
+/// reason when it refuses the file.
+pub type SectionLookup<'a> = &'a dyn Fn(&str) -> Result<Option<LibraryInfo>, String>;
 
 /// A lookup that reads nothing.
-pub fn no_lookup(_: &str) -> Option<Vec<String>> {
-    None
+pub fn no_lookup(_: &str) -> Result<Option<LibraryInfo>, String> {
+    Ok(None)
 }
 
-/// Whether a library defines a section, when that can be told.
-pub fn defines(lookup: SectionLookup, file: &str, section: &str) -> Option<bool> {
-    lookup(file).map(|list| list.iter().any(|s| s.eq_ignore_ascii_case(section)))
+/// Whether a library has a section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    Yes,
+    /// It does not; the names it has, when they may be shown.
+    No(Vec<String>),
+    /// The library could not be read.
+    Unknown,
+}
+
+/// Whether the library a line names has a section; the policy's reason when
+/// it refuses the file.
+pub fn find_section(lookup: SectionLookup, file: &str, section: &str) -> Result<Found, String> {
+    Ok(match lookup(file)? {
+        None => Found::Unknown,
+        Some(info)
+            if info
+                .sections
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(section)) =>
+        {
+            Found::Yes
+        }
+        Some(info) if info.listable => Found::No(info.sections),
+        Some(_) => Found::No(Vec::new()),
+    })
 }
 
 /// A process corner: the corner each model family is put at.
@@ -277,6 +279,12 @@ impl Process {
     /// A preset name, or `family=corner` pairs separated by spaces or
     /// commas: `mos=ss res=wcs`.
     pub fn parse(text: &str) -> Result<Process, CornerError> {
+        if text.len() > MAX_PROCESS_TEXT {
+            return Err(CornerError::BadProcess(format!(
+                "{}...",
+                text.chars().take(40).collect::<String>()
+            )));
+        }
         if let Some(p) = preset(text) {
             return Ok(p);
         }
@@ -322,9 +330,74 @@ impl Process {
 pub struct Supply {
     /// A source (`VDD`) or `.param` name.
     pub target: String,
-    /// Its values, as numbers or SPICE text (`"1.8"`).
-    #[serde(deserialize_with = "lenient::vec")]
+    /// Its values, as numbers or SPICE text (`"1.8"`), at most 64.
+    #[serde(deserialize_with = "numbers")]
+    #[schemars(length(max = 64))]
     pub values: Vec<f64>,
+}
+
+/// A number as JSON or SPICE text.
+struct Number(f64);
+
+impl<'de> Deserialize<'de> for Number {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        lenient::num(d).map(Number)
+    }
+}
+
+/// A list read element by element that stops with an error at its limit,
+/// so an oversized request fails before it is held in full.
+struct Capped<T> {
+    limit: usize,
+    what: &'static str,
+    _t: PhantomData<T>,
+}
+
+impl<'de, T: Deserialize<'de>> Visitor<'de> for Capped<T> {
+    type Value = Vec<T>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "a list of at most {} {}", self.limit, self.what)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<T>, A::Error> {
+        let mut out = Vec::new();
+        while let Some(v) = seq.next_element::<T>()? {
+            if out.len() == self.limit {
+                return Err(A::Error::custom(format!(
+                    "at most {} {} in a corner set",
+                    self.limit, self.what
+                )));
+            }
+            out.push(v);
+        }
+        Ok(out)
+    }
+}
+
+fn capped<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+    limit: usize,
+    what: &'static str,
+) -> Result<Vec<T>, D::Error> {
+    d.deserialize_seq(Capped {
+        limit,
+        what,
+        _t: PhantomData,
+    })
+}
+
+fn numbers<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+    let v: Vec<Number> = capped(d, MAX_LIST, "values")?;
+    Ok(v.into_iter().map(|n| n.0).collect())
+}
+
+fn processes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    capped(d, MAX_LIST, "process corners")
+}
+
+fn supplies<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Supply>, D::Error> {
+    capped(d, MAX_SUPPLIES, "supplies")
 }
 
 /// Process corners times temperatures times supply values. Every part is
@@ -334,14 +407,17 @@ pub struct CornerSet {
     /// Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or
     /// family=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,
     /// dio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "processes")]
+    #[schemars(length(max = 64))]
     pub process: Vec<String>,
     /// Temperatures in degrees Celsius.
-    #[serde(default, deserialize_with = "lenient::vec")]
+    #[serde(default, deserialize_with = "numbers")]
+    #[schemars(length(max = 64))]
     pub temperatures: Vec<f64>,
     /// Supply values, for example `[{"target": "VDD", "values": [1.62,
-    /// 1.8, 1.98]}]`.
-    #[serde(default)]
+    /// 1.8, 1.98]}]`. At most 200 corners in all.
+    #[serde(default, deserialize_with = "supplies")]
+    #[schemars(length(max = 8))]
     pub supplies: Vec<Supply>,
 }
 
@@ -360,19 +436,27 @@ impl CornerSet {
         self.process.is_empty() && self.temperatures.is_empty() && self.supplies.is_empty()
     }
 
-    /// Every corner, process first and the last supply varying fastest.
-    pub fn corners(&self) -> Result<Vec<Corner>, CornerError> {
+    /// How many corners the set has, checked before any is built: every
+    /// list within its limit, every value sensible, at most
+    /// [`MAX_CORNERS`] in all.
+    pub fn count(&self) -> Result<usize, CornerError> {
         if self.is_empty() {
             return Err(CornerError::Empty);
         }
-        let processes: Vec<Option<Process>> = if self.process.is_empty() {
-            vec![None]
-        } else {
-            self.process
-                .iter()
-                .map(|p| Process::parse(p).map(Some))
-                .collect::<Result<_, _>>()?
+        let long = |what: &'static str, count: usize, limit: usize| {
+            (count > limit).then_some(CornerError::ListTooLong { what, count, limit })
         };
+        if let Some(e) = long("process corners", self.process.len(), MAX_LIST)
+            .or_else(|| long("temperatures", self.temperatures.len(), MAX_LIST))
+            .or_else(|| long("supplies", self.supplies.len(), MAX_SUPPLIES))
+            .or_else(|| {
+                self.supplies
+                    .iter()
+                    .find_map(|s| long("values of one supply", s.values.len(), MAX_LIST))
+            })
+        {
+            return Err(e);
+        }
         if let Some(t) = self
             .temperatures
             .iter()
@@ -380,11 +464,6 @@ impl CornerSet {
         {
             return Err(CornerError::BadTemperature(*t));
         }
-        let temps: Vec<Option<f64>> = if self.temperatures.is_empty() {
-            vec![None]
-        } else {
-            self.temperatures.iter().copied().map(Some).collect()
-        };
         for (i, s) in self.supplies.iter().enumerate() {
             let bad = |why: &str| CornerError::BadSupply(s.target.clone(), why.to_string());
             if s.values.is_empty() {
@@ -400,21 +479,38 @@ impl CornerSet {
                 return Err(bad("given twice"));
             }
         }
-        let combos = self
+        let count = self
             .supplies
             .iter()
-            .try_fold(1usize, |acc, s| acc.checked_mul(s.values.len()))
+            .map(|s| s.values.len())
+            .chain([self.process.len().max(1), self.temperatures.len().max(1)])
+            .try_fold(1usize, |acc, n| acc.checked_mul(n))
             .unwrap_or(usize::MAX);
-        let count = processes
-            .len()
-            .saturating_mul(temps.len())
-            .saturating_mul(combos);
         if count > MAX_CORNERS {
             return Err(CornerError::TooMany {
                 count,
                 limit: MAX_CORNERS,
             });
         }
+        Ok(count)
+    }
+
+    /// Every corner, process first and the last supply varying fastest.
+    pub fn corners(&self) -> Result<Vec<Corner>, CornerError> {
+        let count = self.count()?;
+        let processes: Vec<Option<Process>> = if self.process.is_empty() {
+            vec![None]
+        } else {
+            self.process
+                .iter()
+                .map(|p| Process::parse(p).map(Some))
+                .collect::<Result<_, _>>()?
+        };
+        let temps: Vec<Option<f64>> = if self.temperatures.is_empty() {
+            vec![None]
+        } else {
+            self.temperatures.iter().copied().map(Some).collect()
+        };
         let mut supply_sets: Vec<Vec<(String, f64)>> = vec![Vec::new()];
         for s in &self.supplies {
             supply_sets = supply_sets
@@ -474,12 +570,21 @@ fn set_process(
             corner: corner.to_string(),
             ..u.section.clone()
         };
-        if defines(lookup, &u.file, &next.name()) == Some(false) {
-            return Err(CornerError::MissingSection {
-                file: u.file.clone(),
-                section: next.name(),
-                available: lookup(&u.file).unwrap_or_default(),
-            });
+        match find_section(lookup, &u.file, &next.name()) {
+            Err(reason) => {
+                return Err(CornerError::Refused {
+                    file: u.file.clone(),
+                    reason,
+                });
+            }
+            Ok(Found::No(available)) => {
+                return Err(CornerError::MissingSection {
+                    file: u.file.clone(),
+                    section: next.name(),
+                    available,
+                });
+            }
+            Ok(Found::Yes | Found::Unknown) => {}
         }
         set_section(netlist, u, &next);
         changed += 1;
@@ -779,125 +884,6 @@ pub fn summarize(
     }
 }
 
-/// Replace every two-argument `.lib <file> <section>` line of a deck with
-/// that section of the file, for simulators that cannot select a section
-/// themselves. Relative paths inside a section are made absolute against
-/// the library's own folder, and sections it selects in turn are expanded
-/// too. `base` is the folder relative library paths in the deck start from.
-///
-/// Call it only on a deck the netlist policy has accepted (the policy reads
-/// every library the deck names), and check the result again.
-pub fn expand_lib_sections(deck: &str, base: &Path) -> Result<String, String> {
-    let mut out = String::with_capacity(deck.len());
-    expand(deck, base, 0, &mut out)?;
-    Ok(out)
-}
-
-fn expand(text: &str, base: &Path, depth: usize, out: &mut String) -> Result<(), String> {
-    for line in text.lines() {
-        if let Some((_, file, _, section)) = lib_line(line) {
-            if depth >= MAX_SECTION_DEPTH {
-                return Err(format!(
-                    "library sections nest deeper than {MAX_SECTION_DEPTH} levels"
-                ));
-            }
-            let path = if Path::new(&file).is_absolute() {
-                PathBuf::from(&file)
-            } else {
-                base.join(&file)
-            };
-            let body = read_section(&path, &section)?;
-            let dir = path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| base.to_path_buf());
-            out.push_str(&format!(
-                "* aispice: section {section} of {}\n",
-                path.display()
-            ));
-            expand(&body, &dir, depth + 1, out)?;
-            out.push_str(&format!("* aispice: end of section {section}\n"));
-            continue;
-        }
-        if depth > 0 {
-            out.push_str(&absolute_include(line, base));
-        } else {
-            out.push_str(line);
-        }
-        out.push('\n');
-    }
-    Ok(())
-}
-
-/// A one-argument `.include` or `.lib` inside a library section, with a
-/// relative file that exists made absolute.
-fn absolute_include(line: &str, base: &Path) -> String {
-    let t = line.trim_start();
-    let mut words = t.split_whitespace();
-    let kw = words.next().unwrap_or("");
-    if !matches!(
-        kw.to_ascii_lowercase().as_str(),
-        ".include" | ".inc" | ".lib"
-    ) {
-        return line.to_string();
-    }
-    let rest = t[kw.len()..].trim();
-    let arg = rest.trim_matches(|c| c == '"' || c == '\'');
-    if arg.is_empty() || arg.contains(char::is_whitespace) && !rest.starts_with(['"', '\'']) {
-        return line.to_string();
-    }
-    let p = Path::new(arg);
-    if p.is_absolute() {
-        return line.to_string();
-    }
-    match std::fs::canonicalize(base.join(p)) {
-        Ok(real) => format!("{kw} \"{}\"", real.display()),
-        Err(_) => line.to_string(),
-    }
-}
-
-fn read_section(path: &Path, section: &str) -> Result<String, String> {
-    let size = std::fs::metadata(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .len();
-    if size > MAX_LIBRARY_BYTES {
-        return Err(format!("{} is larger than 16 MiB", path.display()));
-    }
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let (text, _) = aispice_core::encoding::decode(&bytes);
-    let mut body = String::new();
-    let mut inside = false;
-    for line in text.lines() {
-        let mut w = line.split_whitespace();
-        let kw = w.next().unwrap_or("").to_ascii_lowercase();
-        if !inside {
-            if kw == ".lib"
-                && let (Some(name), None) = (w.next(), w.next())
-                && name.eq_ignore_ascii_case(section)
-            {
-                inside = true;
-            }
-            continue;
-        }
-        if kw == ".endl" {
-            return Ok(body);
-        }
-        body.push_str(line);
-        body.push('\n');
-    }
-    if inside {
-        return Err(format!(
-            "{}: section `{section}` has no `.endl`",
-            path.display()
-        ));
-    }
-    Err(format!(
-        "{} has no section `{section}`; it has {}",
-        path.display(),
-        lib_sections(&text).join(", ")
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,7 +893,7 @@ mod tests {
 
     const DECK: &str = "* corners\n.lib /pdk/corner.lib mos_tt\n.LIB \"/pdk/res lib.lib\" RES_TYP_MISMATCH\n.lib /pdk/dio.lib dio_tt\n.lib opamp.sub\nVDD vdd 0 1.8\nR1 vdd out {rload}\n.param rload=1k vref=0.9\n.options reltol=1m temp=50\n.temp 85\n.ac dec 10 1 1Meg\n.end\n";
 
-    fn sections(file: &str) -> Option<Vec<String>> {
+    fn sections(file: &str) -> Result<Option<LibraryInfo>, String> {
         let list: &[&str] = match file {
             "/pdk/corner.lib" => &["mos_tt", "mos_ss", "mos_ff", "mos_sf", "mos_fs"],
             "/pdk/res lib.lib" => &[
@@ -918,9 +904,13 @@ mod tests {
                 "res_wcs_mismatch",
                 "res_bcs_mismatch",
             ],
-            _ => return None,
+            "/etc/passwd" => return Err("`/etc/passwd` is outside the project".into()),
+            _ => return Ok(None),
         };
-        Some(list.iter().map(|s| s.to_string()).collect())
+        Ok(Some(LibraryInfo {
+            sections: list.iter().map(|s| s.to_string()).collect(),
+            listable: file != "/pdk/corner.lib",
+        }))
     }
 
     #[test]
@@ -936,12 +926,52 @@ mod tests {
         assert!(parse_section("tt").is_none());
         assert!(parse_section("my_amp").is_none());
         assert!(parse_section("mos_").is_none());
+    }
+
+    /// Oversized requests fail fast and say why: lists are cut off while
+    /// they are read, and the corner count is known before any corner is
+    /// built.
+    #[test]
+    fn oversized_corner_sets_fail_fast() {
+        let temps: Vec<i64> = (0..100_000).collect();
+        let err = serde_json::from_value::<CornerSet>(serde_json::json!({"temperatures": temps}))
+            .unwrap_err();
+        assert!(err.to_string().contains("at most 64 values"), "{err}");
+        let many: Vec<serde_json::Value> = (0..20)
+            .map(|i| serde_json::json!({"target": format!("V{i}"), "values": [1, 2]}))
+            .collect();
+        let err =
+            serde_json::from_value::<CornerSet>(serde_json::json!({"supplies": many})).unwrap_err();
+        assert!(err.to_string().contains("at most 8 supplies"), "{err}");
+        // 64^10 corners: refused from the counts alone.
+        let huge = CornerSet {
+            process: vec!["tt".into(); 64],
+            temperatures: vec![27.0; 64],
+            supplies: (0..8)
+                .map(|i| Supply {
+                    target: format!("V{i}"),
+                    values: vec![1.0; 64],
+                })
+                .collect(),
+        };
+        let started = std::time::Instant::now();
         assert_eq!(
-            lib_sections(
-                ".LIB mos_tt\n.param a=1\n.ENDL mos_tt\n.lib mos_ss\n.endl\n.lib x.lib y\n"
-            ),
-            vec!["mos_tt", "mos_ss"]
+            huge.corners(),
+            Err(CornerError::TooMany {
+                count: 1 << 60,
+                limit: MAX_CORNERS
+            })
         );
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        let long = CornerSet {
+            temperatures: vec![27.0; 65],
+            ..Default::default()
+        };
+        assert!(matches!(long.count(), Err(CornerError::ListTooLong { .. })));
+        assert!(matches!(
+            Process::parse(&"mos=ss ".repeat(100)),
+            Err(CornerError::BadProcess(_))
+        ));
     }
 
     #[test]
@@ -968,10 +998,14 @@ mod tests {
         );
         assert_eq!(CornerSet::default().corners(), Err(CornerError::Empty));
         let many = CornerSet {
-            temperatures: (0..201).map(f64::from).collect(),
+            process: vec!["tt".into(); 8],
+            temperatures: (0..30).map(f64::from).collect(),
             ..Default::default()
         };
-        assert!(matches!(many.corners(), Err(CornerError::TooMany { .. })));
+        assert_eq!(
+            many.corners().unwrap_err().to_string(),
+            "240 corners is more than the limit of 200; use fewer values"
+        );
         let bad = CornerSet {
             process: vec!["slow".into()],
             ..Default::default()
@@ -1034,12 +1068,30 @@ mod tests {
             temperature: None,
             supplies: Vec::new(),
         };
-        // A section the library does not define is named before any run.
+        // A section the library does not define is named before any run;
+        // a library outside the project keeps its other sections to itself.
         let err = apply(&n, &at("mos=xx"), &sections).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "/pdk/corner.lib has no section `mos_xx`; it has mos_tt, mos_ss, mos_ff, mos_sf, mos_fs"
+        assert_eq!(err.to_string(), "/pdk/corner.lib has no section `mos_xx`");
+        let err = apply(&n, &at("res=xx"), &sections).unwrap_err();
+        assert!(
+            err.to_string().ends_with("it has res_typ, res_wcs, res_bcs, res_typ_mismatch, res_wcs_mismatch, res_bcs_mismatch"),
+            "{err}"
         );
+        // A library the policy refuses stops the corner, with its reason.
+        let evil = parse("* x\n.lib /etc/passwd mos_tt\n.op\n.end\n");
+        let err = apply(&evil, &at("ss"), &sections).unwrap_err();
+        assert_eq!(
+            err,
+            CornerError::Refused {
+                file: "/etc/passwd".into(),
+                reason: "`/etc/passwd` is outside the project".into()
+            }
+        );
+        // The policy's reading of `.lib` lines: keyword case, quotes and
+        // continuation lines.
+        let odd = parse("* x\n.LiB \"/pdk/corner.lib\"\n+ MOS_TT\n.op\n.end\n");
+        let out = write(&apply(&odd, &at("ff"), &sections).unwrap());
+        assert!(out.contains(".LiB \"/pdk/corner.lib\" MOS_FF\n"), "{out}");
         let err = apply(&n, &at("hbt=wcs"), &sections).unwrap_err();
         assert!(matches!(err, CornerError::NoFamilies { .. }), "{err}");
         let plain = parse("* x\nR1 a 0 1k\n.op\n.end\n");
@@ -1116,42 +1168,5 @@ mod tests {
         assert_eq!(r.summary, "all 2 specs pass at all 2 corners");
         assert_eq!(r.rows[0].worst_corner.as_deref(), Some("tt"));
         assert_eq!(r.worst_corner.as_deref(), Some("tt"));
-    }
-
-    #[test]
-    fn sections_expand_inline_with_absolute_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let lib = dir.path().join("lib");
-        std::fs::create_dir(&lib).unwrap();
-        std::fs::write(lib.join("models.inc"), ".model d1 D(IS=1e-14)\n").unwrap();
-        std::fs::write(
-            lib.join("corner.lib"),
-            "* corners\n.LIB res_typ\n.param rsh=1k\n.include models.inc\n.lib inner.lib extra\n.ENDL res_typ\n.LIB res_wcs\n.param rsh=1.2k\n.ENDL res_wcs\n",
-        )
-        .unwrap();
-        std::fs::write(lib.join("inner.lib"), ".lib extra\n.param x=2\n.endl\n").unwrap();
-        let deck = "* t\n.lib lib/corner.lib res_typ\nR1 a 0 {rsh}\n.lib opamp.sub\n.end\n";
-        let out = expand_lib_sections(deck, dir.path()).unwrap();
-        let models = std::fs::canonicalize(lib.join("models.inc")).unwrap();
-        assert!(out.contains(".param rsh=1k\n"), "{out}");
-        assert!(!out.contains("rsh=1.2k"), "{out}");
-        assert!(
-            out.contains(&format!(".include \"{}\"\n", models.display())),
-            "{out}"
-        );
-        assert!(out.contains(".param x=2\n"), "{out}");
-        assert!(out.contains("R1 a 0 {rsh}\n.lib opamp.sub\n"), "{out}");
-        assert!(!out.contains(".lib lib/corner.lib"), "{out}");
-        let err =
-            expand_lib_sections("* t\n.lib lib/corner.lib res_bcs\n", dir.path()).unwrap_err();
-        assert!(
-            err.ends_with("has no section `res_bcs`; it has res_typ, res_wcs"),
-            "{err}"
-        );
-        assert!(expand_lib_sections("* t\n.lib lib/none.lib x\n", dir.path()).is_err());
-        // A section that selects itself stops at the depth limit.
-        std::fs::write(lib.join("loop.lib"), ".lib s\n.lib loop.lib s\n.endl\n").unwrap();
-        let err = expand_lib_sections("* t\n.lib lib/loop.lib s\n", dir.path()).unwrap_err();
-        assert!(err.contains("nest deeper"), "{err}");
     }
 }

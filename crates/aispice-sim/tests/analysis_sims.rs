@@ -8,10 +8,11 @@
 
 mod common;
 
-use aispice_core::netlist::parse;
+use aispice_core::netlist::{Policy, parse};
 use aispice_sim::backend::{SimId, Simulator};
 use aispice_sim::corner::{self, CornerSet};
 use aispice_sim::dialect::translate;
+use aispice_sim::library::{LibraryFiles, expand_lib_sections};
 use aispice_sim::measure::{Measure, measure};
 use aispice_sim::stimulus;
 use common::*;
@@ -88,11 +89,14 @@ async fn process_corners_select_library_sections() {
         process: vec!["tt".into(), "ss".into(), "ff".into()],
         ..Default::default()
     };
-    let lookup = |file: &str| {
-        std::fs::read_to_string(file)
-            .ok()
-            .map(|t| corner::lib_sections(&t))
+    let policy = Policy {
+        base_dir: dir.path().to_path_buf(),
+        allowed_dirs: vec![dir.path().to_path_buf()],
+        allow_control_blocks: false,
+        trusted_dirs: Vec::new(),
     };
+    let files = LibraryFiles::new(policy.clone(), dir.path());
+    let lookup = |file: &str| files.sections(file);
     let variants = corner::variants(&parse(&deck), &set, &lookup).unwrap();
     for (id, sim) in local_simulators().await {
         for ((name, n), r) in variants.iter().zip([1e3, 1.2e3, 800.0]) {
@@ -100,7 +104,8 @@ async fn process_corners_select_library_sections() {
             // As the runner does: ngspice in its LTspice mode and LTspice
             // cannot select a section themselves.
             if matches!(id, SimId::Ngspice | SimId::Ltspice) {
-                text = corner::expand_lib_sections(&text, dir.path()).unwrap();
+                let files = LibraryFiles::new(policy.clone(), dir.path());
+                text = expand_lib_sections(&text, &files).unwrap();
             }
             let got = bandwidth(id, sim.as_ref(), &text).await;
             let want = 1.0 / (2.0 * PI * r * 100e-9);

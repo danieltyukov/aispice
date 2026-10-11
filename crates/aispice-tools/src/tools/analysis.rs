@@ -1,6 +1,6 @@
 //! What the analysis tools share: running netlist variants a few at a time,
-//! the derived AC runs PSRR and CMRR need, reading corner libraries'
-//! sections, and the corner report as text and data.
+//! the derived AC runs PSRR and CMRR need, the corner libraries a circuit
+//! names (read through the policy), and the corner report as text and data.
 
 use crate::project::Project;
 use crate::runner::{Runner, StoredRun};
@@ -8,20 +8,15 @@ use crate::workspace::Workspace;
 use aispice_agent::ToolContext;
 use aispice_core::netlist::Netlist;
 use aispice_sim::Dataset;
-use aispice_sim::corner::{self, CornerReport};
+use aispice_sim::corner::CornerReport;
+use aispice_sim::library::LibraryFiles;
 use aispice_sim::measure::{Measure, spaced};
 use aispice_sim::stimulus;
 use serde_json::{Value, json};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 /// Simulations run at once.
 const BATCH: usize = 6;
-
-/// Library files larger than this are not read for their section names.
-const MAX_LIBRARY_BYTES: u64 = 16 * 1024 * 1024;
 
 /// A variant's run and the datasets its measurements read: the run's own,
 /// plus those of a derived AC run for each source a PSRR or CMRR
@@ -161,43 +156,16 @@ pub(crate) async fn derived_datasets(
     Ok(out)
 }
 
-/// Lists the sections of a library a circuit's `.lib` line names, reading
-/// only files inside the folders the netlist policy lets a simulation read.
-/// Answers are kept for the call.
-pub(crate) fn section_lookup(
+/// The corner libraries a circuit's `.lib` lines name, read only through
+/// the policy its simulations run under (see [`LibraryFiles`]), each at
+/// most once in a call.
+pub(crate) fn library_files(
     ws: &Workspace,
     p: &Project,
     circuit: &str,
-) -> impl Fn(&str) -> Option<Vec<String>> + use<> {
-    let policy = Runner::base_dir(p, circuit)
-        .ok()
-        .map(|base| ws.runner.policy_for(p, &base));
-    let cache: RefCell<HashMap<String, Option<Vec<String>>>> = RefCell::new(HashMap::new());
-    move |file: &str| {
-        if let Some(hit) = cache.borrow().get(file) {
-            return hit.clone();
-        }
-        let found = policy.as_ref().and_then(|policy| {
-            let path = Path::new(file);
-            let path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                policy.base_dir.join(path)
-            };
-            let real = std::fs::canonicalize(&path).ok()?;
-            let inside = std::iter::once(&policy.base_dir)
-                .chain(&policy.allowed_dirs)
-                .any(|d| real.starts_with(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())));
-            if !inside || std::fs::metadata(&real).ok()?.len() > MAX_LIBRARY_BYTES {
-                return None;
-            }
-            let bytes = std::fs::read(&real).ok()?;
-            let (text, _) = aispice_core::encoding::decode(&bytes);
-            Some(corner::lib_sections(&text))
-        });
-        cache.borrow_mut().insert(file.to_string(), found.clone());
-        found
-    }
+) -> Result<LibraryFiles<'static>, String> {
+    let base = Runner::base_dir(p, circuit).map_err(|e| e.to_string())?;
+    Ok(LibraryFiles::new(ws.runner.policy_for(p, &base), p.root()))
 }
 
 /// The corner report for the model: the summary, each spec's worst case,

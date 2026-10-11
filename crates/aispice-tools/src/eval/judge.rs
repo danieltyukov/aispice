@@ -139,7 +139,8 @@ async fn judge_specs(
     let ctx = ToolContext::default();
     if let Some(set) = &task.corners {
         let variants = {
-            let lookup = analysis::section_lookup(ws, p, &task.circuit);
+            let files = analysis::library_files(ws, p, &task.circuit)?;
+            let lookup = |f: &str| files.sections(f);
             corner::variants(&netlist, set, &lookup).map_err(|e| format!("corners: {e}"))?
         };
         let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
