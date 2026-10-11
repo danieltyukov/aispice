@@ -14,6 +14,11 @@
 //! before the check); included files are checked by the same rules. Anything
 //! not understood is refused rather than allowed. The policy runs on every
 //! deck, whatever produced it.
+//!
+//! Compiled device models (ngspice OSDI files, Xyce plugins, XSPICE code
+//! models) run native code, so a deck can never load one. aispice loads a
+//! registered PDK's compiled models itself, outside the deck, after
+//! [`check_module`] has confirmed each file is inside the registered folder.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -28,6 +33,12 @@ pub struct Policy {
     pub allowed_dirs: Vec<PathBuf>,
     /// ngspice/Xyce `.control` blocks. Off unless the user turns it on.
     pub allow_control_blocks: bool,
+    /// Registered PDK folders. Files inside may be included like those in
+    /// `allowed_dirs`, and are checked by every rule but one: a `/` in them
+    /// is division, as in IHP's `as='max(w/ng,wmin)*z1'`, not a path. A PDK
+    /// is registered by the user, never by a deck or a project.
+    #[serde(default)]
+    pub trusted_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +118,11 @@ const FOREIGN: &[&str] = &[
     "endsection",
     "pre_osdi",
     "codemodel",
+    "osdi",
 ];
+
+/// File types that hold compiled code a simulator would load and run.
+const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
 
 /// Included files larger than this are refused rather than read.
 const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
@@ -119,7 +134,20 @@ const MAX_INCLUDE_DEPTH: usize = 8;
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     let mut out = Vec::new();
     let mut seen = Vec::new();
-    check_inner(text, policy, &policy.base_dir, true, 0, &mut seen, &mut out);
+    let cx = Cx {
+        policy,
+        trusted: canonical_dirs(&policy.trusted_dirs),
+    };
+    check_inner(
+        &cx,
+        text,
+        &policy.base_dir,
+        true,
+        false,
+        0,
+        &mut seen,
+        &mut out,
+    );
     let mut unique: Vec<Violation> = Vec::with_capacity(out.len());
     for v in out {
         if !unique.contains(&v) {
@@ -129,15 +157,31 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     unique
 }
 
+struct Cx<'a> {
+    policy: &'a Policy,
+    /// `trusted_dirs`, with symlinks resolved.
+    trusted: Vec<PathBuf>,
+}
+
+fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    dirs.iter()
+        .map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.clone()))
+        .collect()
+}
+
+/// `trusted` is whether `text` is a file inside a registered PDK.
+#[allow(clippy::too_many_arguments)]
 fn check_inner(
+    cx: &Cx,
     text: &str,
-    policy: &Policy,
     base: &Path,
     has_title: bool,
+    trusted: bool,
     depth: usize,
     seen: &mut Vec<PathBuf>,
     out: &mut Vec<Violation>,
 ) {
+    let policy = cx.policy;
     // C-based simulators stop reading a line at NUL, and other control
     // characters are handled differently by each reader. Either can make the
     // simulator see a line this check did not, so they are refused outright.
@@ -207,6 +251,15 @@ fn check_inner(
         if INCLUDES.contains(&first)
             && let Some(arg) = path_argument(line)
         {
+            if is_compiled(&arg) {
+                out.push(Violation {
+                    line: line.clone(),
+                    reason: format!(
+                        "`{arg}` is a compiled model library; a deck cannot load one (aispice loads a registered PDK's compiled models itself)"
+                    ),
+                });
+                continue;
+            }
             match resolve(&arg, base, policy) {
                 Err(reason) => out.push(Violation {
                     line: line.clone(),
@@ -245,7 +298,17 @@ fn check_inner(
                         .map(Path::to_path_buf)
                         .unwrap_or_else(|| base.to_path_buf());
                     let before = out.len();
-                    check_inner(&inc, policy, &inc_base, false, depth + 1, seen, out);
+                    let inc_trusted = cx.trusted.iter().any(|d| file.starts_with(d));
+                    check_inner(
+                        cx,
+                        &inc,
+                        &inc_base,
+                        false,
+                        inc_trusted,
+                        depth + 1,
+                        seen,
+                        out,
+                    );
                     for v in &mut out[before..] {
                         v.reason = format!("in {}: {}", file.display(), v.reason);
                     }
@@ -264,7 +327,7 @@ fn check_inner(
                 reason: "`cmd=` runs a program in some simulators; it is not allowed".into(),
             });
         }
-        for value in path_like_values(line) {
+        for value in path_like_values(line, trusted) {
             if let Err(reason) = resolve(&value, base, policy) {
                 out.push(Violation {
                     line: line.clone(),
@@ -283,6 +346,7 @@ pub fn check_lexical(text: &str) -> Vec<Violation> {
         base_dir: PathBuf::from("/nonexistent/aispice-lexical"),
         allowed_dirs: Vec::new(),
         allow_control_blocks: false,
+        trusted_dirs: Vec::new(),
     };
     check(&format!("* directive\n{text}"), &policy)
 }
@@ -310,8 +374,10 @@ const FILE_KEYS: &[&str] = &[
     "library",
 ];
 
-/// Values on a line that are, or look like, file paths.
-fn path_like_values(line: &str) -> Vec<String> {
+/// Values on a line that are, or look like, file paths. With `keys_only`,
+/// only the values of file keys (`file=`, `wavefile=`...): a registered
+/// PDK's expressions divide with `/` everywhere.
+fn path_like_values(line: &str, keys_only: bool) -> Vec<String> {
     let mut out = Vec::new();
     let is_sep = |c: char| c.is_whitespace() || c == ',' || c == '(' || c == ')';
     // Tokens with the character just before each, so `V(out)/V(in)` can be
@@ -347,7 +413,7 @@ fn path_like_values(line: &str) -> Vec<String> {
             || value.starts_with('~')
             || is_drive_path(&value);
         if FILE_KEYS.contains(&key.as_str())
-            || (looks_like_path && !divides && !value.contains('{'))
+            || (!keys_only && looks_like_path && !divides && !value.contains('{'))
         {
             out.push(value);
         }
@@ -424,6 +490,7 @@ fn resolve(path: &str, base: &Path, policy: &Policy) -> Result<Option<PathBuf>, 
         Ok(real) => {
             let inside = std::iter::once(&policy.base_dir)
                 .chain(policy.allowed_dirs.iter())
+                .chain(policy.trusted_dirs.iter())
                 .any(|d| {
                     let d = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
                     real.starts_with(&d)
@@ -438,6 +505,7 @@ fn resolve(path: &str, base: &Path, policy: &Policy) -> Result<Option<PathBuf>, 
         Err(_) if p.is_absolute() => {
             let inside = std::iter::once(&policy.base_dir)
                 .chain(policy.allowed_dirs.iter())
+                .chain(policy.trusted_dirs.iter())
                 .any(|d| p.starts_with(d));
             if inside { Ok(None) } else { outside() }
         }
@@ -446,6 +514,63 @@ fn resolve(path: &str, base: &Path, policy: &Policy) -> Result<Option<PathBuf>, 
         )),
         Err(_) => Ok(None),
     }
+}
+
+/// Whether a referenced file is compiled code, by its extension.
+fn is_compiled(path: &str) -> bool {
+    Path::new(path.trim())
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| COMPILED.iter().any(|c| c.eq_ignore_ascii_case(e)))
+}
+
+/// Check a compiled model library aispice is about to load into a simulator:
+/// an ngspice OSDI file or a Xyce plugin from a registered PDK. It must be a
+/// regular file with one of `extensions`, inside one of `roots` once
+/// symlinks are resolved, and its path must be safe to write into the
+/// `.spiceinit` aispice generates and into Xyce's comma-separated `-plugin`
+/// list: no quotes, commas, semicolons or control characters. Returns the
+/// resolved path.
+pub fn check_module(
+    path: &Path,
+    roots: &[PathBuf],
+    extensions: &[&str],
+) -> Result<PathBuf, Violation> {
+    let refuse = |reason: String| Violation {
+        line: path.display().to_string(),
+        reason,
+    };
+    let real = std::fs::canonicalize(path)
+        .map_err(|e| refuse(format!("{} cannot be read: {e}", path.display())))?;
+    let roots = canonical_dirs(roots);
+    if !roots.iter().any(|r| real.starts_with(r)) {
+        return Err(refuse(format!(
+            "{} is not inside a registered PDK folder",
+            real.display()
+        )));
+    }
+    if !real.is_file() {
+        return Err(refuse(format!("{} is not a file", real.display())));
+    }
+    let ext_ok = real
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+    if !ext_ok {
+        return Err(refuse(format!(
+            "{} is not a {} file",
+            real.display(),
+            extensions.join(" or ")
+        )));
+    }
+    let text = real.to_string_lossy();
+    if text.contains(['\'', '"', ',', ';', '`', '$']) || text.chars().any(char::is_control) {
+        return Err(refuse(format!(
+            "{} has a quote, comma, semicolon, `$` or control character in its path; move the PDK to a plain path",
+            real.display()
+        )));
+    }
+    Ok(real)
 }
 
 #[cfg(test)]
@@ -463,6 +588,7 @@ mod tests {
             base_dir: dir.to_path_buf(),
             allowed_dirs: vec![],
             allow_control_blocks: false,
+            trusted_dirs: vec![],
         }
     }
 
@@ -636,5 +762,150 @@ mod tests {
         ] {
             assert!(!check_lexical(bad).is_empty(), "{bad} was allowed");
         }
+    }
+
+    /// A fake PDK: a corner library with a section, a model file IHP-style
+    /// expressions, an OSDI file, and a folder outside it.
+    fn fake_pdk(name: &str) -> (PathBuf, PathBuf) {
+        let root = temp(&format!("pdk-{name}"));
+        let models = root.join("libs.tech/ngspice/models");
+        let osdi = root.join("libs.tech/ngspice/osdi");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::create_dir_all(&osdi).unwrap();
+        std::fs::write(
+            models.join("cornerMOSlv.lib"),
+            "* corners\n.LIB mos_tt\n.param p_vfbo = 1.0\n.include sg13g2_moslv_mod.lib\n.ENDL mos_tt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            models.join("sg13g2_moslv_mod.lib"),
+            "* model\n.subckt sg13_lv_nmos d g s b w=1u l=1u ng=1\n.if (ng == 1)\nNsg13_lv_nmos d g s b psp\n+ as='max(w/ng,1e-7)*(0.34e-6+((ng-1)/2)*0.38e-6)'\n.endif\n.ends\n.model psp psp103va type=1\n",
+        )
+        .unwrap();
+        std::fs::write(osdi.join("psp103.osdi"), b"\x7fELF\x00binary").unwrap();
+        (root, temp(&format!("proj-{name}")))
+    }
+
+    fn with_pdk(project: &Path, pdk: &Path) -> Policy {
+        Policy {
+            trusted_dirs: vec![pdk.to_path_buf()],
+            ..policy_at(project)
+        }
+    }
+
+    #[test]
+    fn pdk_libraries_pass_only_from_a_registered_folder() {
+        let (pdk, proj) = fake_pdk("lib");
+        let corner = pdk.join("libs.tech/ngspice/models/cornerMOSlv.lib");
+        let deck = format!(
+            "t\nXM1 d g 0 0 sg13_lv_nmos w=1u l=0.13u\n.lib {} mos_tt\n.op\n",
+            corner.display()
+        );
+        assert_eq!(check(&deck, &with_pdk(&proj, &pdk)), vec![]);
+        // Not registered: outside every allowed folder.
+        assert!(!check(&deck, &policy_at(&proj)).is_empty());
+        // The same model file in an ordinary allowed folder is still read
+        // with the strict path check, which misreads `w/ng`.
+        let plain = Policy {
+            allowed_dirs: vec![pdk.clone()],
+            ..policy_at(&proj)
+        };
+        assert!(!check(&deck, &plain).is_empty());
+    }
+
+    #[test]
+    fn pdk_includes_cannot_leave_the_registered_folder() {
+        let (pdk, proj) = fake_pdk("escape");
+        let outside = temp("pdk-escape-outside");
+        std::fs::write(outside.join("secret.lib"), "* secret\n").unwrap();
+        let models = pdk.join("libs.tech/ngspice/models");
+        let policy = with_pdk(&proj, &pdk);
+        let climb = format!(
+            "t\n.include {}/../../../../pdk-escape-outside/secret.lib\n",
+            models.display()
+        );
+        assert!(!check(&climb, &policy).is_empty());
+        #[cfg(unix)]
+        {
+            let link = models.join("linked.lib");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(outside.join("secret.lib"), &link).unwrap();
+            let deck = format!("t\n.include {}\n", link.display());
+            assert!(!check(&deck, &policy).is_empty(), "symlink out of the PDK");
+        }
+        // A model file that itself includes something outside is refused.
+        std::fs::write(
+            models.join("sneaky.lib"),
+            format!("* x\n.include {}\n", outside.join("secret.lib").display()),
+        )
+        .unwrap();
+        let deck = format!("t\n.include {}\n", models.join("sneaky.lib").display());
+        assert!(!check(&deck, &policy).is_empty());
+    }
+
+    #[test]
+    fn pdk_files_still_get_every_other_rule() {
+        let (pdk, proj) = fake_pdk("rules");
+        let models = pdk.join("libs.tech/ngspice/models");
+        for (name, body) in [
+            ("control.lib", "* x\n.control\nshell id\n.endc\n"),
+            ("preosdi.lib", "* x\npre_osdi /tmp/evil.osdi\n"),
+            ("codemodel.lib", "* x\ncodemodel /tmp/evil.cm\n"),
+            ("filekey.lib", "* x\nV1 a 0 PWL file=/etc/passwd\n"),
+        ] {
+            std::fs::write(models.join(name), body).unwrap();
+            let deck = format!("t\n.include {}\n", models.join(name).display());
+            assert!(!check(&deck, &with_pdk(&proj, &pdk)).is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn decks_cannot_load_compiled_models_even_from_a_pdk() {
+        let (pdk, proj) = fake_pdk("osdi");
+        let osdi = pdk.join("libs.tech/ngspice/osdi/psp103.osdi");
+        let policy = with_pdk(&proj, &pdk);
+        for deck in [
+            format!("t\npre_osdi {}\n", osdi.display()),
+            format!("t\nosdi {}\n", osdi.display()),
+            format!("t\n.osdi {}\n", osdi.display()),
+            format!("t\n.include {}\n", osdi.display()),
+            format!("t\n.lib \"{}\" mos_tt\n", osdi.display()),
+            "t\n.include evil.so\n".to_string(),
+            "t\ncodemodel spice2poly.cm\n".to_string(),
+            format!("t\n.control\npre_osdi {}\n.endc\n", osdi.display()),
+        ] {
+            assert!(!check(&deck, &policy).is_empty(), "{deck}");
+        }
+    }
+
+    #[test]
+    fn modules_load_only_from_inside_a_registered_folder() {
+        let (pdk, _) = fake_pdk("module");
+        let osdi = pdk.join("libs.tech/ngspice/osdi/psp103.osdi");
+        let roots = vec![pdk.clone()];
+        let real = check_module(&osdi, &roots, &["osdi"]).unwrap();
+        assert_eq!(real, std::fs::canonicalize(&osdi).unwrap());
+        // Not registered.
+        assert!(check_module(&osdi, &[], &["osdi"]).is_err());
+        // Wrong kind of file.
+        let lib = pdk.join("libs.tech/ngspice/models/cornerMOSlv.lib");
+        assert!(check_module(&lib, &roots, &["osdi"]).is_err());
+        assert!(check_module(&osdi, &roots, &["so"]).is_err());
+        // Missing.
+        assert!(check_module(&pdk.join("none.osdi"), &roots, &["osdi"]).is_err());
+        // Outside, reached through a symlink inside the PDK.
+        let outside = temp("module-outside");
+        std::fs::write(outside.join("evil.osdi"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            let link = pdk.join("libs.tech/ngspice/osdi/evil.osdi");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(outside.join("evil.osdi"), &link).unwrap();
+            assert!(check_module(&link, &roots, &["osdi"]).is_err());
+        }
+        // A path that would break out of the generated start-up file.
+        let odd = temp("module-it's");
+        std::fs::write(odd.join("m.osdi"), b"x").unwrap();
+        assert!(check_module(&odd.join("m.osdi"), std::slice::from_ref(&odd), &["osdi"]).is_err());
     }
 }

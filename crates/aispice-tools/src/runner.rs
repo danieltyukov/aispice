@@ -353,6 +353,7 @@ impl Runner {
             base_dir: base.clone(),
             allowed_dirs: allowed,
             allow_control_blocks: self.config().allow_control_blocks,
+            trusted_dirs: Vec::new(),
         };
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
@@ -624,6 +625,7 @@ mod tests {
             base_dir: std::env::temp_dir(),
             allowed_dirs: Vec::new(),
             allow_control_blocks: false,
+            trusted_dirs: Vec::new(),
         };
         for id in SimId::ALL {
             let mut notes = Vec::new();
