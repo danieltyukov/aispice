@@ -142,6 +142,10 @@ const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
 /// it built, after this check.
 const CODE_RUNNING_MODELS: &[&str] = &["d_cosim", "d_process"];
 
+/// The parameters through which those models name the code they load or
+/// run.
+const CODE_RUNNING_PARAMS: &[&str] = &["simulation", "process_file"];
+
 /// Included files larger than this are refused rather than read.
 const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -394,6 +398,15 @@ fn check_lines(
         if in_control {
             continue;
         }
+        // On any line, not only `.model` cards: the words are read as
+        // ngspice reads them, so no spelling hides one from this check.
+        if let Some(why) = code_running_model(&lower) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: why,
+            });
+            continue;
+        }
         // `simulator lang=spice` keeps a Spectre deck in SPICE syntax, where
         // this allowlist applies; aispice's Spectre translation starts every
         // deck with it. Switching to any other language stays refused.
@@ -427,20 +440,6 @@ fn check_lines(
             }
             Some(Ok(include)) => include,
             None => {
-                if let Some(kind) = code_running_model(&lower) {
-                    out.push(Violation {
-                        line: line.clone(),
-                        reason: format!(
-                            "a `{kind}` model {} native code a deck cannot choose; declare Verilog to co-simulate under [[cosim]] in aispice.toml and aispice builds and loads it",
-                            if kind == "d_process" {
-                                "starts a program, which is"
-                            } else {
-                                "loads a shared library, which is"
-                            }
-                        ),
-                    });
-                    continue;
-                }
                 check_values(line, &lower, base, policy, trusted, out);
                 continue;
             }
@@ -536,15 +535,54 @@ fn check_lines(
 
 /// The type of a `.model` card, when it is one of [`CODE_RUNNING_MODELS`]:
 /// `.model x d_cosim(...)`, `.model x d_cosim (...)` or `.model x d_cosim`.
-fn code_running_model(lower: &str) -> Option<&'static str> {
-    let mut words = lower.split_whitespace();
-    if words.next() != Some(".model") {
-        return None;
+fn code_running_model(lower: &str) -> Option<String> {
+    let words = ngspice_words(lower);
+    if let Some(kind) = words
+        .iter()
+        .map(|(w, _)| *w)
+        .find(|w| CODE_RUNNING_MODELS.contains(w))
+    {
+        return Some(format!(
+            "`{kind}` {} native code a deck cannot choose; declare Verilog to co-simulate under [[cosim]] in aispice.toml and aispice builds and loads it",
+            if kind == "d_process" {
+                "starts a program, which is"
+            } else {
+                "loads a shared library, which is"
+            }
+        ));
     }
-    let _name = words.next()?;
-    let kind = words.next()?;
-    let kind = kind.split('(').next().unwrap_or(kind);
-    CODE_RUNNING_MODELS.iter().copied().find(|k| *k == kind)
+    words
+        .iter()
+        .find(|(w, assigned)| *assigned && CODE_RUNNING_PARAMS.contains(w))
+        .map(|(w, _)| {
+            format!(
+                "`{w}=` names native code for an XSPICE model to load or run; a deck cannot set it"
+            )
+        })
+}
+
+/// The words of a line as ngspice's parser reads a card (`INPgetTok`):
+/// whitespace and each of `=`, `(`, `)` and `,` end a word and are never
+/// part of one, and a run of them is skipped, the first word included. So
+/// `.model x d_cosim,simulation=...` and `.model x (d_cosim ...)` both have
+/// the type `d_cosim`. Each word comes with whether `=` follows it.
+fn ngspice_words(lower: &str) -> Vec<(&str, bool)> {
+    let sep = |c: char| c.is_whitespace() || matches!(c, '=' | '(' | ')' | ',');
+    let mut out = Vec::new();
+    let mut rest = lower;
+    loop {
+        rest = rest.trim_start_matches(sep);
+        if rest.is_empty() {
+            return out;
+        }
+        let end = rest.find(sep).unwrap_or(rest.len());
+        let (word, after) = rest.split_at(end);
+        let assigned = after
+            .trim_start_matches(char::is_whitespace)
+            .starts_with('=');
+        out.push((word, assigned));
+        rest = after;
+    }
 }
 
 /// The checks on every line that is not an include: no `cmd=`, and every
@@ -1590,6 +1628,22 @@ mod tests {
     }
 
     #[test]
+    fn words_are_read_as_ngspice_reads_them() {
+        assert_eq!(
+            ngspice_words(".model,cnt (d_cosim  simulation = \"a.so\",x)"),
+            [
+                (".model", false),
+                ("cnt", false),
+                ("d_cosim", false),
+                ("simulation", true),
+                ("\"a.so\"", false),
+                ("x", false)
+            ]
+        );
+        assert!(ngspice_words(" ,=() ").is_empty());
+    }
+
+    #[test]
     fn decks_cannot_choose_code_for_xspice_to_load_or_run() {
         let d = temp("cosim");
         std::fs::write(d.join("counter.so"), b"").unwrap();
@@ -1603,6 +1657,19 @@ mod tests {
             ".model p d_process process_file=\"./prog\"",
             ".model p d_process(process_file=\"prog\" process_params=[\"-x\"])",
             ".subckt s a\n.model p d_process process_file=\"prog\"\n.ends",
+            // Spellings ngspice reads as the same card: its words end at
+            // whitespace or any of `=(),`, the first word too.
+            ".model cnt d_cosim,simulation=\"counter.so\"",
+            ".model cnt (d_cosim simulation=\"counter.so\")",
+            ".model,cnt d_cosim simulation=\"counter.so\"",
+            ".model=cnt d_cosim simulation=\"counter.so\"",
+            ".model cnt=d_cosim simulation=\"counter.so\"",
+            ".model\tcnt\td_cosim\tsimulation=\"counter.so\"",
+            ".model cnt d_process,process_file=\"prog\"",
+            ".model cnt (d_process process_file=\"prog\")",
+            // The parameters alone, on another type, spaced or not.
+            ".model cnt d_dff simulation = \"counter.so\"",
+            ".model cnt d_dff(process_file=\"prog\")",
         ] {
             let deck = format!("t\nA1 [a] [b] null cnt\n{card}\n.end\n");
             let v = check(&deck, &policy);
@@ -1624,6 +1691,7 @@ mod tests {
             ".model tobit adc_bridge(in_low=0.4 in_high=0.8)",
             ".model d_cosimx d(is=1n)",
             ".model g1 d_and(rise_delay=1n)",
+            ".param simulation_time=1m",
         ] {
             let deck = format!("t\n{ok}\n.end\n");
             assert!(check(&deck, &policy).is_empty(), "{ok}");
