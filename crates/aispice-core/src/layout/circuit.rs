@@ -536,6 +536,21 @@ impl Mapping<'_> {
                 inst,
             };
         }
+        // A PDK device: its own symbol, the parameters in SpiceLine, as the
+        // netlister writes them back.
+        if let Some(device) = crate::pdk::device(sub)
+            && let Some(symbol) = device.symbol
+            && device.pins.len() == n
+        {
+            return Mapped::Device {
+                symbol: symbol.replace('/', "\\"),
+                kind: Kind::Sub,
+                attrs: vec![("SpiceLine".to_string(), params.join(" "))],
+                nodes: (0..n).collect(),
+                roles: vec![Pass; n],
+                inst,
+            };
+        }
         // An LTspice library part: a symbol named after the subcircuit.
         if let Ok((def, _)) = self.lib.resolve(sub)
             && def.prefix().to_ascii_uppercase().starts_with('X')
