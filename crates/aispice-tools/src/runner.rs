@@ -467,9 +467,17 @@ impl Runner {
                 .join("\n");
             return Err(RunError::Policy(msg));
         }
+        // ngspice in its LTspice mode, and LTspice, cannot select a section
+        // of a library file, so aispice selects it: the policy above has
+        // read every library the deck names.
+        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) {
+            aispice_sim::corner::expand_lib_sections(&deck, &base).map_err(RunError::Netlist)?
+        } else {
+            deck
+        };
         let deck = absolutize_includes(&deck, &base);
-        // Check again after the rewrite, so the deck the simulator receives is
-        // exactly a deck the policy accepted.
+        // Check again after the rewrites, so the deck the simulator receives
+        // is exactly a deck the policy accepted.
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations

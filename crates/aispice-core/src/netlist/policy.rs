@@ -91,6 +91,7 @@ const ALLOWED: &[&str] = &[
     ".print",
     ".probe",
     ".pz",
+    ".sampling",
     ".save",
     ".sens",
     ".step",
@@ -596,6 +597,9 @@ mod tests {
     fn plain_decks_pass() {
         let d = temp("plain");
         let deck = "t\nR1 a 0 1k\n.lib opamp.sub\n.param r=1k\n.step param r list 1k 2k\n.meas tran v max V(a)\n.tran 1m\n.end\n";
+        assert_eq!(check(deck, &policy_at(&d)), vec![]);
+        // Xyce's seeded one-sample run for mismatch Monte Carlo.
+        let deck = "t\nR1 a 0 {agauss(1k, 10, 1)}\n.op\n.sampling useExpr=true\n.options samples numsamples=1 seed=7\n.end\n";
         assert_eq!(check(deck, &policy_at(&d)), vec![]);
     }
 

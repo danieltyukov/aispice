@@ -512,6 +512,13 @@ pub(crate) mod lenient {
     pub fn opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
         Option::<Num>::deserialize(d)?.map(convert).transpose()
     }
+
+    pub fn vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+        Vec::<Num>::deserialize(d)?
+            .into_iter()
+            .map(convert)
+            .collect()
+    }
 }
 
 /// A secondary number a measurement reports, such as the two edges of a
