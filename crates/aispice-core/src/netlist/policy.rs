@@ -142,6 +142,11 @@ const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
 /// Includes are followed this deep.
 const MAX_INCLUDE_DEPTH: usize = 8;
 
+/// One check reads at most this many included files, and this many bytes
+/// of them in all.
+const MAX_INCLUDE_FILES: usize = 512;
+const MAX_INCLUDE_TOTAL: u64 = 256 * 1024 * 1024;
+
 /// Check netlist text. An empty result means the deck may run.
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -149,6 +154,7 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     let cx = Cx {
         policy,
         trusted: canonical_dirs(&policy.trusted_dirs),
+        read: std::cell::Cell::new(0),
     };
     check_inner(
         &cx,
@@ -173,6 +179,8 @@ struct Cx<'a> {
     policy: &'a Policy,
     /// `trusted_dirs`, with symlinks resolved.
     trusted: Vec<PathBuf>,
+    /// Bytes of included files read so far.
+    read: std::cell::Cell<u64>,
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -441,24 +449,34 @@ fn check_lines(
                     });
                     continue;
                 }
-                let size = std::fs::metadata(&file)
-                    .map(|m| m.len())
-                    .unwrap_or(u64::MAX);
-                let bytes = if size <= MAX_INCLUDE_BYTES {
-                    std::fs::read(&file).ok()
-                } else {
-                    None
-                };
-                let Some(bytes) = bytes else {
+                if seen.len() > MAX_INCLUDE_FILES {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!("the deck includes more than {MAX_INCLUDE_FILES} files"),
+                    });
+                    return;
+                }
+                let Some(bytes) = read_included(&file) else {
                     out.push(Violation {
                         line: line.clone(),
                         reason: format!(
-                            "{} could not be read for checking (no permission, or larger than 16 MiB)",
+                            "{} could not be read for checking (not a regular file, no permission, or larger than 16 MiB)",
                             file.display()
                         ),
                     });
                     continue;
                 };
+                cx.read.set(cx.read.get() + bytes.len() as u64);
+                if cx.read.get() > MAX_INCLUDE_TOTAL {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!(
+                            "the deck includes more than {} MiB of files",
+                            MAX_INCLUDE_TOTAL >> 20
+                        ),
+                    });
+                    return;
+                }
                 let (inc, _) = crate::encoding::decode(&bytes);
                 let inc_base = file
                     .parent()
@@ -477,7 +495,18 @@ fn check_lines(
                     out,
                 );
                 for v in &mut out[before..] {
-                    v.reason = format!("in {}: {}", file.display(), v.reason);
+                    // A PDK's files may be under a licence that keeps them
+                    // private, so what they say stays out of messages, which
+                    // reach the model and its logs.
+                    if inc_trusted {
+                        v.line.clear();
+                        v.reason = format!(
+                            "in {}: a line of this PDK file breaks the netlist policy (its text is not shown, since PDK files may be confidential)",
+                            file.display()
+                        );
+                    } else {
+                        v.reason = format!("in {}: {}", file.display(), v.reason);
+                    }
                 }
             }
             Ok(_) => {}
@@ -513,6 +542,23 @@ fn check_values(
             });
         }
     }
+}
+
+/// An included file's bytes: a regular file only (a pipe or a device could
+/// block or never end), at most [`MAX_INCLUDE_BYTES`].
+fn read_included(file: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let meta = std::fs::metadata(file).ok()?;
+    if !meta.is_file() || meta.len() > MAX_INCLUDE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(MAX_INCLUDE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_INCLUDE_BYTES).then_some(bytes)
 }
 
 /// Check text without touching the file system: allowed directives only, no
@@ -1260,6 +1306,28 @@ mod tests {
         assert!(check("t\n.lib none.lib\n", &policy_at(&d)).is_empty());
     }
 
+    /// Was a hang: the policy read an included pipe, which blocks until
+    /// something writes to it.
+    #[cfg(unix)]
+    #[test]
+    fn included_pipes_are_refused_without_reading() {
+        let d = temp("fifo");
+        let fifo = d.join("pipe.lib");
+        let _ = std::fs::remove_file(&fifo);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            return;
+        }
+        let v = check("t\n.include pipe.lib\n", &policy_at(&d));
+        assert!(
+            v.iter().any(|v| v.reason.contains("not a regular file")),
+            "{v:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unreadable_includes_fail_closed() {
@@ -1424,6 +1492,49 @@ mod tests {
             let deck = format!("t\n.include {}\n", models.join(name).display());
             assert!(!check(&deck, &with_pdk(&proj, &pdk)).is_empty(), "{name}");
         }
+    }
+
+    /// The exemption is for parameter expressions only: a PDK file's
+    /// include lines are read as strictly as any, the deck itself never
+    /// gets it, and nothing a PDK file says is quoted back. Not on Windows,
+    /// where the policy refuses every absolute drive path.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_pdk_exemption_is_narrow() {
+        let (pdk, proj) = fake_pdk("narrow");
+        let models = pdk.join("libs.tech/ngspice/models");
+        let policy = with_pdk(&proj, &pdk);
+        for (name, body) in [
+            (
+                "comment.lib",
+                "* x\n.include sg13g2_moslv_mod.lib ; models\n",
+            ),
+            ("quoted.lib", "* x\n.include 'sg13g2_moslv_mod.lib'\n"),
+            ("continued.lib", "* x\n.include\n+ sg13g2_moslv_mod.lib\n"),
+            ("secret_words.lib", "* x\n.ferret secret_words_here\n"),
+        ] {
+            std::fs::write(models.join(name), body).unwrap();
+            let deck = format!("t\n.include {}\n", models.join(name).display());
+            let v = check(&deck, &policy);
+            assert!(!v.is_empty(), "{name}");
+            assert!(
+                v.iter().all(|v| v.line.is_empty()
+                    && !v.reason.contains("secret_words_here")
+                    && !v.reason.contains("sg13g2_moslv_mod")),
+                "{name}: {v:?}"
+            );
+            assert!(v[0].reason.contains("confidential"), "{name}: {v:?}");
+        }
+        // The deck itself is checked strictly even with a PDK registered.
+        let deck = "t\nXM1 d g 0 0 sg13_lv_nmos as='max(w/ng,1e-7)'\n";
+        assert!(!check(deck, &policy).is_empty());
+        // So is a project file, wherever the PDK is.
+        std::fs::write(
+            proj.join("expr.lib"),
+            "* x\nXM1 d g 0 0 m as='max(w/ng,1e-7)'\n",
+        )
+        .unwrap();
+        assert!(!check("t\n.include expr.lib\n", &policy).is_empty());
     }
 
     #[test]
