@@ -64,3 +64,22 @@ Each spec limit leaves room at its worst corner: a one-sided spec passes by at l
 
 - IC templates on Spectre: IHP ships no Spectre models.
 - Layout generators for the bandgap and LDO (HBTs, resistors and thick-oxide devices).
+
+## As built
+
+Status 2026-10-11: implemented as designed, with these results and changes.
+
+Worst case of each spec over the template's corner set (15 corners; 45 for the LDO), the same on ngspice 42 and Xyce 7.10 to the digits shown except where noted:
+
+| Template | Worst case | Limit |
+|---|---|---|
+| `current_mirror` | iout 10.42 uA (ff, -40 C); ilow 9.21 uA (ss, 125 C); flat 1.65 uA (ff, -40 C) | 9 to 11.5 uA; 8.5 uA; 2 uA |
+| `ota5t` | 25.9 dB (fs, 125 C); 16.9 MHz (ss, 125 C); 83 degrees (ff, -40 C) | 24 dB; 15 MHz; 70 degrees |
+| `two_stage` | 51.1 dB (fs, 125 C); 15.2 MHz (ss, 125 C); 57 degrees (ff, -40 C) | 48 dB; 13 MHz; 52 degrees |
+| `comparator` | 194 ps on ngspice, 195 ps on Xyce (ss, -40 C); full swing and reset everywhere | 250 ps |
+| `bandgap` (ngspice) | 601.7 mV (ff, 1.08 V); 3.8 mV drift (ss, 1.08 V) | 580 to 620 mV; 6 mV |
+| `ldo` | 1.202 V light, 1.192 V heavy, 1.187 V minimum, 1.203 V peak, 155 uV ripple on ngspice and 280 uV on Xyce | 1.17 to 1.23 V; 1.12 V; 1.27 V; 2 mV |
+
+- The OTA's input pair was one 11 um finger, past the models' 10 um; it is two fingers now, which moved no spec by more than 0.2 dB or 0.2 MHz. The gm/Id tool gives W = 10.7 um (two fingers) for gm/Id = 15 S/A at L = 2 um and 10 uA, the size the template uses.
+- The two-stage op-amp spreads its unity-gain frequency by two to one over the corners (15 MHz at ss and 125 C, 31 MHz at ff and -40 C), mostly through temperature, so meeting 20 MHz and 60 degrees everywhere is the hard task `ic-opamp-corners`: a 216-point sweep over bias current, pair, mirror, second stage and Miller capacitor found 13 sizings that pass, and the reference solution (IB 18 uA, mirror 2/0.5 um, M6 eight fingers, M7 four) has 52.8 dB, 21.3 MHz and 66 degrees at its worst corners.
+- Spectre end to end, with generic models only, on Spectre 19.1, 23.1 and 25.1: the dialect, noise, PSRR, temperature and process corner tests pass on all three, and the three releases give identical numbers. Three faults were found and fixed: a circuit that includes a file failed because the server has none of the project's files (every include is now inlined for Spectre); Spectre's SPICE reader refuses `{expression}` values on every release (now written in single quotes); and `.meas` results, which every release writes to a `.measure` file rather than the log, were never read (now fetched and parsed, which also corrects the documented claim that Spectre 19 ignores `.meas` in SPICE mode). Spectre 24.1 and 25.1 need glibc 2.22 or newer and do not start on CentOS 7.

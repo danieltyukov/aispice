@@ -82,7 +82,9 @@ SSH runs with `BatchMode=yes`, so the host must accept your SSH key without a pa
 
 These settings come only from your config file. A model or a netlist can never change the host or the command. Keep process design kits and anything under an NDA out of your project folders if you share them.
 
-Spectre 19 and older do not run `.meas` statements in SPICE syntax. aispice's own measurements, spec checks, sweeps and the optimizer work on Spectre's waveforms the same as on any other simulator, so use those. Tested with Spectre 19.1 on a remote CentOS 7 server, through an SSH jump host configured in `~/.ssh/config`.
+aispice sends Spectre the netlist in SPICE syntax (`simulator lang=spice`) with three changes Spectre needs: every file the circuit includes is copied into the netlist (the server has none of your project's files; corner library sections included), `{expression}` values are written in single quotes (Spectre reads `{rsh}` as an unknown parameter), and LTspice's `.meas` forms are normalized. Spectre writes `.meas` results to a `.measure` file rather than its log; aispice fetches it with the waveforms, so `.meas` results, noise, PSRR and CMRR specs and corner sets all work on Spectre. Tested with Spectre 19.1, 23.1 and 25.1 through an SSH jump host configured in `~/.ssh/config`.
+
+Spectre 24.1 and later need glibc 2.22 or newer and fail to start on CentOS 7 (`libmvec.so.1` missing); run them on a newer server. The remote command calls `spectre`, so when the Cadence setup puts an older release first on `PATH`, pick the one you want in `setup_command`; with a Bourne-style login shell a function does it, for example `spectre() { /opt/cadence/SPECTRE251/bin/spectre "$@"; }`.
 
 ## PDKs for IC design
 
@@ -145,6 +147,16 @@ In such a project:
   ```
 
   The first use of a device sweeps it on ngspice over L, VDS and VGS (a few seconds) and caches the table in `~/.cache/aispice/gmid/<pdk>/<device>.json`, rebuilt when the PDK's commit or model files change. The answer is then simulated at the size found and corrected, since the models do not scale exactly with finger width.
+- Start a block from an IC template (`templates` tool, category `ic`): an NMOS current mirror, a five-transistor OTA, a two-stage Miller op-amp, a StrongARM comparator, a 0.6 V bandgap reference and a 3.3 V to 1.2 V LDO, each with its design equations and a spec table that holds at every corner of the set it names (tt, ss, ff, sf and fs, with -40 C to 125 C or supply values where they matter), on ngspice and on Xyce except the bandgap, whose HBTs Xyce's IHP models lack. `show` gives the corner set ready to pass to `check_specs`, `optimize` and `monte_carlo`, and the layout generator and role map for the mirror, OTA, op-amp and comparator, so a sized block goes straight to `layout`. `use` copies a template only into a project that uses the PDK it is drawn in.
+
+  | Template | Typical (tt, 27 C) | Holds at every corner |
+  |---|---|---|
+  | `current_mirror` | 10.3 uA from 10 uA at 0.6 V | 9 to 11.5 uA, at least 8.5 uA at 0.25 V |
+  | `ota5t` | 27.6 dB, 23 MHz, 84 degrees into 1 pF | 24 dB, 15 MHz, 70 degrees |
+  | `two_stage` | 53.2 dB, 22 MHz, 62 degrees into 1 pF | 48 dB, 13 MHz, 52 degrees |
+  | `comparator` | decides 1 mV in 135 ps at 500 MHz | both decisions, full reset, within 250 ps |
+  | `bandgap` | 600 mV, 0.8 mV over -40 C to 125 C | 580 to 620 mV, at most 6 mV drift, supply 1.08 to 1.32 V |
+  | `ldo` | 1.201 V at 0.1 mA, 1.194 V at 10 mA | 1.17 to 1.23 V, 80 mV droop, input 2.7 to 3.6 V |
 
 ## Layout
 

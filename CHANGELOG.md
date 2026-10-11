@@ -24,6 +24,9 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - `extract` tool and `aispice extract`: Magic with IHP's tech file, devices and coupling capacitance, and with `resistance` a resistor network on every net.
 - `check_specs` takes `post_layout` (and `aispice check --post-layout <gds>`): the extracted layout replaces the laid-out devices, joined by net name, and each spec is reported before and after layout; with a corner set (`--process`, `--temp`, `--supply` on the command line) each spec's worst case before and after, and every corner after layout.
 - `klayout_path` and `magic_path` settings; `aispice doctor` shows KLayout and Magic.
+- IC templates on IHP SG13G2 (category `ic`): an NMOS current mirror, a five-transistor OTA, a two-stage Miller op-amp, a StrongARM comparator, a current-mode bandgap reference and a 3.3 V to 1.2 V LDO, sized with the gm/Id tool and corner checks. Each spec table holds with margin at every corner of the set the template names (all five process presets, with -40 C to 125 C or supply values where they matter) on ngspice, and on Xyce for all but the bandgap. A template's TOML names its `pdk`, `corners`, `simulators` and, for the mirror, OTA, op-amp and comparator, the layout generator and role map; `templates show` prints them, and `templates use` copies an IC template only into a project that uses a registered PDK of its kind.
+- Design tasks may name the kind of PDK their circuits use (`pdk = "ihp-sg13g2"`): the runner opts the project into a registered PDK of that kind, and skips the task where there is none. New tasks `ic-opamp-corners` (50 dB, 20 MHz and 60 degrees at all 15 corners), `ic-comparator-ss` (a comparator too slow at the slow corner) and `ic-opamp-noise` (input-referred noise of the two-stage op-amp).
+- A netlist line calling a PDK device is drawn with the PDK's symbol (`create_schematic`, `aispice draw`) instead of being kept as SPICE text.
 
 ### Security
 
@@ -44,6 +47,9 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - AC measurements could read a noise analysis, which also has a frequency axis.
 - The netlist policy read a `+` continuation after a CRLF line end as a separate line instead of part of the include before it.
 - A Monte Carlo analysis whose every run failed reported a yield over no runs; it now reports the first failure as an error. Runs or optimizer candidates times corners over the limit are refused with the largest number that fits, rather than cut silently.
+- Spectre runs of a circuit that includes a file (a model file, a corner library section) failed with "Can not open input file", because the server has none of the project's files. aispice now copies every include into the deck it sends, read through the netlist policy within the same limits as section inlining.
+- Spectre read `{expression}` values as unknown parameters (every release from 19.1 to 25.1); they are now written in single quotes, the form Spectre's SPICE reader takes.
+- Spectre's `.meas` results were never read: Spectre writes them to a `.measure` file, which aispice now fetches and reads. They work on Spectre 19.1, 23.1 and 25.1 alike.
 
 ## [0.2.0]
 

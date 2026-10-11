@@ -4,6 +4,8 @@ Spec: `docs/superpowers/specs/2026-10-11-ic-templates-design.md`. Branch `feat/i
 
 ## Tasks
 
+Status 2026-10-11: tasks 1 to 7 done; results under "As built" in the spec.
+
 1. **Template metadata.** `pdk`, `corners`, `simulators`, `layout` on `Template`; the layout crate's role types; `templates show` and `use` print them; `use` refuses an IC template in a project without a PDK of its kind. Unit tests for the metadata rules and the role maps against the generator's planner.
 2. **Templates.** The six `.asc` and `.toml` files, sized with the gm/Id tool and checked with `aispice check` at their corner sets on the offload server; every device under 10 um per finger.
 3. **Gated template test.** `tests/templates_ihp.rs`: `templates use` into a PDK project, `check_specs` at the corner set on ngspice and, where listed, Xyce; margins as the existing template test. Skip IC templates in the generic all-templates test. Add the test to CI's PDK job.
