@@ -252,7 +252,7 @@ fn limits_text(r: &SpecRow) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn row_display(r: &SpecRow, stepped: bool) -> String {
+pub(crate) fn row_display(r: &SpecRow, stepped: bool) -> String {
     let limited = r.min.is_some() || r.max.is_some();
     let mut s = format!("{}: ", r.name);
     match r.value {
@@ -280,7 +280,7 @@ fn row_display(r: &SpecRow, stepped: bool) -> String {
     s
 }
 
-fn summarize(rows: &[SpecRow]) -> String {
+pub(crate) fn summarize(rows: &[SpecRow]) -> String {
     let failing: Vec<&SpecRow> = rows.iter().filter(|r| !r.pass).collect();
     if failing.is_empty() {
         return match rows.len() {

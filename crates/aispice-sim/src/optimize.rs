@@ -321,6 +321,36 @@ impl Objective {
             feasible: report.all_pass,
         }
     }
+
+    /// The score of the worst case over several reports of the same specs,
+    /// one per corner: every spec at the report where it is worst (see
+    /// [`crate::corner::worst_case`]), and the goal at its worst value for
+    /// its sense, the largest when minimising and the smallest when
+    /// maximising. Feasible only when every spec passes in every report.
+    pub fn score_worst(&self, reports: &[SpecReport]) -> Evaluation {
+        if reports.is_empty() {
+            return Evaluation::failed();
+        }
+        let labelled: Vec<(String, SpecReport)> = reports
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i.to_string(), r.clone()))
+            .collect();
+        let mut worst = crate::corner::worst_case(&labelled);
+        if let Some(goal) = &self.goal
+            && let Some(row) = worst.rows.iter_mut().find(|r| r.name == goal.spec)
+        {
+            let values: Option<Vec<f64>> = reports
+                .iter()
+                .map(|r| r.row(&goal.spec).and_then(|x| x.value))
+                .collect();
+            row.value = values.and_then(|v| match goal.sense {
+                Sense::Minimize => v.into_iter().reduce(f64::max),
+                Sense::Maximize => v.into_iter().reduce(f64::min),
+            });
+        }
+        self.score(&worst)
+    }
 }
 
 /// A derivative-free optimizer with an ask/tell interface. Points are in
@@ -1572,6 +1602,44 @@ mod tests {
         let missing = parse_specs("x = bandwidth_3db(V(nope)) >= 1").unwrap();
         let r = evaluate(&missing, &[rc_dataset(1e3, 1e-9)]);
         assert_eq!(Objective::default().score(&r).value, MISSING_PENALTY);
+    }
+
+    /// Corners: the worst report decides, spec by spec, and a goal counts
+    /// at its worst corner.
+    #[test]
+    fn worst_case_objective_over_corners() {
+        let specs = parse_specs(
+            "bw = bandwidth_3db(V(out)) >= 1k\n\
+             peak = peak_gain(V(out))",
+        )
+        .unwrap();
+        let fast = evaluate(&specs, &[rc_dataset(1e3, 100e-9)]);
+        let slow = evaluate(&specs, &[rc_dataset(2e3, 100e-9)]);
+        let both = Objective::default().score_worst(&[fast.clone(), slow.clone()]);
+        assert!(!both.feasible);
+        assert_eq!(both.value, Objective::default().score(&slow).value);
+        assert!(
+            Objective::default()
+                .score_worst(std::slice::from_ref(&fast))
+                .feasible
+        );
+        assert!(!Objective::default().score_worst(&[]).feasible);
+        let goal = |sense| Objective {
+            goal: Some(Goal {
+                spec: "bw".into(),
+                sense,
+                weight: 1.0,
+            }),
+        };
+        let (bw_fast, bw_slow) = (
+            fast.row("bw").unwrap().value.unwrap(),
+            slow.row("bw").unwrap().value.unwrap(),
+        );
+        let base = both.value;
+        let max = goal(Sense::Maximize).score_worst(&[fast.clone(), slow.clone()]);
+        assert!((max.value - (base - bw_slow / 1e3)).abs() < 1e-9);
+        let min = goal(Sense::Minimize).score_worst(&[fast, slow]);
+        assert!((min.value - (base + bw_fast / 1e3)).abs() < 1e-9);
     }
 
     #[test]

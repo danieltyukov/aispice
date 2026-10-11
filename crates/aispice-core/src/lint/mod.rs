@@ -486,17 +486,7 @@ const MAX_LIBRARY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The file named by `.lib file [section]`, `.include file` or `.inc file`.
 fn include_target(directive: &str) -> Option<String> {
-    let trimmed = directive.trim();
-    let kw = trimmed.split_whitespace().next()?.to_ascii_lowercase();
-    if !matches!(kw.as_str(), ".lib" | ".include" | ".inc") {
-        return None;
-    }
-    let rest = trimmed[kw.len()..].trim();
-    let file = match rest.strip_prefix('"') {
-        Some(q) => q.split('"').next().unwrap_or(""),
-        None => rest.split_whitespace().next().unwrap_or(""),
-    };
-    (!file.is_empty()).then(|| file.to_string())
+    Some(crate::netlist::parse_include(directive)?.ok()?.file)
 }
 
 /// Upper-cased names of every subcircuit defined in a netlist, nested ones

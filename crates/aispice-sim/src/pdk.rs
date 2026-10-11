@@ -10,8 +10,8 @@
 //!
 //! The header lines follow one shape so corner and mismatch runs can rewrite
 //! them: `.lib <absolute path to cornerXXX.lib> <family>_<corner>`, with
-//! family `mos`, `res`, `cap`, `dio` or `hbt` and the path quoted only when it
-//! has spaces. See [`parse_lib_line`].
+//! family `mos`, `res`, `cap`, `dio` or `hbt`. They are read with the netlist
+//! policy's parser; see [`parse_lib_line`].
 
 use crate::dialect::Target;
 use aispice_core::netlist::{Line, Netlist};
@@ -246,18 +246,9 @@ impl Pdk {
     /// ...), in file order, for a simulator's copy of it.
     pub fn sections(&self, file: &str, target: Target) -> Vec<String> {
         let path = self.models_dir(target).join(file);
-        let Ok(bytes) = std::fs::read(&path) else {
-            return Vec::new();
-        };
-        let (text, _) = aispice_core::encoding::decode(&bytes);
-        text.lines()
-            .filter_map(|l| {
-                let mut w = l.split_whitespace();
-                let kw = w.next()?;
-                let name = w.next()?;
-                (kw.eq_ignore_ascii_case(".lib") && w.next().is_none()).then(|| name.to_string())
-            })
-            .collect()
+        crate::library::read_library(&path)
+            .map(|text| crate::library::lib_sections(&text))
+            .unwrap_or_default()
     }
 
     /// Subcircuit names the PDK defines, for model resolution: these come
@@ -314,7 +305,9 @@ fn too_broad(root: &Path) -> bool {
 }
 
 /// A header line: `.lib <path> <section>`, the path quoted when it has
-/// whitespace.
+/// whitespace. The netlist policy refuses such a path, since ngspice reads a
+/// `.lib` path only up to its first space, so a PDK in a folder with spaces
+/// fails with that reason rather than with a missing model.
 pub fn lib_line(path: &Path, section: &str) -> String {
     let p = path.display().to_string();
     if p.chars().any(char::is_whitespace) {
@@ -324,31 +317,15 @@ pub fn lib_line(path: &Path, section: &str) -> String {
     }
 }
 
-/// The path and section of a `.lib <path> <section>` line; `None` for any
-/// other line, including LTspice's one-argument `.lib`.
+/// The path and section of a `.lib <path> <section>` line, read by the
+/// netlist policy's parser; `None` for any other line, including LTspice's
+/// one-argument `.lib`.
 pub fn parse_lib_line(text: &str) -> Option<(PathBuf, String)> {
-    let t = text.trim();
-    let kw = t.split_whitespace().next()?;
-    if !kw.eq_ignore_ascii_case(".lib") {
+    let inc = aispice_core::netlist::parse_include(text)?.ok()?;
+    if !inc.keyword.eq_ignore_ascii_case(".lib") {
         return None;
     }
-    let rest = t[kw.len()..].trim();
-    let (path, tail) = match rest.strip_prefix('"') {
-        Some(q) => {
-            let end = q.find('"')?;
-            (&q[..end], &q[end + 1..])
-        }
-        None => {
-            let end = rest.find(char::is_whitespace)?;
-            (&rest[..end], &rest[end..])
-        }
-    };
-    let mut words = tail.split_whitespace();
-    let section = words.next()?;
-    if words.next().is_some() || path.is_empty() {
-        return None;
-    }
-    Some((PathBuf::from(path), section.to_string()))
+    Some((PathBuf::from(inc.file), inc.section?))
 }
 
 /// The family and corner a header section names: `mos_ss_mismatch` gives
@@ -383,17 +360,7 @@ fn subckt_calls(netlist: &Netlist) -> Vec<String> {
 
 /// The file an `.include`, `.inc` or `.lib` line names.
 fn include_target(directive: &str) -> Option<String> {
-    let t = directive.trim();
-    let kw = t.split_whitespace().next()?.to_ascii_lowercase();
-    if !matches!(kw.as_str(), ".lib" | ".include" | ".inc") {
-        return None;
-    }
-    let rest = t[kw.len()..].trim();
-    let file = match rest.strip_prefix('"') {
-        Some(q) => q.split('"').next().unwrap_or(""),
-        None => rest.split_whitespace().next().unwrap_or(""),
-    };
-    (!file.is_empty()).then(|| file.to_string())
+    Some(aispice_core::netlist::parse_include(directive)?.ok()?.file)
 }
 
 /// The commit a PDK folder is checked out at, read from git's files without
@@ -644,12 +611,19 @@ mod tests {
     }
 
     #[test]
-    fn lib_lines_round_trip_and_quote_spaces() {
+    fn lib_lines_round_trip_and_spaces_are_refused() {
+        // ngspice reads a `.lib` path only up to a space, quoted or not, so
+        // the policy's parser does not take such a line apart and the policy
+        // refuses it with that reason.
         let l = lib_line(Path::new("/a b/cornerRES.lib"), "res_wcs");
         assert_eq!(l, ".lib \"/a b/cornerRES.lib\" res_wcs");
+        assert_eq!(parse_lib_line(&l), None);
+        let v = aispice_core::netlist::check_lexical(&l);
+        assert!(v[0].reason.contains("a space"), "{v:?}");
+        let l = lib_line(Path::new("/pdk/cornerRES.lib"), "res_wcs");
         assert_eq!(
             parse_lib_line(&l),
-            Some((PathBuf::from("/a b/cornerRES.lib"), "res_wcs".into()))
+            Some((PathBuf::from("/pdk/cornerRES.lib"), "res_wcs".into()))
         );
         assert_eq!(
             parse_lib_line(".LIB /x/cornerMOSlv.lib mos_ff_mismatch"),

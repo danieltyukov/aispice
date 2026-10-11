@@ -1,0 +1,6 @@
+[
+  {"tools": [{"name": "read_schematic", "input": {"circuit": "rc.asc"}}]},
+  {"tools": [{"name": "edit_schematic", "input": {"circuit": "rc.asc", "edits": [{"op": "set_value", "name": "C1", "value": "75n"}], "reason": "Corner in band at every temperature"}}]},
+  {"tools": [{"name": "check_specs", "input": {"circuit": "rc.asc", "specs": "fc = bandwidth_3db(V(out)) in 1.5k..3k", "corners": {"temperatures": [-40, 27, 125]}}}]},
+  {"answer": "C1 is now 75 nF. R1 grows from 866 ohm at -40 C to 1.196 kOhm at 125 C, so the corner moves from 2.45 kHz down to 1.77 kHz, inside 1.5 kHz to 3 kHz at every temperature; check_specs across the three temperatures confirms it. 100 nF would have met the band at room temperature but fallen to 1.33 kHz at 125 C."}
+]

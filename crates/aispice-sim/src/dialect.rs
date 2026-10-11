@@ -710,6 +710,23 @@ impl Cx {
                 }
             }
             ".tran" => Some(self.tran(&text)),
+            ".temp" if target == Target::Xyce => {
+                // Xyce ignores `.temp` with a warning; its temperature is a
+                // device option.
+                let values: Vec<&str> = text.split_whitespace().skip(1).collect();
+                match values.as_slice() {
+                    [t] => {
+                        self.note("wrote `.temp` as Xyce's `.options device temp=`");
+                        Some(format!(".options device temp={t}"))
+                    }
+                    _ => {
+                        self.unsupported(format!(
+                            "`{text}`: Xyce takes one temperature per run; run each as its own corner"
+                        ));
+                        None
+                    }
+                }
+            }
             ".options" | ".option" | ".opt" | ".opts" => self.options(&text),
             ".lib" => {
                 let words: Vec<&str> = text.split_whitespace().collect();
@@ -864,6 +881,7 @@ impl Cx {
             .unwrap_or("");
         let mut kept = Vec::new();
         let mut xyce: HashMap<&'static str, Vec<String>> = HashMap::new();
+        let mut xyce_seed: Option<String> = None;
         let mut dropped = Vec::new();
         for tok in tokenize(body) {
             let (k, v) = match tok.split_once('=') {
@@ -904,6 +922,7 @@ impl Cx {
                         "noopiter",
                         "savecurrents",
                         "xmu",
+                        "seed",
                     ];
                     if NG.contains(&k.as_str()) {
                         kept.push(item);
@@ -921,6 +940,7 @@ impl Cx {
                         dropped.push(k);
                     }
                 }
+                Target::Xyce if k == "seed" && v.is_some() => xyce_seed = v.clone(),
                 Target::Xyce => {
                     let group = match k.as_str() {
                         "reltol" | "abstol" | "method" | "maxord" => Some("timeint"),
@@ -943,19 +963,25 @@ impl Cx {
             ));
         }
         if self.target == Target::Xyce {
-            if xyce.is_empty() {
-                return None;
+            let mut lines: Vec<String> = Vec::new();
+            if !xyce.is_empty() {
+                let mut groups: Vec<_> = xyce.into_iter().collect();
+                groups.sort();
+                self.note("mapped SPICE options onto Xyce's option groups");
+                lines.extend(
+                    groups
+                        .into_iter()
+                        .map(|(g, items)| format!(".options {g} {}", items.join(" "))),
+                );
             }
-            let mut groups: Vec<_> = xyce.into_iter().collect();
-            groups.sort();
-            self.note("mapped SPICE options onto Xyce's option groups");
-            return Some(
-                groups
-                    .into_iter()
-                    .map(|(g, items)| format!(".options {g} {}", items.join(" ")))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
+            if let Some(seed) = xyce_seed {
+                // Xyce draws agauss and its relatives only inside a sampling
+                // analysis; one sample with a fixed seed is one seeded run.
+                self.note("seeded Xyce's random parameters with a one-sample `.sampling` analysis");
+                lines.push(".sampling useExpr=true".into());
+                lines.push(format!(".options samples numsamples=1 seed={seed}"));
+            }
+            return (!lines.is_empty()).then(|| lines.join("\n"));
         }
         (!kept.is_empty()).then(|| format!(".options {}", kept.join(" ")))
     }
@@ -1524,6 +1550,34 @@ mod tests {
         assert!(l.contains(&".options timeint RELTOL=1E-4 METHOD=GEAR"));
         let none = tr("t\n.options plotwinsize=0\n", Target::Xyce);
         assert!(!none.text.contains(".options"));
+    }
+
+    /// Xyce ignores `.temp` (with only a warning), so a temperature corner
+    /// silently ran at 27 C.
+    #[test]
+    fn temperature_reaches_xyce() {
+        let x = tr("t\n.temp 125\n", Target::Xyce);
+        assert!(lines(&x).contains(&".options device temp=125"), "{x:?}");
+        let many = tr("t\n.temp 0 27 85\n", Target::Xyce);
+        assert_eq!(many.unsupported.len(), 1);
+        let ng = tr("t\n.temp 125\n", Target::Ngspice);
+        assert!(lines(&ng).contains(&".temp 125"));
+    }
+
+    /// A Monte Carlo run's seed: ngspice reads the option; Xyce draws random
+    /// parameters only in a sampling analysis, so one seeded sample it is.
+    #[test]
+    fn seeds_reach_ngspice_and_xyce() {
+        let ng = tr("t\n.options seed=42\n", Target::Ngspice);
+        assert!(lines(&ng).contains(&".options seed=42"), "{ng:?}");
+        let x = tr("t\n.options seed=42 reltol=1m\n", Target::Xyce);
+        let l = lines(&x);
+        assert!(l.contains(&".sampling useExpr=true"), "{l:?}");
+        assert!(
+            l.contains(&".options samples numsamples=1 seed=42"),
+            "{l:?}"
+        );
+        assert!(l.contains(&".options timeint RELTOL=1M"), "{l:?}");
     }
 
     #[test]

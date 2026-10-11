@@ -208,7 +208,7 @@ async fn inverter_dc_transfer_on_ngspice_and_xyce() {
     let (_dir, runner, project) = setup(&pdk, &[("inv.asc", INVERTER)]);
     let ng = run(&runner, &project, "inv.asc", SimId::Ngspice).await;
     assert!(
-        ng.deck.contains("cornerMOSlv.lib mos_tt"),
+        ng.deck.contains("cornerMOSlv.lib\" mos_tt"),
         "header missing: {}",
         ng.deck
     );
@@ -236,7 +236,7 @@ async fn inverter_dc_transfer_on_ngspice_and_xyce() {
     assert_eq!(xy.simulator, SimId::Xyce);
     assert!(
         xy.deck
-            .contains("libs.tech/xyce/models/cornerMOSlv.lib mos_tt")
+            .contains("libs.tech/xyce/models/cornerMOSlv.lib\" mos_tt")
     );
     assert!(
         xy.notes
@@ -364,7 +364,7 @@ async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
     let Some(pdk) = ihp() else { return };
     let (_dir, runner, project) = setup(&pdk, &[("ota.asc", OTA)]);
     let ng = run(&runner, &project, "ota.asc", SimId::Ngspice).await;
-    assert!(ng.deck.contains("cornerCAP.lib cap_typ"), "{}", ng.deck);
+    assert!(ng.deck.contains("cornerCAP.lib\" cap_typ"), "{}", ng.deck);
     let (gain_ng, ugf_ng) = gain_and_ugf(ng.output.dataset(AnalysisKind::Ac).unwrap());
     assert!(gain_ng > 20.0, "gain {gain_ng} dB");
     assert!((1e6..1e10).contains(&ugf_ng), "unity gain at {ugf_ng} Hz");
@@ -376,7 +376,7 @@ async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
     assert_eq!(xy.simulator, SimId::Xyce);
     assert!(
         xy.deck
-            .contains("libs.tech/xyce/models/cornerCAP.lib cap_typ")
+            .contains("libs.tech/xyce/models/cornerCAP.lib\" cap_typ")
     );
     let (gain_x, ugf_x) = gain_and_ugf(xy.output.dataset(AnalysisKind::Ac).unwrap());
     eprintln!(
@@ -389,4 +389,128 @@ async fn five_transistor_ota_ac_on_ngspice_and_xyce() {
         (ugf_ng / ugf_x - 1.0).abs() < 0.01,
         "{ugf_ng} vs {ugf_x} Hz"
     );
+}
+
+/// A workspace for the tools, with the PDK registered.
+fn tool_workspace(runner: &Runner, project: Project) -> Arc<Workspace> {
+    let ws = Workspace::new();
+    ws.runner.set_config(runner.config());
+    ws.set_project(project);
+    Arc::new(ws)
+}
+
+/// The inverter's switching threshold at every process corner, through
+/// check_specs: a slow NMOS with a fast PMOS (sf) moves it up, the
+/// opposite skew (fs) moves it down, and ss and ff differ from tt, so each
+/// corner really selected its own section of IHP's corner library.
+#[tokio::test]
+async fn inverter_threshold_moves_with_the_process_corner() {
+    let Some(pdk) = ihp() else { return };
+    let (_dir, runner, project) = setup(&pdk, &[("inv.asc", INVERTER)]);
+    let ws = tool_workspace(&runner, project);
+    let tools = aispice_tools::registry(ws.clone());
+    let check = tools.get("check_specs").unwrap();
+    let mut sims = vec!["ngspice"];
+    if xyce_ready(&runner) {
+        sims.push("xyce");
+    }
+    let mut by_sim = Vec::new();
+    for sim in sims {
+        let out = check
+            .call(
+                &ToolContext::default(),
+                json!({"circuit": "inv.asc", "simulator": sim, "save": false,
+                       "specs": "vm = crossing(V(out), 0.6) in 0.4..0.8",
+                       "corners": {"process": ["tt", "ss", "ff", "sf", "fs"]}}),
+            )
+            .await;
+        let text = out.text_content();
+        assert!(!out.is_error, "{sim}: {text}");
+        let row = &out.data.as_ref().unwrap()["corners"]["rows"][0];
+        let vm: Vec<f64> = row["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap_or_else(|| panic!("{sim}: {text}")))
+            .collect();
+        eprintln!(
+            "{sim}: threshold tt {:.4} ss {:.4} ff {:.4} sf {:.4} fs {:.4} V",
+            vm[0], vm[1], vm[2], vm[3], vm[4]
+        );
+        let (tt, ss, ff, sf, fs) = (vm[0], vm[1], vm[2], vm[3], vm[4]);
+        assert!(sf > tt + 0.005 && fs < tt - 0.005, "{sim}: {vm:?}");
+        assert!(
+            (ss - tt).abs() > 1e-3 && (ff - tt).abs() > 1e-3,
+            "{sim}: {vm:?}"
+        );
+        by_sim.push(vm);
+    }
+    if let [ng, xy] = by_sim.as_slice() {
+        for (a, b) in ng.iter().zip(xy) {
+            assert!((a - b).abs() < 2e-3, "ngspice {ng:?} vs Xyce {xy:?}");
+        }
+    }
+}
+
+/// Mismatch Monte Carlo on IHP's `mos_tt_mismatch` and `mos_tt_stat`
+/// sections: the threshold spreads, the same seed gives the same runs, and
+/// global variation spreads it more than local mismatch alone.
+#[tokio::test]
+async fn inverter_threshold_spreads_with_mismatch() {
+    let Some(pdk) = ihp() else { return };
+    let (_dir, runner, project) = setup(&pdk, &[("inv.asc", INVERTER)]);
+    let ws = tool_workspace(&runner, project);
+    let tools = aispice_tools::registry(ws.clone());
+    let mc = tools.get("monte_carlo").unwrap();
+    let spread = |sim: &'static str, mode: &'static str, seed: u64| {
+        let mc = &mc;
+        async move {
+            let out = mc
+                .call(
+                    &ToolContext::default(),
+                    json!({"circuit": "inv.asc", "simulator": sim, "mismatch": mode,
+                           "runs": 40, "seed": seed, "specs": "vm = crossing(V(out), 0.6) in 0.4..0.8"}),
+                )
+                .await;
+            let text = out.text_content();
+            assert!(!out.is_error, "{sim} {mode}: {text}");
+            let s = &out.data.as_ref().unwrap()["specs"][0];
+            let get = |k: &str| {
+                s[k].as_f64()
+                    .unwrap_or_else(|| panic!("{sim} {mode}: no {k}\n{text}"))
+            };
+            (get("mean"), get("std"))
+        }
+    };
+    let (mean, local) = spread("ngspice", "local", 1).await;
+    let again = spread("ngspice", "local", 1).await;
+    let (_, global) = spread("ngspice", "global", 1).await;
+    eprintln!(
+        "ngspice: threshold mean {mean:.4} V, std local {:.2} mV, global {:.2} mV",
+        local * 1e3,
+        global * 1e3
+    );
+    assert_eq!(again, (mean, local));
+    assert!(local > 0.2e-3, "no mismatch spread: {local}");
+    assert!(global > local, "global {global} vs local {local}");
+    if xyce_ready(&runner) {
+        // IHP's Xyce corner libraries have no `_mismatch` sections, and the
+        // sections are checked in the library Xyce reads, so local mismatch
+        // is refused before anything runs. (Their `_stat` sections leave
+        // `mc_ok` and the `*_vfbo_mm` multipliers undefined, so global
+        // variation fails on Xyce too, with Xyce's reason.)
+        let out = mc
+            .call(
+                &ToolContext::default(),
+                json!({"circuit": "inv.asc", "simulator": "xyce", "mismatch": "local",
+                       "runs": 4, "specs": "vm = crossing(V(out), 0.6) in 0.4..0.8"}),
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.text_content().contains("_mismatch section"),
+            "{}",
+            out.text_content()
+        );
+    }
 }

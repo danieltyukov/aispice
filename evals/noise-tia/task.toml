@@ -1,0 +1,18 @@
+id = "noise-tia"
+title = "Size a front-end resistor for a noise budget"
+difficulty = "medium"
+prompt = """
+tia.asc models a photodiode front end: the current source I1 drives net out, where R1 turns the current into a voltage. Choose R1 from the E24 series so that at 1 kHz the input-referred noise current is at most 1.3 pA/√Hz and the output noise voltage is at most 13 nV/√Hz. Prove it with a noise analysis.
+"""
+circuit = "tia.asc"
+analysis = ".noise V(out) I1 dec 10 10 100k"
+specs = """
+in = input_noise_at(1k) <= 1.3p
+out = output_noise_at(1k) <= 13n
+"""
+max_steps = 8
+constraints = [
+  { kind = "part_exists", name = "I1" },
+  { kind = "e_series", prefix = "R", series = "E24" },
+  { kind = "max_parts", count = 2 },
+]

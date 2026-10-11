@@ -2,6 +2,7 @@
 //! optional `files/` folder that becomes the starting project.
 
 use aispice_core::units;
+use aispice_sim::corner::CornerSet;
 use aispice_sim::optimize::ESeries;
 use aispice_sim::spec::{Spec, parse_specs};
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,8 @@ struct TaskFile {
     specs: String,
     #[serde(default)]
     analysis: Option<String>,
+    #[serde(default)]
+    corners: Option<CornerSet>,
     max_steps: u32,
     #[serde(default = "yes")]
     lint: bool,
@@ -142,6 +145,8 @@ pub struct Task {
     /// Analysis the judge runs instead of the circuit's own, so a missing or
     /// different analysis in the model's circuit cannot hide a result.
     pub analysis: Option<String>,
+    /// Corners the specs must hold at, when the task names any.
+    pub corners: Option<CornerSet>,
     /// Model calls the agent may make.
     pub max_steps: u32,
     /// Whether lint errors fail the task.
@@ -253,6 +258,10 @@ pub fn load_task(dir: &Path) -> Result<Task, TaskError> {
             format!("analysis `{a}` must be a directive such as `.ac dec 50 10 1Meg`"),
         ));
     }
+    if let Some(set) = &f.corners {
+        set.corners()
+            .map_err(|e| task_err(&path, format!("corners: {e}")))?;
+    }
     for c in &f.constraints {
         match c {
             Constraint::Value { equals, .. } => {
@@ -294,6 +303,7 @@ pub fn load_task(dir: &Path) -> Result<Task, TaskError> {
         specs_text: f.specs,
         specs,
         analysis: f.analysis,
+        corners: f.corners,
         max_steps: f.max_steps,
         lint: f.lint,
         constraints: f.constraints,

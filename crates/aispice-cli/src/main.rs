@@ -54,13 +54,30 @@ enum Command {
         measure: Vec<String>,
     },
     /// Check a circuit against its specs (the .specs file beside it, or
-    /// --specs). Exit code 1 when a spec fails, for CI.
+    /// --specs). Exit code 1 when a spec fails, for CI. With corners, every
+    /// spec must pass at every corner.
     Check {
         file: PathBuf,
         #[arg(long)]
         specs: Option<PathBuf>,
         #[arg(long)]
         simulator: Option<String>,
+        /// Process corners, comma-separated: presets tt, ss, ff, sf, fs, or
+        /// maps such as "mos=ss res=wcs" (pairs separated by spaces).
+        #[arg(long, value_delimiter = ',', value_name = "CORNERS")]
+        process: Vec<String>,
+        /// Temperatures in Celsius, comma-separated: --temp=-40,27,125.
+        #[arg(
+            long = "temp",
+            value_delimiter = ',',
+            allow_hyphen_values = true,
+            value_name = "C"
+        )]
+        temperatures: Vec<String>,
+        /// A supply source or .param and its values: VDD=1.62,1.8,1.98.
+        /// Repeatable.
+        #[arg(long = "supply", value_name = "NAME=VALUES")]
+        supplies: Vec<String>,
     },
     /// Print the SPICE netlist of a schematic.
     Netlist { file: PathBuf },
@@ -256,7 +273,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
             file,
             specs,
             simulator,
-        } => cmd_sim::check(&file, &cli.symbols, specs, simulator, cli.json),
+            process,
+            temperatures,
+            supplies,
+        } => {
+            let corners = cmd_sim::corners(&process, &temperatures, &supplies)?;
+            cmd_sim::check(&file, &cli.symbols, specs, simulator, corners, cli.json)
+        }
         Command::Netlist { file } => cmd_files::netlist(&ctx, &file),
         Command::Lint { file, strict } => cmd_files::lint(&ctx, &file, strict),
         Command::Show { file } => cmd_files::show(&ctx, &file),

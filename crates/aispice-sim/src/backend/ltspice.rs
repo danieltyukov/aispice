@@ -597,6 +597,7 @@ impl Simulator for Ltspice {
         for ds in datasets.iter_mut() {
             apply_step_labels(ds, &report.step_labels);
         }
+        crate::noise::mark_input_quantity(&mut datasets, &job.netlist_text);
         let mut keep = vec![net.clone()];
         keep.extend(names.iter().cloned());
         let files = ws.keep(&job.run_dir, &keep)?;

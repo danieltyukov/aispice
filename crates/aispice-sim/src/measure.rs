@@ -422,6 +422,67 @@ pub enum Measure {
     /// degrees from its low-frequency value. Exact for a second-order
     /// lowpass (0.707 for Butterworth); also reports that frequency as f0.
     QLowpass { expr: String },
+    /// Output noise density at a frequency, from a `.noise` analysis
+    /// (V/√Hz).
+    OutputNoiseAt {
+        #[serde(deserialize_with = "lenient::num")]
+        freq: f64,
+    },
+    /// Input-referred noise density at a frequency, from a `.noise`
+    /// analysis (V/√Hz, or A/√Hz for a current source input).
+    InputNoiseAt {
+        #[serde(deserialize_with = "lenient::num")]
+        freq: f64,
+    },
+    /// Integrated output noise, rms over `from`..`to` in Hz (default: the
+    /// whole noise sweep).
+    OutputNoiseRms {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient::opt"
+        )]
+        from: Option<f64>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient::opt"
+        )]
+        to: Option<f64>,
+    },
+    /// Integrated input-referred noise, rms over `from`..`to` in Hz
+    /// (default: the whole noise sweep).
+    InputNoiseRms {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient::opt"
+        )]
+        from: Option<f64>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient::opt"
+        )]
+        to: Option<f64>,
+    },
+    /// Power supply rejection in dB at a frequency: |expr| in the circuit's
+    /// AC run (input driven with `AC 1`) over |expr| in a derived AC run with
+    /// `AC 1` on the supply source `source` only. `expr` is the output.
+    PsrrDbAt {
+        expr: String,
+        source: String,
+        #[serde(deserialize_with = "lenient::num")]
+        freq: f64,
+    },
+    /// Common-mode rejection in dB at a frequency: as `psrr_db_at`, with the
+    /// derived run's `AC 1` on the common-mode source `source`.
+    CmrrDbAt {
+        expr: String,
+        source: String,
+        #[serde(deserialize_with = "lenient::num")]
+        freq: f64,
+    },
 }
 
 /// Accept numbers either as JSON numbers or as SPICE strings: agents send
@@ -643,15 +704,26 @@ enum Domain {
     Time,
     Transient,
     Ac,
+    Noise,
 }
 
 impl Domain {
+    /// Whether a dataset can answer the measurement. A noise analysis also
+    /// has a frequency axis, so it is kept apart from AC; datasets of a
+    /// derived run (see [`crate::stimulus`]) only answer rejection
+    /// measurements, which find them on their own.
     fn accepts(self, ds: &Dataset) -> bool {
+        if crate::stimulus::marked_source(ds).is_some() {
+            return false;
+        }
         match self {
             Domain::Any => true,
             Domain::Time => ds.axis.is_some() && !expr::is_log_axis(ds),
             Domain::Transient => ds.kind == AnalysisKind::Transient,
-            Domain::Ac => ds.axis.is_some() && expr::is_log_axis(ds),
+            Domain::Ac => {
+                ds.kind != AnalysisKind::Noise && ds.axis.is_some() && expr::is_log_axis(ds)
+            }
+            Domain::Noise => ds.kind == AnalysisKind::Noise && ds.axis.is_some(),
         }
     }
 
@@ -661,6 +733,7 @@ impl Domain {
             Domain::Time => "a transient or DC sweep",
             Domain::Transient => "a transient analysis",
             Domain::Ac => "an AC analysis",
+            Domain::Noise => "a noise analysis (.noise)",
         }
     }
 }
@@ -710,6 +783,20 @@ impl Measure {
             Measure::FreqAtDb { .. } => "freq_at_db",
             Measure::PeakingDb { .. } => "peaking_db",
             Measure::QLowpass { .. } => "q_lowpass",
+            Measure::OutputNoiseAt { .. } => "output_noise_at",
+            Measure::InputNoiseAt { .. } => "input_noise_at",
+            Measure::OutputNoiseRms { .. } => "output_noise_rms",
+            Measure::InputNoiseRms { .. } => "input_noise_rms",
+            Measure::PsrrDbAt { .. } => "psrr_db_at",
+            Measure::CmrrDbAt { .. } => "cmrr_db_at",
+        }
+    }
+
+    /// The source a rejection measurement moves the AC stimulus to.
+    pub fn stimulus_source(&self) -> Option<&str> {
+        match self {
+            Measure::PsrrDbAt { source, .. } | Measure::CmrrDbAt { source, .. } => Some(source),
+            _ => None,
         }
     }
 
@@ -745,7 +832,15 @@ impl Measure {
             | Measure::PeakGain { expr }
             | Measure::PeakingDb { expr }
             | Measure::QLowpass { expr }
-            | Measure::FreqAtDb { expr, .. } => vec![expr],
+            | Measure::FreqAtDb { expr, .. }
+            | Measure::PsrrDbAt { expr, .. }
+            | Measure::CmrrDbAt { expr, .. } => vec![expr],
+            Measure::OutputNoiseAt { .. } | Measure::OutputNoiseRms { .. } => {
+                vec![crate::noise::ONOISE]
+            }
+            Measure::InputNoiseAt { .. } | Measure::InputNoiseRms { .. } => {
+                vec![crate::noise::INOISE]
+            }
         }
     }
 
@@ -778,7 +873,13 @@ impl Measure {
             | Measure::PeakGain { .. }
             | Measure::PeakingDb { .. }
             | Measure::QLowpass { .. }
-            | Measure::FreqAtDb { .. } => Domain::Ac,
+            | Measure::FreqAtDb { .. }
+            | Measure::PsrrDbAt { .. }
+            | Measure::CmrrDbAt { .. } => Domain::Ac,
+            Measure::OutputNoiseAt { .. }
+            | Measure::InputNoiseAt { .. }
+            | Measure::OutputNoiseRms { .. }
+            | Measure::InputNoiseRms { .. } => Domain::Noise,
         }
     }
 
@@ -789,7 +890,9 @@ impl Measure {
             Measure::GainDbAt { .. }
             | Measure::PeakGain { .. }
             | Measure::PeakingDb { .. }
-            | Measure::GainMargin { .. } => Some("dB"),
+            | Measure::GainMargin { .. }
+            | Measure::PsrrDbAt { .. }
+            | Measure::CmrrDbAt { .. } => Some("dB"),
             Measure::PhaseAt { .. } | Measure::PhaseMargin { .. } => Some("°"),
             Measure::OvershootPct { .. }
             | Measure::UndershootPct { .. }
@@ -817,6 +920,10 @@ impl Measure {
             | Measure::Avg { .. }
             | Measure::Rms { .. } => e.unit(ds),
             Measure::Integral { .. } => format!("{}{axis}", e.unit(ds)),
+            Measure::OutputNoiseAt { .. } | Measure::InputNoiseAt { .. } => {
+                format!("{}/√Hz", e.unit(ds))
+            }
+            Measure::OutputNoiseRms { .. } | Measure::InputNoiseRms { .. } => e.unit(ds),
             Measure::Crossing { .. }
             | Measure::RiseTime { .. }
             | Measure::FallTime { .. }
@@ -846,9 +953,127 @@ pub fn measure(name: &str, m: &Measure, datasets: &[Dataset]) -> MeasureResult {
             Err(e) => return MeasureResult::failed(name, e.to_string()),
         }
     }
+    if let Some(source) = m.stimulus_source() {
+        return rejection(name, m, &parsed[0], source, datasets);
+    }
     match pick(m, &parsed, datasets) {
         Ok(ds) => run(name, m, &parsed, ds),
         Err(note) => MeasureResult::failed(name, note),
+    }
+}
+
+/// PSRR or CMRR: the gain of `e` in the circuit's AC run over its gain in
+/// the derived run with `AC 1` on `source`, in dB, step by step.
+fn rejection(
+    name: &str,
+    m: &Measure,
+    e: &Expr,
+    source: &str,
+    datasets: &[Dataset],
+) -> MeasureResult {
+    let (Measure::PsrrDbAt { freq, .. } | Measure::CmrrDbAt { freq, .. }) = m else {
+        return MeasureResult::failed(name, format!("{} is not a rejection measurement", m.kind()));
+    };
+    let main = match pick(m, std::slice::from_ref(e), datasets) {
+        Ok(ds) => ds,
+        Err(note) => return MeasureResult::failed(name, note),
+    };
+    let Some(derived) = datasets.iter().find(|d| {
+        crate::stimulus::marked_source(d).is_some_and(|s| s.eq_ignore_ascii_case(source))
+            && e.eval(d, 0..0).is_ok()
+    }) else {
+        return MeasureResult::failed(
+            name,
+            format!(
+                "{} needs a second AC run with `AC 1` on {source}, which aispice adds when it simulates for this measurement; these results do not have it",
+                m.kind()
+            ),
+        );
+    };
+    let ranges = |ds: &Dataset| -> Vec<(String, Range<usize>)> {
+        if ds.steps.is_empty() {
+            vec![(String::new(), 0..ds.len())]
+        } else {
+            ds.steps
+                .iter()
+                .map(|s| (s.label.clone(), s.range.clone()))
+                .collect()
+        }
+    };
+    let (main_steps, derived_steps) = (ranges(main), ranges(derived));
+    let per_step: Vec<StepValue> = main_steps
+        .iter()
+        .enumerate()
+        .map(|(i, (label, range))| {
+            let other = derived_steps
+                .get(i)
+                .or_else(|| (derived_steps.len() == 1).then(|| &derived_steps[0]));
+            let o = match other {
+                None => Outcome::none(format!("the run with AC on {source} has no step {}", i + 1)),
+                Some((_, r2)) => {
+                    rejection_step(e, main, range.clone(), derived, r2.clone(), *freq, source)
+                }
+            }
+            .finish();
+            StepValue {
+                label: label.clone(),
+                value: o.value,
+                at: o.at,
+                extra: o.extra,
+                note: o.note,
+            }
+        })
+        .collect();
+    let mut result = MeasureResult {
+        name: name.to_string(),
+        value: None,
+        unit: "dB".into(),
+        at: None,
+        at_unit: "Hz".into(),
+        extra: Vec::new(),
+        per_step,
+        note: None,
+    };
+    if let [only] = result.per_step.as_slice() {
+        result.value = only.value;
+        result.at = only.at;
+        result.extra = only.extra.clone();
+        result.note = only.note.clone();
+    }
+    result
+}
+
+fn rejection_step(
+    e: &Expr,
+    main: &Dataset,
+    range: Range<usize>,
+    derived: &Dataset,
+    derived_range: Range<usize>,
+    freq: f64,
+    source: &str,
+) -> Outcome {
+    let (a, b) = match (
+        signal(e, main, range, Mode::Db),
+        signal(e, derived, derived_range, Mode::Db),
+    ) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(note), _) | (_, Err(note)) => return Outcome::none(note),
+    };
+    let at = |s: &Sig| num::interp(&s.x, &s.y, freq, true);
+    match (at(&a), at(&b)) {
+        (Some(_), Some(gb)) if gb == f64::NEG_INFINITY => Outcome::none(format!(
+            "the output does not respond to {source} at all (infinite rejection)"
+        )),
+        (Some(ga), Some(gb)) => Outcome::of(ga - gb)
+            .at(freq)
+            .with("signal_gain", ga, "dB")
+            .with(&format!("gain_from_{source}"), gb, "dB"),
+        _ => Outcome::none(format!(
+            "{} is outside the swept range {}..{}",
+            human(freq, "Hz"),
+            human(a.x[0], "Hz"),
+            human(a.x[a.x.len() - 1], "Hz")
+        )),
     }
 }
 
@@ -1284,6 +1509,32 @@ fn step(m: &Measure, exprs: &[Expr], ds: &Dataset, range: Range<usize>, u: &Unit
             let db = tryo!(signal(e, ds, range.clone(), Mode::Db));
             let ph = tryo!(signal(e, ds, range, Mode::Phase));
             q_lowpass(&db, &ph)
+        }
+        Measure::OutputNoiseAt { freq } | Measure::InputNoiseAt { freq } => {
+            let s = tryo!(value_sig());
+            match num::interp(&s.x, &s.y, *freq, true) {
+                Some(v) => Outcome::of(v).at(*freq),
+                None => Outcome::none(format!(
+                    "{} is outside the noise sweep {}..{}",
+                    human(*freq, "Hz"),
+                    human(s.x[0], "Hz"),
+                    human(s.x[s.x.len() - 1], "Hz")
+                )),
+            }
+        }
+        Measure::OutputNoiseRms { from, to } | Measure::InputNoiseRms { from, to } => {
+            let s = tryo!(value_sig());
+            let last = s.x[s.x.len() - 1];
+            match crate::noise::integrate_rms(&s.x, &s.y, *from, *to) {
+                Ok(v) => Outcome::of(v)
+                    .with("from", from.unwrap_or(s.x[0]), "Hz")
+                    .with("to", to.unwrap_or(last), "Hz"),
+                Err(note) => Outcome::none(note),
+            }
+        }
+        // Measured by `rejection`, which needs two datasets.
+        Measure::PsrrDbAt { .. } | Measure::CmrrDbAt { .. } => {
+            Outcome::none("a rejection measurement needs the derived AC run")
         }
         Measure::FreqAtDb { db, .. } => {
             let s = tryo!(signal(e, ds, range, Mode::Db));
@@ -2220,6 +2471,8 @@ enum Arg {
     Int,
     Direction,
     Reference,
+    /// An instance name, such as a source.
+    Name,
 }
 
 #[derive(Clone, Copy)]
@@ -2284,6 +2537,13 @@ const SIG_FREQ: &[P] = &[EXPR, p("freq", Arg::Num, Dflt::Required)];
 const SIG_BW: &[P] = &[EXPR, p("reference", Arg::Reference, Dflt::Str("dc"))];
 const SIG_EXPR: &[P] = &[EXPR];
 const SIG_DB: &[P] = &[EXPR, p("db", Arg::Plain, Dflt::Required)];
+const SIG_NOISE_AT: &[P] = &[p("freq", Arg::Num, Dflt::Required)];
+const SIG_BAND: &[P] = &[FROM, TO];
+const SIG_REJECTION: &[P] = &[
+    EXPR,
+    p("source", Arg::Name, Dflt::Required),
+    p("freq", Arg::Num, Dflt::Required),
+];
 
 /// Every measurement kind, for help text and error messages.
 pub const KINDS: &[&str] = &[
@@ -2315,6 +2575,12 @@ pub const KINDS: &[&str] = &[
     "freq_at_db",
     "peaking_db",
     "q_lowpass",
+    "output_noise_at",
+    "input_noise_at",
+    "output_noise_rms",
+    "input_noise_rms",
+    "psrr_db_at",
+    "cmrr_db_at",
 ];
 
 fn signature(kind: &str) -> Option<&'static [P]> {
@@ -2332,6 +2598,9 @@ fn signature(kind: &str) -> Option<&'static [P]> {
         "unity_gain_freq" | "phase_margin" | "gain_margin" | "peak_gain" | "peaking_db"
         | "q_lowpass" => SIG_EXPR,
         "freq_at_db" => SIG_DB,
+        "output_noise_at" | "input_noise_at" => SIG_NOISE_AT,
+        "output_noise_rms" | "input_noise_rms" => SIG_BAND,
+        "psrr_db_at" | "cmrr_db_at" => SIG_REJECTION,
         _ => return None,
     })
 }
@@ -2507,6 +2776,19 @@ fn arg_value(kind: &str, param: P, value: &str) -> Result<serde_json::Value, Mea
                 )));
             }
         },
+        Arg::Name => {
+            let ok = !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|c| c.is_whitespace() || "(){}[]'\",=".contains(c));
+            if !ok {
+                return Err(perr(format!(
+                    "{kind}: `{}` should be an instance name such as VDD, found `{value}`",
+                    param.name
+                )));
+            }
+            value.into()
+        }
         Arg::Reference => match value.to_ascii_lowercase().as_str() {
             "dc" => "dc".into(),
             "peak" => "peak".into(),
@@ -2618,6 +2900,133 @@ mod tests {
         // A frequency measurement still finds the AC analysis.
         let g = measure("g", &m("gain_db_at(V(out), 1k)"), &both);
         rel(g.value.unwrap(), 40.0, 1e-6);
+    }
+
+    fn noise_ds(f: Vec<f64>, on: Vec<f64>, inn: Vec<f64>) -> Dataset {
+        use crate::dataset::{Quantity, Step, Vector, VectorData};
+        let n = f.len();
+        Dataset {
+            title: String::new(),
+            plotname: "Noise Spectral Density Curves".into(),
+            kind: AnalysisKind::Noise,
+            axis: Some(0),
+            vectors: vec![
+                Vector {
+                    name: "frequency".into(),
+                    quantity: Quantity::Frequency,
+                    data: VectorData::Real(f),
+                },
+                Vector {
+                    name: crate::noise::ONOISE.into(),
+                    quantity: Quantity::Voltage,
+                    data: VectorData::Real(on),
+                },
+                Vector {
+                    name: crate::noise::INOISE.into(),
+                    quantity: Quantity::Voltage,
+                    data: VectorData::Real(inn),
+                },
+            ],
+            steps: vec![Step {
+                range: 0..n,
+                label: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn noise_densities_and_integrated_noise() {
+        let f = logspace(1.0, 1e6, 61);
+        // White output noise plus a 1/f corner at 1 kHz on the input side.
+        let on = vec![2.879e-9; f.len()];
+        let inn: Vec<f64> = f
+            .iter()
+            .map(|f| 5.758e-9 * (1.0 + 1e3 / f).sqrt())
+            .collect();
+        let ds = noise_ds(f.clone(), on, inn);
+        let r = measure_dataset("vn", &m("output_noise_at(1k)"), &ds);
+        rel(r.value.unwrap(), 2.879e-9, 1e-9);
+        assert_eq!(r.unit, "V/√Hz");
+        assert_eq!(r.at, Some(1e3));
+        rel(
+            val(&ds, "input_noise_at(1Meg)"),
+            5.758e-9 * (1.001f64).sqrt(),
+            1e-6,
+        );
+        let rms = val(&ds, "output_noise_rms()");
+        rel(rms, 2.879e-9 * (1e6f64 - 1.0).sqrt(), 1e-9);
+        let band = measure_dataset("b", &m("output_noise_rms(10, 10k)"), &ds);
+        rel(band.value.unwrap(), 2.879e-9 * (1e4f64 - 10.0).sqrt(), 1e-9);
+        assert_eq!(band.unit, "V");
+        // White plus 1/f: S^2 = a^2 (1 + fc/f), integral a^2 (b - a' + fc ln(b/a')).
+        let want = 5.758e-9 * ((1e4f64 - 10.0) + 1e3 * (1e3f64).ln()).sqrt();
+        rel(val(&ds, "input_noise_rms(10, 10k)"), want, 2e-3);
+        assert!(none(&ds, "output_noise_at(10Meg)").contains("outside the noise sweep"));
+        assert!(none(&ds, "output_noise_rms(0.1, 1k)").contains("outside the swept range"));
+        // The text form round-trips with optional bands left out.
+        assert_eq!(m("output_noise_rms()").to_string(), "output_noise_rms()");
+        assert_eq!(
+            m("input_noise_rms(to=1k)").to_string(),
+            "input_noise_rms(to=1k)"
+        );
+    }
+
+    /// A noise analysis has a frequency axis too; AC measurements must not
+    /// read it, and noise measurements must not read an AC analysis.
+    #[test]
+    fn noise_and_ac_results_stay_apart() {
+        let f = logspace(1.0, 1e6, 61);
+        let noise = noise_ds(f.clone(), vec![1e-9; f.len()], vec![2e-9; f.len()]);
+        let gain: Vec<Complex> = f.iter().map(|_| Complex::new(10.0, 0.0)).collect();
+        let ac_ds = ac(f, vec![("V(onoise)", gain)]);
+        let both = [noise.clone(), ac_ds];
+        let g = measure("g", &m("gain_db_at(V(onoise), 1k)"), &both);
+        rel(g.value.unwrap(), 20.0, 1e-9);
+        let n = measure("n", &m("output_noise_at(1k)"), &both);
+        rel(n.value.unwrap(), 1e-9, 1e-9);
+        let only_ac = [both[1].clone()];
+        let n = measure("n", &m("output_noise_at(1k)"), &only_ac);
+        assert!(n.note.unwrap().contains("needs a noise analysis"));
+        let only_noise = [noise];
+        let g = measure("g", &m("gain_db_at(V(onoise), 1k)"), &only_noise);
+        assert!(g.note.unwrap().contains("needs an AC analysis"));
+    }
+
+    #[test]
+    fn rejection_compares_the_signal_and_derived_runs() {
+        let f = logspace(1.0, 1e6, 61);
+        let sig: Vec<Complex> = f.iter().map(|_| Complex::new(100.0, 0.0)).collect();
+        // The supply reaches the output through a first-order highpass at
+        // 1 kHz scaled to 0.01: -40 dB above the corner.
+        let sup: Vec<Complex> = f
+            .iter()
+            .map(|&f| {
+                let x = Complex::new(0.0, f / 1e3);
+                Complex::new(0.01, 0.0) * x / (Complex::new(1.0, 0.0) + x)
+            })
+            .collect();
+        let main = ac(f.clone(), vec![("V(out)", sig)]);
+        let mut derived = ac(f.clone(), vec![("V(out)", sup)]);
+        crate::stimulus::mark(&mut derived, "VDD");
+        let runs = [main.clone(), derived];
+        let r = measure("psrr", &m("psrr_db_at(V(out), VDD, 1Meg)"), &runs);
+        rel(r.value.unwrap(), 80.0, 1e-6);
+        assert_eq!(r.unit, "dB");
+        let r = measure("psrr", &m("psrr_db_at(V(out), vdd, 1k)"), &runs);
+        rel(r.value.unwrap(), 80.0 + 3.0103, 1e-4);
+        // A plain AC measurement keeps reading the circuit's own run.
+        let g = measure("g", &m("gain_db_at(V(out), 1Meg)"), &runs);
+        rel(g.value.unwrap(), 40.0, 1e-9);
+        // Without the derived run there is no answer, and it says why.
+        let r = measure("c", &m("cmrr_db_at(V(out), Vcm, 1k)"), &runs);
+        assert!(r.note.unwrap().contains("AC 1` on Vcm"));
+        let r = measure("c", &m("cmrr_db_at(V(out), VDD, 1k)"), &[main]);
+        assert!(r.value.is_none());
+        assert!(Measure::parse("psrr_db_at(V(out), V(dd), 1k)").is_err());
+        assert_eq!(
+            m("psrr_db_at(V(out), VDD, 1k)").to_string(),
+            "psrr_db_at(V(out), VDD, 1k)"
+        );
     }
 
     /// First-order step response v = 1 - exp(-t/tau), on a grid that is

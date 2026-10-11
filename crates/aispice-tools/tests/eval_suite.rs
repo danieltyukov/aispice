@@ -295,6 +295,27 @@ async fn a_wrong_change_fails_and_names_the_spec() {
     assert!(r.error.is_none());
 }
 
+/// The judge checks a task's corners: a value that meets the band at room
+/// temperature fails at the hot corner, and the reason names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_judge_checks_every_corner() {
+    if !have_ngspice() {
+        eprintln!("skipped: ngspice not installed");
+        return;
+    }
+    let t = task("temp-corners");
+    let model = scripted(&[
+        tools(&[(
+            "edit_schematic",
+            json!({"circuit": "rc.asc", "edits": [{"op": "set_value", "name": "C1", "value": "100n"}]}),
+        )]),
+        Turn::Answer("C1 is 100 nF, a 1.59 kHz corner.".into()),
+    ]);
+    let r = run_task(&t, &model, &options(), 1).await;
+    assert!(!r.pass);
+    assert!(r.reason.contains("worst at 125C"), "{}", r.reason);
+}
+
 /// Needs no simulator: the step budget fails the run whatever the judge
 /// finds.
 #[tokio::test(flavor = "multi_thread")]

@@ -42,7 +42,7 @@ aispice eval --provider google --model gemini-3.1-flash-lite --jobs 1 --rpm 5 --
 2. The agent gets the task prompt as the user's message, the usual system prompt and tools, and the task's step budget (the number of model calls it may make). Edits are applied at once; nobody is asked to approve them.
 3. The project uses aispice's built-in symbols and embedded models only (the `embedded_models_only` runner setting), even when LTspice is installed, so results compare across machines. The agent's simulations and the judge's run on ngspice.
 4. The judge then:
-   - simulates the judged circuit on ngspice, with the task's analysis directive in place of the circuit's own when the task gives one, and evaluates the spec table;
+   - simulates the judged circuit on ngspice, with the task's analysis directive in place of the circuit's own when the task gives one, and evaluates the spec table; with `corners` (the corner set `check_specs` takes) it simulates every corner and judges each spec at its worst one;
    - runs the electrical rule checks; any lint error fails the task;
    - checks each constraint.
 
@@ -72,6 +72,7 @@ The RC low-pass filter in rc.asc has its -3 dB corner near 1.6 kHz. ...
 """
 circuit = "rc.asc"               # the file the result is judged on
 analysis = ".ac dec 50 10 1Meg"  # optional: the analysis the judge runs
+corners = { temperatures = [-40, 27, 125] }  # optional: specs must hold at every corner
 specs = """
 fc = bandwidth_3db(V(out)) in 9.5k..10.5k
 """
@@ -138,3 +139,5 @@ The test suite plays every reference solution through the real tools and judge (
 | `monte-carlo-yield` | medium | Run a Monte Carlo analysis with given tolerances and report the yield it finds. |
 | `sallen-key` | hard | Resize a Sallen-Key low-pass for a Butterworth response with a 1 kHz cutoff. |
 | `gain-bandwidth` | hard | Reach 26 dB and 100 kHz with op-amps whose GBW is 1 MHz, which takes two stages. |
+| `noise-tia` | medium | Choose a front-end resistor that meets an input noise current and an output noise voltage budget, proved with a noise analysis. |
+| `temp-corners` | medium | Choose C1 so an RC corner stays in band from -40 C to 125 C with a drifting resistor; judged at every temperature. |

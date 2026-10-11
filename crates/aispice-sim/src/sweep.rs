@@ -238,7 +238,7 @@ pub fn parse_values(text: &str) -> Result<SweepValues, SweepError> {
 
 /// Byte ranges of the words of an element's remainder, keeping
 /// parenthesised and braced groups whole, as the netlist parser does.
-fn word_spans(rest: &str) -> Vec<(usize, usize)> {
+pub(crate) fn word_spans(rest: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut start = None;

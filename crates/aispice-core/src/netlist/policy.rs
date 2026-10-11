@@ -19,6 +19,17 @@
 //! models) run native code, so a deck can never load one. aispice loads a
 //! registered PDK's compiled models itself, outside the deck, after
 //! [`check_module`] has confirmed each file is inside the registered folder.
+//!
+//! The check is only as good as its reading of the text, so it reads a deck
+//! the way the simulators do, and refuses what they read differently.
+//! ngspice and Xyce disagree on which lines are comments and so on which
+//! line a `+` continuation joins; the policy checks the text under both
+//! readings. Include lines are accepted in one form only, which both read
+//! alike: the keyword, then the file bare or in double quotes, then for
+//! `.lib` at most a section name, and nothing else (no trailing comment, no
+//! continuation). Line breaks they split differently (a lone carriage
+//! return, the Unicode separators) and ngspice's `\\` line joining are
+//! refused outright.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -91,6 +102,7 @@ const ALLOWED: &[&str] = &[
     ".print",
     ".probe",
     ".pz",
+    ".sampling",
     ".save",
     ".sens",
     ".step",
@@ -130,6 +142,11 @@ const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
 /// Includes are followed this deep.
 const MAX_INCLUDE_DEPTH: usize = 8;
 
+/// One check reads at most this many included files, and this many bytes
+/// of them in all.
+const MAX_INCLUDE_FILES: usize = 512;
+const MAX_INCLUDE_TOTAL: u64 = 256 * 1024 * 1024;
+
 /// Check netlist text. An empty result means the deck may run.
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -137,6 +154,7 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     let cx = Cx {
         policy,
         trusted: canonical_dirs(&policy.trusted_dirs),
+        read: std::cell::Cell::new(0),
     };
     check_inner(
         &cx,
@@ -161,6 +179,8 @@ struct Cx<'a> {
     policy: &'a Policy,
     /// `trusted_dirs`, with symlinks resolved.
     trusted: Vec<PathBuf>,
+    /// Bytes of included files read so far.
+    read: std::cell::Cell<u64>,
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -181,42 +201,178 @@ fn check_inner(
     seen: &mut Vec<PathBuf>,
     out: &mut Vec<Violation>,
 ) {
-    let policy = cx.policy;
-    // C-based simulators stop reading a line at NUL, and other control
-    // characters are handled differently by each reader. Either can make the
-    // simulator see a line this check did not, so they are refused outright.
-    if let Some(c) = text
-        .chars()
-        .find(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t' | '\u{85}'))
-    {
-        out.push(Violation {
-            line: String::new(),
-            reason: format!(
+    if let Some(v) = unreadable(text) {
+        out.push(v);
+        return;
+    }
+    for reading in [Reading::Ngspice, Reading::Xyce] {
+        let (lines, problems) = read(text, reading, has_title);
+        out.extend(problems);
+        check_lines(
+            cx, &lines, reading, base, has_title, trusted, depth, seen, out,
+        );
+    }
+}
+
+/// Characters that make simulators see a line the policy does not. C-based
+/// simulators stop reading a line at NUL, and other control characters are
+/// handled differently by each reader. ngspice drops a lone carriage return
+/// and reads on where Xyce ends the line, and no C simulator breaks a line
+/// at the Unicode separators the policy would otherwise split at.
+fn unreadable(text: &str) -> Option<Violation> {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let reason = match c {
+            '\n' | '\t' => continue,
+            '\r' if chars.peek() == Some(&'\n') => continue,
+            '\r' | '\u{85}' | '\u{2028}' | '\u{2029}' => format!(
+                "the deck contains a line break simulators read differently (U+{:04X}); end lines with LF or CRLF",
+                c as u32
+            ),
+            c if c.is_control() => format!(
                 "the deck contains a control character (U+{:04X}); remove it",
                 c as u32
             ),
+            _ => continue,
+        };
+        return Some(Violation {
+            line: String::new(),
+            reason,
         });
-        return;
     }
-    let mut logical: Vec<String> = Vec::new();
-    for raw in text.split(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']) {
+    None
+}
+
+/// How a simulator splits a text into logical lines. Both drop blank lines
+/// and join a `+` line to the line it continues, but they disagree on which
+/// lines are comments in between, and so on which line that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reading {
+    /// ngspice (and LTspice): leading blanks are dropped; lines starting
+    /// with `*`, `$` or `#` are comments; a `+` line continues the last line
+    /// that is not a comment. Includes are read on single physical lines.
+    Ngspice,
+    /// Xyce: a line starting with a space, a tab, `*` or `;` is a comment;
+    /// a `+` may follow spaces but not a tab; a line starting with a tab
+    /// ends the line being continued.
+    Xyce,
+}
+
+/// One logical line in one reading.
+#[derive(Debug)]
+struct Logical {
+    text: String,
+    /// Whether `+` lines were joined to it.
+    continued: bool,
+    /// A comment in this reading.
+    comment: bool,
+}
+
+/// The logical lines of a text in one reading, and what in it simulators
+/// read differently. With `has_title` the first line is the title, which is
+/// never continued.
+fn read(text: &str, reading: Reading, has_title: bool) -> (Vec<Logical>, Vec<Violation>) {
+    let text = text.replace("\r\n", "\n");
+    let mut lines: Vec<Logical> = Vec::new();
+    let mut problems = Vec::new();
+    // The line a `+` line continues, by index into `lines`.
+    let mut open: Option<usize> = None;
+    for (i, raw) in text.split('\n').enumerate() {
         let line = raw.trim();
-        if let Some(cont) = line.strip_prefix('+')
-            && let Some(last) = logical.last_mut()
-        {
-            last.push(' ');
-            last.push_str(cont.trim());
+        if i == 0 && has_title {
+            lines.push(Logical {
+                text: line.to_string(),
+                continued: false,
+                comment: false,
+            });
             continue;
         }
-        logical.push(line.to_string());
+        if line.is_empty() {
+            continue;
+        }
+        if reading == Reading::Ngspice && !line.starts_with(['*', '$']) && line.ends_with("\\\\") {
+            problems.push(Violation {
+                line: line.to_string(),
+                reason: "ngspice continues a line that ends in `\\\\` onto the next one, which no other simulator does; remove the `\\\\`".into(),
+            });
+        }
+        let plus = match reading {
+            Reading::Ngspice => line.starts_with('+'),
+            Reading::Xyce => raw.trim_start_matches(' ').starts_with('+'),
+        };
+        if plus {
+            match open {
+                Some(o) => {
+                    let joined = &mut lines[o];
+                    joined.text.push(' ');
+                    joined.text.push_str(line[1..].trim());
+                    joined.continued = true;
+                }
+                // Xyce reads a space-led `+` with no line open as a comment.
+                None if reading == Reading::Xyce && !raw.starts_with('+') => {}
+                None => {
+                    // ngspice would join it to a line in the file that
+                    // includes this one, or drop it after the title.
+                    if reading == Reading::Ngspice {
+                        problems.push(Violation {
+                            line: line.to_string(),
+                            reason: "a `+` continuation line has no line before it to continue; simulators disagree on what it joins".into(),
+                        });
+                    }
+                    lines.push(Logical {
+                        text: line.to_string(),
+                        continued: false,
+                        comment: false,
+                    });
+                }
+            }
+            continue;
+        }
+        let comment = match reading {
+            Reading::Ngspice => line.starts_with(['*', '$', '#']),
+            Reading::Xyce => raw.starts_with([' ', '\t']) || line.starts_with(['*', ';']),
+        };
+        if comment {
+            if reading == Reading::Xyce && raw.starts_with('\t') {
+                open = None;
+            }
+        } else {
+            open = Some(lines.len());
+        }
+        lines.push(Logical {
+            text: line.to_string(),
+            continued: false,
+            comment,
+        });
     }
+    (lines, problems)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_lines(
+    cx: &Cx,
+    lines: &[Logical],
+    reading: Reading,
+    base: &Path,
+    has_title: bool,
+    trusted: bool,
+    depth: usize,
+    seen: &mut Vec<PathBuf>,
+    out: &mut Vec<Violation>,
+) {
+    let policy = cx.policy;
     let mut in_control = false;
-    let skip = usize::from(has_title);
-    for line in logical.iter().skip(skip) {
-        let lower = line.to_ascii_lowercase();
-        if lower.is_empty() || lower.starts_with('*') {
+    for (i, logical) in lines.iter().enumerate() {
+        let line = &logical.text;
+        // ngspice acts on a title that starts with a dot (it includes the
+        // file a `.include` title names), so such a title is checked like
+        // any other line. Xyce never reads the title.
+        let title_skipped =
+            i == 0 && has_title && (reading == Reading::Xyce || !line.starts_with('.'));
+        if logical.comment || title_skipped {
             continue;
         }
+        let lower = line.to_ascii_lowercase();
         let first = lower.split_whitespace().next().unwrap_or("");
         if first == ".control" {
             in_control = true;
@@ -248,94 +404,161 @@ fn check_inner(
             });
             continue;
         }
-        if INCLUDES.contains(&first)
-            && let Some(arg) = path_argument(line)
-        {
-            if is_compiled(&arg) {
+        let include = match parse_include(line) {
+            Some(Err(reason)) => {
                 out.push(Violation {
                     line: line.clone(),
-                    reason: format!(
-                        "`{arg}` is a compiled model library; a deck cannot load one (aispice loads a registered PDK's compiled models itself)"
-                    ),
+                    reason,
                 });
                 continue;
             }
-            match resolve(&arg, base, policy) {
-                Err(reason) => out.push(Violation {
+            Some(Ok(_)) if logical.continued => {
+                out.push(Violation {
                     line: line.clone(),
-                    reason,
-                }),
-                Ok(Some(file)) if !seen.contains(&file) => {
-                    seen.push(file.clone());
-                    if depth >= MAX_INCLUDE_DEPTH {
-                        out.push(Violation {
-                            line: line.clone(),
-                            reason: format!("includes nest deeper than {MAX_INCLUDE_DEPTH} levels"),
-                        });
-                        continue;
-                    }
-                    let size = std::fs::metadata(&file)
-                        .map(|m| m.len())
-                        .unwrap_or(u64::MAX);
-                    let bytes = if size <= MAX_INCLUDE_BYTES {
-                        std::fs::read(&file).ok()
+                    reason: "an include line continues onto a `+` line, which simulators join differently; write it on one line".into(),
+                });
+                continue;
+            }
+            Some(Ok(include)) => include,
+            None => {
+                check_values(line, &lower, base, policy, trusted, out);
+                continue;
+            }
+        };
+        let arg = &include.file;
+        if is_compiled(arg) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: format!(
+                    "`{arg}` is a compiled model library; a deck cannot load one (aispice loads a registered PDK's compiled models itself)"
+                ),
+            });
+            continue;
+        }
+        match resolve(arg, base, policy) {
+            Err(reason) => out.push(Violation {
+                line: line.clone(),
+                reason,
+            }),
+            Ok(Some(file)) if !seen.contains(&file) => {
+                seen.push(file.clone());
+                if depth >= MAX_INCLUDE_DEPTH {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!("includes nest deeper than {MAX_INCLUDE_DEPTH} levels"),
+                    });
+                    continue;
+                }
+                if seen.len() > MAX_INCLUDE_FILES {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!("the deck includes more than {MAX_INCLUDE_FILES} files"),
+                    });
+                    return;
+                }
+                let Some(bytes) = read_included(&file) else {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!(
+                            "{} could not be read for checking (not a regular file, no permission, or larger than 16 MiB)",
+                            file.display()
+                        ),
+                    });
+                    continue;
+                };
+                cx.read.set(cx.read.get() + bytes.len() as u64);
+                if cx.read.get() > MAX_INCLUDE_TOTAL {
+                    out.push(Violation {
+                        line: line.clone(),
+                        reason: format!(
+                            "the deck includes more than {} MiB of files",
+                            MAX_INCLUDE_TOTAL >> 20
+                        ),
+                    });
+                    return;
+                }
+                let (inc, _) = crate::encoding::decode(&bytes);
+                let inc_base = file
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| base.to_path_buf());
+                let before = out.len();
+                let inc_trusted = cx.trusted.iter().any(|d| file.starts_with(d));
+                check_inner(
+                    cx,
+                    &inc,
+                    &inc_base,
+                    false,
+                    inc_trusted,
+                    depth + 1,
+                    seen,
+                    out,
+                );
+                for v in &mut out[before..] {
+                    // A PDK's files may be under a licence that keeps them
+                    // private, so what they say stays out of messages, which
+                    // reach the model and its logs.
+                    if inc_trusted {
+                        v.line.clear();
+                        v.reason = format!(
+                            "in {}: a line of this PDK file breaks the netlist policy (its text is not shown, since PDK files may be confidential)",
+                            file.display()
+                        );
                     } else {
-                        None
-                    };
-                    let Some(bytes) = bytes else {
-                        out.push(Violation {
-                                line: line.clone(),
-                                reason: format!(
-                                    "{} could not be read for checking (no permission, or larger than 16 MiB)",
-                                    file.display()
-                                ),
-                            });
-                        continue;
-                    };
-                    let (inc, _) = crate::encoding::decode(&bytes);
-                    let inc_base = file
-                        .parent()
-                        .map(Path::to_path_buf)
-                        .unwrap_or_else(|| base.to_path_buf());
-                    let before = out.len();
-                    let inc_trusted = cx.trusted.iter().any(|d| file.starts_with(d));
-                    check_inner(
-                        cx,
-                        &inc,
-                        &inc_base,
-                        false,
-                        inc_trusted,
-                        depth + 1,
-                        seen,
-                        out,
-                    );
-                    for v in &mut out[before..] {
                         v.reason = format!("in {}: {}", file.display(), v.reason);
                     }
                 }
-                Ok(_) => {}
             }
-        }
-        // Any value that names a file, on any line: `file=...`, `wavefile=...`,
-        // and anything containing a path separator.
-        if lower
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .any(|t| t.starts_with("cmd=") || t == "cmd")
-        {
-            out.push(Violation {
-                line: line.clone(),
-                reason: "`cmd=` runs a program in some simulators; it is not allowed".into(),
-            });
-        }
-        for value in path_like_values(line, trusted) {
-            if let Err(reason) = resolve(&value, base, policy) {
-                out.push(Violation {
-                    line: line.clone(),
-                    reason,
-                });
-            }
+            Ok(_) => {}
         }
     }
+}
+
+/// The checks on every line that is not an include: no `cmd=`, and every
+/// value that names a file (`file=...`, `wavefile=...`, anything with a path
+/// separator) inside the allowed folders.
+fn check_values(
+    line: &str,
+    lower: &str,
+    base: &Path,
+    policy: &Policy,
+    trusted: bool,
+    out: &mut Vec<Violation>,
+) {
+    if lower
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .any(|t| t.starts_with("cmd=") || t == "cmd")
+    {
+        out.push(Violation {
+            line: line.to_string(),
+            reason: "`cmd=` runs a program in some simulators; it is not allowed".into(),
+        });
+    }
+    for value in path_like_values(line, trusted) {
+        if let Err(reason) = resolve(&value, base, policy) {
+            out.push(Violation {
+                line: line.to_string(),
+                reason,
+            });
+        }
+    }
+}
+
+/// An included file's bytes: a regular file only (a pipe or a device could
+/// block or never end), at most [`MAX_INCLUDE_BYTES`].
+fn read_included(file: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let meta = std::fs::metadata(file).ok()?;
+    if !meta.is_file() || meta.len() > MAX_INCLUDE_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(MAX_INCLUDE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_INCLUDE_BYTES).then_some(bytes)
 }
 
 /// Check text without touching the file system: allowed directives only, no
@@ -351,15 +574,201 @@ pub fn check_lexical(text: &str) -> Vec<Violation> {
     check(&format!("* directive\n{text}"), &policy)
 }
 
-/// The first argument after the directive keyword, unquoted.
-fn path_argument(line: &str) -> Option<String> {
-    let rest = line.split_once(char::is_whitespace)?.1.trim();
-    for q in ['"', '\''] {
-        if let Some(inner) = rest.strip_prefix(q) {
-            return inner.split(q).next().map(str::to_string);
+/// The logical lines of a deck or library as ngspice reads them, which is
+/// how the policy reads them too: split at line ends (LF or CRLF), trimmed,
+/// blank lines dropped, a `+` line joined to the last line before it that is
+/// not a comment (`*`, `$`, `#`). With `has_title` the first line is a
+/// title, kept even when blank and never continued. Anything else that
+/// reads include lines (corner rewrites, section inlining) must read them
+/// this way, so it never sees a line the policy did not; text the policy
+/// refuses (see [`check`]) may read differently elsewhere.
+pub fn logical_lines(text: &str, has_title: bool) -> Vec<String> {
+    read(text, Reading::Ngspice, has_title)
+        .0
+        .into_iter()
+        .map(|l| l.text)
+        .collect()
+}
+
+/// An `.include`, `.inc` or `.lib` line, taken apart as the policy reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Include {
+    /// The keyword as written (`.lib`, `.LIB`, `.include`).
+    pub keyword: String,
+    /// The file, unquoted.
+    pub file: String,
+    /// The file as written, with its quotes if it had any.
+    pub written_file: String,
+    /// The section, for a `.lib <file> <section>` line.
+    pub section: Option<String>,
+}
+
+impl Include {
+    /// The line naming `file` instead, in the form every simulator reads
+    /// alike: `.include "<file>"` or `.lib "<file>" <section>`.
+    pub fn line_for(&self, file: &str) -> String {
+        match &self.section {
+            Some(s) => format!("{} \"{file}\" {s}", self.keyword),
+            None => format!("{} \"{file}\"", self.keyword),
         }
     }
-    rest.split_whitespace().next().map(str::to_string)
+}
+
+/// Characters a file name on an include line may not have: each is a
+/// quote, a comment, a separator or an expression to some simulator, so
+/// they would not all open the same file. `\` is a path separator to
+/// LTspice under Wine but a plain character to ngspice and Xyce, so it is
+/// refused except on Windows, where everything reads it as a separator.
+const ODD_IN_FILE: &[char] = &[
+    '"', '\'', ';', '$', '`', '(', ')', '{', '}', ',', '=', '%', '|', '<', '>',
+];
+
+/// Read a logical line as an include line: `None` when it is not one, and
+/// the reason when it is one in a form simulators read differently.
+///
+/// One form is accepted: the keyword (`.include`, `.inc` or `.lib`, any
+/// case), spaces or tabs, the file bare or in double quotes, and for `.lib`
+/// optionally one section name, with nothing after. ngspice strips `;`,
+/// `$` and `//` comments from an include line and reads single quotes; Xyce
+/// strips only `;` comments, reads a single-quoted name as an expression
+/// and splits names at `(`, `)`, `{`, `}`, `,` and `=`; ngspice reads a
+/// two-argument `.lib` path only up to its first space even when it is
+/// quoted. So a file name with any of these, or a line with more on it,
+/// is refused rather than guessed at.
+pub fn parse_include(line: &str) -> Option<Result<Include, String>> {
+    let line = line.trim();
+    let keyword = line.split(char::is_whitespace).next()?;
+    let lower = keyword.to_ascii_lowercase();
+    if !INCLUDES.contains(&lower.as_str()) {
+        return None;
+    }
+    let is_lib = lower == ".lib";
+    let after = &line[keyword.len()..];
+    let refuse = |why: String| {
+        Some(Err(format!(
+            "{why}; write `{keyword} \"file\"`{}",
+            if is_lib {
+                " or `.lib \"file\" section`"
+            } else {
+                ""
+            }
+        )))
+    };
+    if after.is_empty() {
+        return refuse(format!("`{keyword}` names no file"));
+    }
+    if !after.starts_with([' ', '\t']) {
+        return refuse(format!("`{keyword}` is not followed by a space or tab"));
+    }
+    let rest = after.trim_start_matches([' ', '\t']);
+    let (file, written, tail) = if let Some(inner) = rest.strip_prefix('"') {
+        let Some(end) = inner.find('"') else {
+            return refuse("the file name has no closing quote".into());
+        };
+        let tail = &inner[end + 1..];
+        if !tail.is_empty() && !tail.starts_with([' ', '\t']) {
+            return refuse("there is text right after the quoted file name".into());
+        }
+        (&inner[..end], &rest[..end + 2], tail)
+    } else {
+        let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+        (&rest[..end], &rest[..end], &rest[end..])
+    };
+    let quoted = written.starts_with('"');
+    if file.is_empty() {
+        return refuse(format!("`{keyword}` names no file"));
+    }
+    if let Some(c) = file.chars().find(|c| {
+        ODD_IN_FILE.contains(c)
+            || (*c == '\\' && !cfg!(windows))
+            || (c.is_whitespace() && (*c != ' ' || !quoted || is_lib))
+    }) {
+        let what = match c {
+            ' ' => "a space (ngspice reads a `.lib` file name only up to it)".to_string(),
+            c if c.is_whitespace() => format!("a blank (U+{:04X})", c as u32),
+            c => format!("`{c}`"),
+        };
+        return refuse(format!(
+            "the file name `{file}` has {what}, which simulators read differently"
+        ));
+    }
+    if file.contains("//") {
+        return refuse(format!(
+            "the file name `{file}` has `//`, which ngspice reads as the start of a comment"
+        ));
+    }
+    let tail = tail.trim_matches([' ', '\t']);
+    let section = match (tail.is_empty(), is_lib) {
+        (true, _) => None,
+        (false, true)
+            if tail
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')) =>
+        {
+            Some(tail.to_string())
+        }
+        (false, true) => {
+            return refuse(format!(
+                "`{tail}` after the file is not one section name (letters, digits, `_`, `.`, `-`)"
+            ));
+        }
+        (false, false) => {
+            return refuse(format!(
+                "`{tail}` follows the file; simulators ignore, warn about or misread text after an include"
+            ));
+        }
+    };
+    Some(Ok(Include {
+        keyword: keyword.to_string(),
+        file: file.to_string(),
+        written_file: written.to_string(),
+        section,
+    }))
+}
+
+/// Resolve a file an include line names, exactly as the policy does:
+/// `Ok(Some(path))` for an existing file inside `base` or an allowed folder
+/// (symbolic links followed first), `Ok(None)` for a bare name that does not
+/// exist next to `base` (the simulator looks it up on its own library path),
+/// and the reason otherwise. Read a file only after this approved it.
+pub fn resolve_include(
+    path: &str,
+    base: &Path,
+    policy: &Policy,
+) -> Result<Option<PathBuf>, String> {
+    resolve(path, base, policy)
+}
+
+/// A deck with each of its own include lines rewritten in the form every
+/// simulator reads alike, naming the file the policy resolves it to (its
+/// full path, symbolic links resolved): `.include "/abs/file"`, `.lib
+/// "/abs/file" section`. The simulator then opens exactly the file that was
+/// checked, wherever it runs. Lines the policy refuses or cannot resolve,
+/// and every other line, are left exactly as they are; run [`check`] on the
+/// result.
+pub fn canonical_includes(deck: &str, policy: &Policy) -> String {
+    let mut out = String::with_capacity(deck.len() + 256);
+    for line in deck.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let end = &line[body.len()..];
+        let indent = &body[..body.len() - body.trim_start().len()];
+        let rewritten = match parse_include(body) {
+            Some(Ok(inc)) => match resolve(&inc.file, &policy.base_dir, policy) {
+                Ok(Some(real)) => real.to_str().map(|r| inc.line_for(r)),
+                _ => None,
+            },
+            _ => None,
+        };
+        match rewritten {
+            Some(r) => {
+                out.push_str(indent);
+                out.push_str(&r);
+                out.push_str(end);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 const FILE_KEYS: &[&str] = &[
@@ -592,10 +1001,212 @@ mod tests {
         }
     }
 
+    /// Was a parser differential: with CRLF line ends each break left a
+    /// blank line behind, and a `+` continuation joined the blank line
+    /// instead of the include before it.
+    #[test]
+    fn continuations_join_across_crlf_and_blank_lines() {
+        assert_eq!(
+            logical_lines("t\r\n.param\r\n+ a=1\r\n\r\n+ b=2\n", true),
+            vec!["t", ".param a=1 b=2"]
+        );
+        assert_eq!(logical_lines("\nR1 a 0 1\n", true), vec!["", "R1 a 0 1"]);
+        // In a library there is no title: the first line can be continued.
+        assert_eq!(
+            logical_lines(".model d D\n+ is=1n\n", false),
+            vec![".model d D is=1n"]
+        );
+        let d = temp("crlf");
+        let v = check("t\r\n.include\r\n+ ../x.lib\r\n", &policy_at(&d));
+        assert!(!v.is_empty(), "{v:?}");
+    }
+
+    /// Was a parser differential: a `+` line joined the comment before it,
+    /// where every simulator joins it to the last line that is not a
+    /// comment, so `* note` hid a `file=` that Xyce's `.print` writes to.
+    #[test]
+    fn continuations_skip_comment_lines() {
+        assert_eq!(
+            logical_lines("t\n.print tran V(a)\n* note\n$ more\n+ file=x\n", true),
+            vec!["t", ".print tran V(a) file=x", "* note", "$ more"]
+        );
+        let d = temp("comment-join");
+        let v = check(
+            "t\n.print tran V(a)\n* note\n+ file=/etc/cron.d/x\n",
+            &policy_at(&d),
+        );
+        assert!(v.iter().any(|v| v.line.starts_with(".print")), "{v:?}");
+    }
+
+    /// The include forms every simulator reads alike pass, with their parts.
+    #[test]
+    fn include_lines_parse_one_way() {
+        let ok = |line: &str| parse_include(line).unwrap().unwrap();
+        let i = ok(".LIB \"my.lib\" MOS_TT");
+        assert_eq!(
+            (i.keyword.as_str(), i.file.as_str(), i.written_file.as_str()),
+            (".LIB", "my.lib", "\"my.lib\"")
+        );
+        assert_eq!(i.section.as_deref(), Some("MOS_TT"));
+        let i = ok(".include\t\"my models.inc\"  ");
+        assert_eq!((i.file.as_str(), i.section), ("my models.inc", None));
+        assert_eq!(ok(".inc sub/a.inc").file, "sub/a.inc");
+        assert_eq!(ok(".lib opamp.sub").section, None);
+        assert_eq!(
+            ok(".Lib /pdk/corner.lib mos_tt_stat").section.as_deref(),
+            Some("mos_tt_stat")
+        );
+        assert_eq!(
+            ok(".lib x.lib tt").line_for("/abs/x.lib"),
+            ".lib \"/abs/x.lib\" tt"
+        );
+        assert!(parse_include(".param a=1").is_none());
+        assert!(parse_include(".libsave x").is_none());
+    }
+
+    /// Every other spelling is refused with a reason, since some simulator
+    /// would open a different file than the policy checked: ngspice drops
+    /// `;`, `$` and `//` comments and reads single quotes, Xyce splits names
+    /// at brackets, commas and `=`, ngspice reads a `.lib` path only up to a
+    /// space, and text after the file is ignored by some and read by others.
+    #[test]
+    fn odd_include_spellings_are_refused() {
+        for line in [
+            ".lib",
+            ".include",
+            ".include\u{a0}a.lib",
+            ".include 'a.lib'",
+            ".include \"a.lib",
+            ".include \"a.lib\"b.lib",
+            ".include a.lib ; comment",
+            ".include a.lib $ comment",
+            ".include a.lib;x",
+            ".include a.lib$x",
+            ".include ${HOME}/a.lib",
+            ".include sub//a.lib",
+            ".include a.lib b.lib",
+            ".include {a.lib}",
+            ".include (a.lib)",
+            ".include a,b.lib",
+            ".include a=b.lib",
+            ".include %HOME%/a.lib",
+            ".include `id`.lib",
+            ".lib \"my lib.lib\" tt",
+            ".lib a.lib tt extra",
+            ".lib a.lib t/t",
+            ".lib a.lib 'tt'",
+            ".include \"a\tb.lib\"",
+        ] {
+            assert!(
+                matches!(parse_include(line), Some(Err(_))),
+                "{line:?} was accepted: {:?}",
+                parse_include(line)
+            );
+            assert!(!check_lexical(line).is_empty(), "{line:?}");
+        }
+        #[cfg(not(windows))]
+        assert!(matches!(parse_include(".include sub\\a.lib"), Some(Err(_))));
+    }
+
+    /// ngspice and Xyce disagree on which line a `+` continues when an
+    /// indented line, or one starting with `$`, `#` or `;`, comes between,
+    /// so the policy checks the deck as each of them reads it.
+    #[test]
+    fn continuations_are_checked_as_each_simulator_joins_them() {
+        let d = temp("readings");
+        std::fs::write(d.join("x.lib"), "* x\n").unwrap();
+        // Which line a `+` joins decides what `file=` at the end of a line
+        // names: only one of the readings sees `link` as Xyce's output file.
+        #[cfg(unix)]
+        {
+            let outside = temp("readings-outside");
+            std::fs::write(outside.join("secret"), "x").unwrap();
+            let link = d.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(outside.join("secret"), &link).unwrap();
+            for deck in [
+                // Xyce reads the indented line as a comment.
+                "t\n.print tran V(a) file=\n  R1 a b 1\n+ link\n",
+                // Xyce reads `;` lines as comments, ngspice does not.
+                "t\n.print tran V(a) file=\n; x\n+ link\n",
+                // ngspice reads `$` and `#` lines as comments, Xyce does not.
+                "t\n.print tran V(a) file=\n$ x\n+ link\n",
+                "t\n.print tran V(a) file=\n# x\n+ link\n",
+            ] {
+                let v = check(deck, &policy_at(&d));
+                assert!(
+                    v.iter().any(|v| v.reason.contains("`link`")),
+                    "{deck:?}: {v:?}"
+                );
+            }
+            assert_eq!(
+                check("t\n.print tran V(a)\n+ file=x.lib\n", &policy_at(&d)),
+                vec![]
+            );
+        }
+        for deck in [
+            "t\n.lib\n  R1 a b 1\n+ x.lib sec\n",
+            // An include continued onto the next line.
+            "t\n.include\n+ x.lib\n",
+            "t\n.lib x.lib\n+ tt\n",
+            // Nothing to continue: ngspice would join it to the file that
+            // includes this one.
+            "t\n+ .include x.lib\n",
+            // ngspice joins a line ending in two backslashes to the next.
+            "t\nR1 a b 1 \\\\\n.param x=1\n",
+            // Line breaks the simulators split differently.
+            "t\nR1 a 0 1\r.include x.lib\n",
+            "t\nR1 a 0 1\u{85}R2 a 0 1\n",
+        ] {
+            assert!(!check(deck, &policy_at(&d)).is_empty(), "{deck:?}");
+        }
+        // Indented model cards with `+` lines, as PDK model files have them,
+        // still pass.
+        let ok = "t\n.subckt m d g s b\n  Nm d g s b psp w=1u\n  + l=1u\n+ as=1p\n.ends\n";
+        assert_eq!(check(ok, &policy_at(&d)), vec![]);
+    }
+
+    /// ngspice acts on a first line that is a command (it includes the file
+    /// a `.include` title names), so the title is checked when it starts
+    /// with a dot; Xyce and LTspice read it as text.
+    #[test]
+    fn a_title_that_is_a_command_is_checked() {
+        let d = temp("title");
+        assert!(!check(".include /etc/passwd\nR1 a 0 1\n", &policy_at(&d)).is_empty());
+        assert!(!check(".control\n.endc\n", &policy_at(&d)).is_empty());
+        assert_eq!(
+            check(".title rc filter\nR1 a 0 1\n", &policy_at(&d)),
+            vec![]
+        );
+        assert_eq!(check("rc filter /tmp\nR1 a 0 1\n", &policy_at(&d)), vec![]);
+    }
+
+    /// The deck's own include lines name the checked file by its full real
+    /// path; the rest of the deck is left byte for byte.
+    #[test]
+    fn canonical_includes_name_the_checked_file() {
+        let d = temp("canonical");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/m.lib"), "* m\n.lib tt\n.endl\n").unwrap();
+        let real = std::fs::canonicalize(d.join("sub/m.lib")).unwrap();
+        let real = real.to_str().unwrap();
+        let deck = "t\r\n  .LIB sub/m.lib tt\r\n.include \"sub/m.lib\"\nR1 a 0 1 ; x\n.lib opamp.sub\n.include ../x.lib\n.include sub/m.lib ; c\n";
+        let out = canonical_includes(deck, &policy_at(&d));
+        assert_eq!(
+            out,
+            format!(
+                "t\r\n  .LIB \"{real}\" tt\r\n.include \"{real}\"\nR1 a 0 1 ; x\n.lib opamp.sub\n.include ../x.lib\n.include sub/m.lib ; c\n"
+            )
+        );
+    }
+
     #[test]
     fn plain_decks_pass() {
         let d = temp("plain");
         let deck = "t\nR1 a 0 1k\n.lib opamp.sub\n.param r=1k\n.step param r list 1k 2k\n.meas tran v max V(a)\n.tran 1m\n.end\n";
+        assert_eq!(check(deck, &policy_at(&d)), vec![]);
+        // Xyce's seeded one-sample run for mismatch Monte Carlo.
+        let deck = "t\nR1 a 0 {agauss(1k, 10, 1)}\n.op\n.sampling useExpr=true\n.options samples numsamples=1 seed=7\n.end\n";
         assert_eq!(check(deck, &policy_at(&d)), vec![]);
     }
 
@@ -693,6 +1304,28 @@ mod tests {
         assert!(!check("t\n.include models/none.lib\n", &policy_at(&d)).is_empty());
         assert!(!check("t\n.lib sub\\none.lib\n", &policy_at(&d)).is_empty());
         assert!(check("t\n.lib none.lib\n", &policy_at(&d)).is_empty());
+    }
+
+    /// Was a hang: the policy read an included pipe, which blocks until
+    /// something writes to it.
+    #[cfg(unix)]
+    #[test]
+    fn included_pipes_are_refused_without_reading() {
+        let d = temp("fifo");
+        let fifo = d.join("pipe.lib");
+        let _ = std::fs::remove_file(&fifo);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !made {
+            return;
+        }
+        let v = check("t\n.include pipe.lib\n", &policy_at(&d));
+        assert!(
+            v.iter().any(|v| v.reason.contains("not a regular file")),
+            "{v:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -859,6 +1492,49 @@ mod tests {
             let deck = format!("t\n.include {}\n", models.join(name).display());
             assert!(!check(&deck, &with_pdk(&proj, &pdk)).is_empty(), "{name}");
         }
+    }
+
+    /// The exemption is for parameter expressions only: a PDK file's
+    /// include lines are read as strictly as any, the deck itself never
+    /// gets it, and nothing a PDK file says is quoted back. Not on Windows,
+    /// where the policy refuses every absolute drive path.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_pdk_exemption_is_narrow() {
+        let (pdk, proj) = fake_pdk("narrow");
+        let models = pdk.join("libs.tech/ngspice/models");
+        let policy = with_pdk(&proj, &pdk);
+        for (name, body) in [
+            (
+                "comment.lib",
+                "* x\n.include sg13g2_moslv_mod.lib ; models\n",
+            ),
+            ("quoted.lib", "* x\n.include 'sg13g2_moslv_mod.lib'\n"),
+            ("continued.lib", "* x\n.include\n+ sg13g2_moslv_mod.lib\n"),
+            ("secret_words.lib", "* x\n.ferret secret_words_here\n"),
+        ] {
+            std::fs::write(models.join(name), body).unwrap();
+            let deck = format!("t\n.include {}\n", models.join(name).display());
+            let v = check(&deck, &policy);
+            assert!(!v.is_empty(), "{name}");
+            assert!(
+                v.iter().all(|v| v.line.is_empty()
+                    && !v.reason.contains("secret_words_here")
+                    && !v.reason.contains("sg13g2_moslv_mod")),
+                "{name}: {v:?}"
+            );
+            assert!(v[0].reason.contains("confidential"), "{name}: {v:?}");
+        }
+        // The deck itself is checked strictly even with a PDK registered.
+        let deck = "t\nXM1 d g 0 0 sg13_lv_nmos as='max(w/ng,1e-7)'\n";
+        assert!(!check(deck, &policy).is_empty());
+        // So is a project file, wherever the PDK is.
+        std::fs::write(
+            proj.join("expr.lib"),
+            "* x\nXM1 d g 0 0 m as='max(w/ng,1e-7)'\n",
+        )
+        .unwrap();
+        assert!(!check("t\n.include expr.lib\n", &policy).is_empty());
     }
 
     #[test]

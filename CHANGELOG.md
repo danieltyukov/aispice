@@ -12,11 +12,27 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - `pdk` tool: list registered PDKs, describe one (compiled models, corner libraries and their sections, the header aispice adds), list its devices, and make the open project use one.
 - `gm_id` tool and `aispice gmid`: size a PDK transistor by gm/Id from a lookup table built on ngspice over L, VDS and VGS and cached under the user cache folder by PDK commit, then checked and corrected by simulating the device at the size found.
 - `xyce_path` setting for a Xyce built with plugin support.
+- Noise analysis (`.noise`) on ngspice, Xyce, LTspice and Spectre, read the same way from each as `V(onoise)` and `V(inoise)`, with the measurements `output_noise_at`, `input_noise_at`, `output_noise_rms` and `input_noise_rms`.
+- `psrr_db_at` and `cmrr_db_at` measurements: aispice adds a second AC run with the stimulus moved to the named supply or common-mode source and compares it with the circuit's own.
+- Corner sets for `check_specs`, `optimize` and `monte_carlo`: process corners (presets tt, ss, ff, sf, fs or family maps, applied to `.lib <file> <family>_<corner>` lines), temperatures and supply values. Reports give each spec's worst value, margin and corner and the full table; `optimize` minimises the worst case. `aispice check` takes `--process`, `--temp` and `--supply`.
+- Mismatch Monte Carlo: `monte_carlo` with `mismatch` set to `local` or `global` switches corner libraries to their `_mismatch` or `_stat` sections, with a simulator seed per run, on ngspice and Xyce, alone or with part tolerances and corners.
+- Design tasks `noise-tia` and `temp-corners`; task files take a `corners` set the judge checks every spec at.
 
 ### Security
 
 - A PDK folder is checked again, symlinks resolved, every time it is used, and a filesystem root, the home folder or a folder above it cannot be registered. A registered folder replaced by a link afterwards is no longer trusted.
 - The netlist policy trusts registered PDK folders as include roots, still checking their files with every rule except the path heuristic their expressions trip (`w/ng`). Includes of compiled libraries (`.osdi`, `.so`, `.dll`, `.dylib`, `.cm`) and `osdi` lines are refused; `pre_osdi`, `codemodel` and `.control` stay refused. Compiled models load only from inside a registered PDK, after a check that rejects paths through symlinks or with quotes, commas or `$`.
+- The netlist policy read some include lines differently from the simulators, which could make ngspice or Xyce open a file outside the project that the policy never checked: a `;`, `$` or `//` comment glued to a file name, single quotes or braces around it, an indented include, a `.include` on the title line (ngspice reads it), and `+` continuation lines that Xyce joins across comment, indented and `;` lines. The policy now checks a deck as ngspice and as Xyce join its lines, accepts include lines in one form only (the keyword, the file bare or in double quotes, for `.lib` at most a section name, nothing after it, on one line, no space in a `.lib` path) and refuses lone carriage returns, Unicode line separators and ngspice's `\\` line joining. The deck's own include lines are rewritten to name the checked file by its full path. A test runs every spelling through ngspice and Xyce against a decoy file outside the project.
+- Corner, mismatch and section-inlining code read library files only after the policy approved that exact path (regular files, 16 MiB each, 32 files and 64 MiB per call), with the policy's own parser, and list section names only for libraries in the project. Model resolution no longer reads a file an include names before the policy has approved it.
+
+### Fixed
+
+- An `.include` of a file beside the circuit was dropped before ngspice and Xyce ran.
+- Xyce ignored `.temp`; it is now written as Xyce's device temperature option.
+- ngspice could not read library sections (`.lib <file> <section>`) in the LTspice mode aispice runs it in; aispice now inlines the section for ngspice and LTspice.
+- AC measurements could read a noise analysis, which also has a frequency axis.
+- The netlist policy read a `+` continuation after a CRLF line end as a separate line instead of part of the include before it.
+- A Monte Carlo analysis whose every run failed reported a yield over no runs; it now reports the first failure as an error. Runs or optimizer candidates times corners over the limit are refused with the largest number that fits, rather than cut silently.
 
 ## [0.2.0]
 

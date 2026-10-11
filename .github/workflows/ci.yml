@@ -55,12 +55,13 @@ jobs:
 
       # ngspice makes the simulator tests real rather than skipped. Tests that
       # need a simulator check for it at run time, so Windows, where there is
-      # no packaged ngspice, still runs everything else.
+      # no packaged ngspice, still runs everything else. strace lets the
+      # include differential test see every file ngspice opens.
       - name: Install ngspice (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ngspice
+          sudo apt-get install --no-install-recommends -y ngspice strace
 
       - name: Install ngspice (macOS)
         if: runner.os == 'macOS'

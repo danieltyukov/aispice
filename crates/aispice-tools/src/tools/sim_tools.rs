@@ -1,5 +1,6 @@
 //! Tools that simulate, measure, check specs and size circuits.
 
+use super::analysis::{self, run_variants};
 use super::schematic_tools::spec;
 use crate::runner::{RunMods, StoredRun};
 use crate::workspace::Workspace;
@@ -9,9 +10,10 @@ use aispice_core::edit::{EditOp, apply};
 use aispice_core::netlist::{Line, Netlist};
 use aispice_core::units;
 use aispice_sim::backend::SimId;
+use aispice_sim::corner::{self, CornerSet};
 use aispice_sim::dataset::{AnalysisKind, Dataset, Quantity};
 use aispice_sim::measure::{Measure, MeasureResult, measure};
-use aispice_sim::montecarlo::{self, Tolerance};
+use aispice_sim::montecarlo::{self, Mismatch, Tolerance};
 use aispice_sim::oppoint;
 use aispice_sim::optimize::{
     self, CmaEs, CmaEsOptions, Goal, NelderMead, NelderMeadOptions, Objective, Param, RunOptions,
@@ -28,9 +30,11 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-const MEASURE_SYNTAX: &str = "Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().";
+const MEASURE_SYNTAX: &str = "Measurements are written `name = kind(args)`, for example `f3db = bandwidth_3db(V(out))`, `gain = gain_db_at(V(out)/V(in), 1k)`, `pm = phase_margin(V(out))`, `tr = rise_time(V(out), 10, 90)`, `vmax = max(V(out), 1m, 5m)`. Kinds: value_at(expr, at), min/max/pp/avg/rms/integral(expr[, from, to]), crossing(expr, level[, rise|fall|either, nth]), rise_time/fall_time(expr[, low_pct, high_pct]), overshoot_pct/undershoot_pct(expr), settling_time(expr[, tolerance_pct]), delay(from_expr, to_expr[, level_pct]), frequency/period/duty_cycle(expr), thd(expr, fundamental[, harmonics]), gain_db_at/phase_at(expr, freq), bandwidth_3db(expr[, dc|peak]), unity_gain_freq/phase_margin/gain_margin/peak_gain(expr), freq_at_db(expr, db), peaking_db(expr), q_lowpass(expr), output_noise_at/input_noise_at(freq), output_noise_rms/input_noise_rms([from, to]), psrr_db_at/cmrr_db_at(expr, source, freq). bandwidth_3db is the first frequency where the gain falls 3 dB below the gain at the lowest swept frequency (with `peak`, 3 dB below the peak gain, and for a bandpass the width between the two edges); freq_at_db is where the gain crosses an absolute level in dB, so freq_at_db(V(out), -3) is the -3 dB corner only when the low-frequency gain is 0 dB. peaking_db is the peak gain minus the low-frequency gain (0 for a Butterworth lowpass); q_lowpass estimates the Q of a second-order lowpass from an AC run (0.707 for Butterworth, with its natural frequency as f0); poles_zeros gives Q exactly. Noise measurements read a .noise analysis (such as `.noise V(out) Vin dec 20 1 10Meg`): densities in V/√Hz (A/√Hz for a current source input), rms integrated over the band. psrr_db_at and cmrr_db_at divide |expr| in the circuit's AC run, whose input carries AC 1, by |expr| in a second AC run aispice adds with AC 1 on `source` only (the supply, or the common-mode source that feeds both inputs); expr is the output, such as V(out). Expressions use V(node), V(a,b), I(R1), + - * /, and db(), mag(), ph().";
 
-const SPEC_SYNTAX: &str = "Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`.";
+const SPEC_SYNTAX: &str = "Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.";
+
+const CORNERS_HELP: &str = "`corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner.";
 
 fn parse_measures(lines: &[String]) -> Result<Vec<(String, Measure)>, String> {
     lines
@@ -310,6 +314,46 @@ async fn fresh_or_given_run(
     }
 }
 
+/// A run's datasets plus the derived AC runs its PSRR and CMRR
+/// measurements need, made from the circuit as it is now with the run's
+/// changes, on the run's simulator.
+#[allow(clippy::too_many_arguments)]
+async fn with_derived(
+    ws: &Workspace,
+    p: &crate::project::Project,
+    circuit: &str,
+    mods: &RunMods,
+    measures: &[(String, Measure)],
+    simulator: SimId,
+    datasets: &[Dataset],
+    ctx: &ToolContext,
+) -> Result<Vec<Dataset>, String> {
+    let mut out = datasets.to_vec();
+    if measures.iter().all(|(_, m)| m.stimulus_source().is_none()) {
+        return Ok(out);
+    }
+    let (mut netlist, std_libs, _) = ws
+        .runner
+        .netlist_for(p, circuit)
+        .map_err(|e| e.to_string())?;
+    crate::runner::apply_mods(&mut netlist, mods);
+    let sources = analysis::derived_sources(&netlist, measures.iter().map(|(_, m)| m))?;
+    out.extend(
+        analysis::derived_datasets(
+            ws,
+            p,
+            circuit,
+            &netlist,
+            &std_libs,
+            Some(simulator.name()),
+            &sources,
+            ctx,
+        )
+        .await?,
+    );
+    Ok(out)
+}
+
 macro_rules! input {
     ($v:expr) => {
         match parse_input($v) {
@@ -416,9 +460,24 @@ impl Tool for Simulate {
             Ok(r) => r,
             Err(e) => return ToolOutput::error(format!("Simulation failed: {e}")),
         };
+        let datasets = match with_derived(
+            &self.ws,
+            &p,
+            &input.circuit,
+            &mods,
+            &measures,
+            run.simulator,
+            &run.output.datasets,
+            ctx,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return ToolOutput::error(e),
+        };
         let measured: Vec<MeasureResult> = measures
             .iter()
-            .map(|(n, m)| measure(n, m, &run.output.datasets))
+            .map(|(n, m)| measure(n, m, &datasets))
             .collect();
         let text = run_text(&run, &measured);
         let out = ToolOutput::text(text)
@@ -472,9 +531,28 @@ impl Tool for MeasureTool {
                 Err(e) => return ToolOutput::error(e),
             };
         let note = note.map(|n| format!("note: {n}\n")).unwrap_or_default();
+        let p = match self.ws.project() {
+            Ok(p) => p,
+            Err(e) => return ToolOutput::error(e.to_string()),
+        };
+        let datasets = match with_derived(
+            &self.ws,
+            &p,
+            &input.circuit,
+            &run.mods,
+            &measures,
+            run.simulator,
+            &run.output.datasets,
+            ctx,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return ToolOutput::error(e),
+        };
         let measured: Vec<MeasureResult> = measures
             .iter()
-            .map(|(n, m)| measure(n, m, &run.output.datasets))
+            .map(|(n, m)| measure(n, m, &datasets))
             .collect();
         let mut t = format!("{note}Measured run {} of {}:\n", run.id, run.circuit);
         for m in &measured {
@@ -497,10 +575,83 @@ pub struct SpecsInput {
     pub save: bool,
     #[serde(default)]
     pub simulator: Option<String>,
+    /// Check at every corner of this set and report each spec's worst value,
+    /// its margin and the corner where it occurred, plus every spec at every
+    /// corner. For example `{"process": ["tt", "ss", "ff"], "temperatures":
+    /// [-40, 27, 125], "supplies": [{"target": "VDD", "values": [1.62,
+    /// 1.98]}]}`.
+    #[serde(default)]
+    pub corners: Option<CornerSet>,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Specs as named measurements, for the derived runs they need.
+fn spec_measures(specs: &[Spec]) -> Vec<(String, Measure)> {
+    specs
+        .iter()
+        .map(|s| (s.name.clone(), s.measure.clone()))
+        .collect()
+}
+
+/// The circuit's corner variants. The library reader is not `Send`, so it
+/// lives only here, never across an await.
+fn corner_variants(
+    ws: &Workspace,
+    p: &crate::project::Project,
+    circuit: &str,
+    netlist: &Netlist,
+    set: &CornerSet,
+) -> Result<Vec<(String, Netlist)>, String> {
+    let files = analysis::library_files(ws, p, circuit)?;
+    let lookup = |f: &str| files.sections(f);
+    corner::variants(netlist, set, &lookup).map_err(|e| format!("corners: {e}"))
+}
+
+/// Check specs at every corner of a set.
+async fn check_corners(
+    ws: &Workspace,
+    p: &crate::project::Project,
+    circuit: &str,
+    specs: &[Spec],
+    set: &CornerSet,
+    simulator: Option<&str>,
+    ctx: &ToolContext,
+) -> Result<ToolOutput, String> {
+    let (netlist, std_libs, _) = ws
+        .runner
+        .netlist_for(p, circuit)
+        .map_err(|e| e.to_string())?;
+    let netlist = analysis::as_simulator_reads_it(ws, p, netlist, simulator).await;
+    let sources = analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure))?;
+    let variants = corner_variants(ws, p, circuit, &netlist, set)?;
+    let names: Vec<String> = variants.iter().map(|(n, _)| n.clone()).collect();
+    let results = run_variants(ws, circuit, variants, &std_libs, simulator, &sources, ctx).await;
+    let mut sim = None;
+    let reports: Vec<Result<SpecReport, String>> = results
+        .iter()
+        .map(|(_, r)| match r {
+            Ok(v) => {
+                sim.get_or_insert(v.run.simulator);
+                Ok(evaluate(specs, &v.datasets))
+            }
+            Err(e) => Err(e.clone()),
+        })
+        .collect();
+    let report = corner::summarize(specs, &names[..reports.len()], &reports);
+    let t = format!(
+        "{circuit} at {} corners{}\n{}",
+        reports.len(),
+        sim.map(|s| format!(" on {}", s.name())).unwrap_or_default(),
+        analysis::corner_text(&report)
+    );
+    Ok(ToolOutput::text(t).with_data(json!({
+        "kind": "specs",
+        "report": ui_spec_report(&report.worst),
+        "corners": analysis::corner_json(&report),
+    })))
 }
 
 pub struct CheckSpecs {
@@ -525,7 +676,7 @@ impl Tool for CheckSpecs {
         spec::<SpecsInput>(
             "check_specs",
             &format!(
-                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. {SPEC_SYNTAX} {MEASURE_SYNTAX}"
+                "Simulate the circuit and check it against a spec table, reporting pass or fail and the margin for each spec. This is how to prove a design meets its requirements; run it after every change that matters. With corners, each spec reports its worst value and the corner where it occurred, and passes only if it passes at every corner. {CORNERS_HELP} {SPEC_SYNTAX} {MEASURE_SYNTAX}"
             ),
         )
     }
@@ -543,6 +694,19 @@ impl Tool for CheckSpecs {
         if input.specs.is_some() && input.save {
             save_specs(&self.ws, &p, &input.circuit, &text).await;
         }
+        if let Some(set) = &input.corners {
+            return check_corners(
+                &self.ws,
+                &p,
+                &input.circuit,
+                &specs,
+                set,
+                input.simulator.as_deref(),
+                ctx,
+            )
+            .await
+            .unwrap_or_else(ToolOutput::error);
+        }
         let run = match self
             .ws
             .runner
@@ -558,7 +722,22 @@ impl Tool for CheckSpecs {
             Ok(r) => r,
             Err(e) => return ToolOutput::error(format!("Simulation failed: {e}")),
         };
-        let report = evaluate(&specs, &run.output.datasets);
+        let datasets = match with_derived(
+            &self.ws,
+            &p,
+            &input.circuit,
+            &RunMods::default(),
+            &spec_measures(&specs),
+            run.simulator,
+            &run.output.datasets,
+            ctx,
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(e) => return ToolOutput::error(e),
+        };
+        let report = evaluate(&specs, &datasets);
         let t = format!(
             "{} (run {} on {})\n{}",
             input.circuit,
@@ -758,51 +937,6 @@ impl Tool for ReadWaveform {
     }
 }
 
-/// Run netlist variants in parallel, a few at a time.
-async fn run_variants(
-    ws: &Workspace,
-    circuit: &str,
-    variants: Vec<(String, aispice_core::netlist::Netlist)>,
-    std_libs: &[String],
-    simulator: Option<&str>,
-    ctx: &ToolContext,
-) -> Vec<(String, Result<Arc<StoredRun>, String>)> {
-    let p = match ws.project() {
-        Ok(p) => p,
-        Err(e) => {
-            return variants
-                .into_iter()
-                .map(|(l, _)| (l, Err(e.to_string())))
-                .collect();
-        }
-    };
-    let mut out = Vec::with_capacity(variants.len());
-    let total = variants.len();
-    for chunk in variants.chunks(6) {
-        if ctx.cancel.is_cancelled() {
-            break;
-        }
-        let futs = chunk.iter().map(|(label, n)| {
-            let p = p.clone();
-            async move {
-                (
-                    label.clone(),
-                    ws.runner
-                        .run_netlist_with(&p, circuit, n, std_libs, simulator, &ctx.cancel, false)
-                        .await
-                        .map_err(|e| e.to_string()),
-                )
-            }
-        });
-        out.extend(futures::future::join_all(futs).await);
-        ctx.progress(
-            format!("{} of {total} runs", out.len()),
-            Some(out.len() as f32 / total.max(1) as f32),
-        );
-    }
-    out
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SweepInput {
     pub circuit: String,
@@ -857,12 +991,17 @@ impl Tool for Sweep {
             Ok(v) => v,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
+        let sources = match analysis::derived_sources(&netlist, measures.iter().map(|(_, m)| m)) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(e),
+        };
         let results = run_variants(
             &self.ws,
             &input.circuit,
             variants,
             &std_libs,
             input.simulator.as_deref(),
+            &sources,
             ctx,
         )
         .await;
@@ -880,7 +1019,7 @@ impl Tool for Sweep {
                 Ok(run) => {
                     let vals: Vec<MeasureResult> = measures
                         .iter()
-                        .map(|(n, m)| measure(n, m, &run.output.datasets))
+                        .map(|(n, m)| measure(n, m, &run.datasets))
                         .collect();
                     t.push_str(&format!(
                         "{label}\t{}\n",
@@ -903,9 +1042,20 @@ pub struct MonteCarloInput {
     pub circuit: String,
     /// Tolerances: target is an element name or a glob such as `R*` or `C*`,
     /// `tol_pct` a percentage, `distribution` uniform (default) or gaussian
-    /// (3 sigma = tolerance).
+    /// (3 sigma = tolerance). May be empty when `mismatch` is set.
+    #[serde(default)]
     pub tolerances: Vec<Tolerance>,
-    /// Number of runs (default 50, at most 500).
+    /// Device mismatch from the circuit's corner libraries: `local` switches
+    /// their `.lib` sections to `_mismatch`, `global` to `_stat` (process
+    /// spread plus mismatch, typical corner only). The simulator draws the
+    /// parameters with its own seed per run; needs ngspice or Xyce.
+    #[serde(default)]
+    pub mismatch: Option<Mismatch>,
+    /// Run the analysis at every corner of this set, `runs` times each, and
+    /// report the yield per corner as well.
+    #[serde(default)]
+    pub corners: Option<CornerSet>,
+    /// Number of runs (default 50). Runs times corners may be at most 500.
     #[serde(default)]
     pub runs: Option<usize>,
     #[serde(default)]
@@ -921,13 +1071,16 @@ pub struct MonteCarlo {
     pub ws: Arc<Workspace>,
 }
 
+/// Simulations one Monte Carlo analysis may run, over all corners.
+const MAX_MC_RUNS: usize = 500;
+
 #[async_trait]
 impl Tool for MonteCarlo {
     fn spec(&self) -> ToolSpec {
         spec::<MonteCarloInput>(
             "monte_carlo",
             &format!(
-                "Monte Carlo tolerance analysis: vary component values within their tolerances, simulate each sample, and report the yield against the specs with per-spec spread and the worst run. Seeded and reproducible. {SPEC_SYNTAX}"
+                "Monte Carlo analysis: vary component values within their tolerances, device parameters through the PDK's mismatch or statistical model sections (`mismatch`), or both; simulate each sample and report the yield against the specs with per-spec spread and the worst run. Seeded and reproducible. With corners, every corner runs the same samples and reports its own yield. {CORNERS_HELP} {SPEC_SYNTAX}"
             ),
         )
     }
@@ -946,35 +1099,135 @@ impl Tool for MonteCarlo {
             Ok(v) => v,
             Err(e) => return ToolOutput::error(e.to_string()),
         };
-        let n = input.runs.unwrap_or(50).clamp(1, 500);
-        let variants =
-            match montecarlo::variants(&netlist, &input.tolerances, n, input.seed.unwrap_or(1)) {
-                Ok(v) => v,
+        // Statistical parameters need a simulator that draws them per run,
+        // and the same one for every run: no fallback to another.
+        let simulator = match input.mismatch {
+            None => input.simulator.clone(),
+            Some(_) => match self.ws.runner.choose(input.simulator.as_deref()).await {
+                Ok(id @ (SimId::Ngspice | SimId::Xyce)) => Some(id.name().to_string()),
+                Ok(id) => {
+                    return ToolOutput::error(format!(
+                        "mismatch Monte Carlo needs ngspice or Xyce: {} gives the nominal value of a statistical parameter outside its own Monte Carlo analysis",
+                        id.name()
+                    ));
+                }
                 Err(e) => return ToolOutput::error(e.to_string()),
+            },
+        };
+        let sources = match analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure)) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(e),
+        };
+        // The size of the request, from the list lengths alone, before any
+        // netlist is built.
+        let corner_count = match input.corners.as_ref().map(CornerSet::count) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => return ToolOutput::error(format!("corners: {e}")),
+            None => 1,
+        };
+        let mut notes: Vec<String> = Vec::new();
+        let n = match mc_runs(input.runs, corner_count) {
+            Ok((n, note)) => {
+                notes.extend(note);
+                n
+            }
+            Err(e) => return ToolOutput::error(e),
+        };
+        let netlist =
+            analysis::as_simulator_reads_it(&self.ws, &p, netlist, simulator.as_deref()).await;
+        let bases = match &input.corners {
+            Some(set) => match corner_variants(&self.ws, &p, &input.circuit, &netlist, set) {
+                Ok(v) => v,
+                Err(e) => return ToolOutput::error(e),
+            },
+            None => vec![(String::new(), netlist.clone())],
+        };
+        let seed = input.seed.unwrap_or(1);
+        let mut labelled: Vec<(String, Netlist)> = Vec::with_capacity(n * bases.len());
+        {
+            let files = match analysis::library_files(&self.ws, &p, &input.circuit) {
+                Ok(f) => f,
+                Err(e) => return ToolOutput::error(e),
             };
-        let labelled: Vec<(String, aispice_core::netlist::Netlist)> = variants
-            .iter()
-            .map(|v| (v.label.clone(), v.netlist.clone()))
-            .collect();
+            let lookup = |f: &str| files.sections(f);
+            for (name, base) in &bases {
+                let (variants, more) = match montecarlo::variants_with(
+                    base,
+                    &input.tolerances,
+                    input.mismatch,
+                    n,
+                    seed,
+                    &lookup,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => return ToolOutput::error(e.to_string()),
+                };
+                for note in more {
+                    if !notes.contains(&note) {
+                        notes.push(note);
+                    }
+                }
+                labelled.extend(variants.into_iter().map(|v| {
+                    let label = if name.is_empty() {
+                        v.label
+                    } else {
+                        format!("{name} {}", v.label)
+                    };
+                    (label, v.netlist)
+                }));
+            }
+        }
         let results = run_variants(
             &self.ws,
             &input.circuit,
             labelled,
             &std_libs,
-            input.simulator.as_deref(),
+            simulator.as_deref(),
+            &sources,
             ctx,
         )
         .await;
-        let reports: Vec<SpecReport> = results
+        let mut all: Vec<SpecReport> = Vec::new();
+        let mut per_corner: Vec<(String, montecarlo::YieldReport)> = Vec::new();
+        for (name, chunk) in bases.iter().map(|(n, _)| n).zip(results.chunks(n)) {
+            let reports: Vec<SpecReport> = chunk
+                .iter()
+                .filter_map(|(_, r)| r.as_ref().ok())
+                .map(|run| evaluate(&specs, &run.datasets))
+                .collect();
+            if !name.is_empty() {
+                per_corner.push((name.clone(), montecarlo::summarize(&reports)));
+            }
+            all.extend(reports);
+        }
+        let failed_runs = results.len() - all.len();
+        let first_failure = results
             .iter()
-            .filter_map(|(_, r)| r.as_ref().ok())
-            .map(|run| evaluate(&specs, &run.output.datasets))
-            .collect();
-        let failed_runs = results.len() - reports.len();
-        let y = montecarlo::summarize(&reports);
+            .find_map(|(label, r)| r.as_ref().err().map(|e| format!("{label}: {e}")))
+            .unwrap_or_default();
+        // A yield over no runs says nothing; the reason the runs failed does.
+        if all.is_empty() {
+            return ToolOutput::error(format!(
+                "every one of the {failed_runs} runs failed to simulate; the first, {first_failure}"
+            ));
+        }
+        let y = montecarlo::summarize(&all);
         let mut t = format!("{}\n", y.summary);
         if failed_runs > 0 {
-            t.push_str(&format!("  {failed_runs} run(s) failed to simulate\n"));
+            t.push_str(&format!(
+                "  {failed_runs} run(s) failed to simulate; the first, {first_failure}\n"
+            ));
+        }
+        for note in &notes {
+            t.push_str(&format!("  note: {note}\n"));
+        }
+        for (name, c) in &per_corner {
+            t.push_str(&format!(
+                "  {name}: yield {}% ({} of {} runs pass)\n",
+                (c.yield_pct * 10.0).round() / 10.0,
+                c.passed,
+                c.runs
+            ));
         }
         for s in &y.specs {
             t.push_str(&format!(
@@ -982,7 +1235,11 @@ impl Tool for MonteCarlo {
                 serde_json::to_string(s).unwrap_or_default()
             ));
         }
-        ToolOutput::text(t).with_data(json!({"kind": "montecarlo", "runs": y.runs, "yield_pct": y.yield_pct, "report": y.summary}))
+        let corners: Vec<Value> = per_corner
+            .iter()
+            .map(|(name, c)| json!({"corner": name, "runs": c.runs, "passed": c.passed, "yield_pct": c.yield_pct}))
+            .collect();
+        ToolOutput::text(t).with_data(json!({"kind": "montecarlo", "runs": y.runs, "yield_pct": y.yield_pct, "report": y.summary, "specs": y.specs, "corners": corners}))
     }
 }
 
@@ -1012,7 +1269,8 @@ pub struct OptimizeInput {
     pub goal: Option<Goal>,
     #[serde(default)]
     pub method: Method,
-    /// Simulation budget (default 80, at most 400).
+    /// Simulation budget in candidates (default 80, at most 400).
+    /// Candidates times corners may be at most 2000.
     #[serde(default)]
     pub max_evals: Option<usize>,
     /// Write the best (snapped) values into the schematic as an undoable edit.
@@ -1024,6 +1282,67 @@ pub struct OptimizeInput {
     pub save_specs: bool,
     #[serde(default)]
     pub simulator: Option<String>,
+    /// Meet the specs at every corner of this set: each candidate is
+    /// simulated at every corner and scored on its worst case.
+    #[serde(default)]
+    pub corners: Option<CornerSet>,
+}
+
+/// Simulations one optimization may run, candidates times corners.
+const MAX_OPT_SIMS: usize = 2000;
+
+/// Runs per corner for a Monte Carlo analysis: the runs asked for, refused
+/// when runs times corners is over [`MAX_MC_RUNS`]; without a number, 50 or
+/// as many as fit, with a note.
+fn mc_runs(asked: Option<usize>, corners: usize) -> Result<(usize, Option<String>), String> {
+    let corners = corners.max(1);
+    match asked {
+        Some(runs) if runs.saturating_mul(corners) > MAX_MC_RUNS => Err(format!(
+            "{runs} runs{} is more than the limit of {MAX_MC_RUNS} simulations; ask for at most {} runs",
+            if corners > 1 {
+                format!(" at each of {corners} corners")
+            } else {
+                String::new()
+            },
+            MAX_MC_RUNS / corners
+        )),
+        Some(runs) => Ok((runs.max(1), None)),
+        None if 50 * corners > MAX_MC_RUNS => {
+            let n = (MAX_MC_RUNS / corners).max(1);
+            Ok((
+                n,
+                Some(format!(
+                    "{n} runs per corner, to stay within {MAX_MC_RUNS} simulations"
+                )),
+            ))
+        }
+        None => Ok((50, None)),
+    }
+}
+
+/// Candidates for an optimization: the budget asked for (4 to 400), refused
+/// when candidates times corners is over [`MAX_OPT_SIMS`]; without a
+/// number, 80 or as many as fit, with a note.
+fn opt_candidates(asked: Option<usize>, corners: usize) -> Result<(usize, Option<String>), String> {
+    let corners = corners.max(1);
+    match asked {
+        Some(evals) if evals.clamp(4, 400).saturating_mul(corners) > MAX_OPT_SIMS => Err(format!(
+            "{} candidates at each of {corners} corners is more than the limit of {MAX_OPT_SIMS} simulations; ask for at most {} (max_evals)",
+            evals.clamp(4, 400),
+            (MAX_OPT_SIMS / corners).max(4)
+        )),
+        Some(evals) => Ok((evals.clamp(4, 400), None)),
+        None if 80 * corners > MAX_OPT_SIMS => {
+            let n = (MAX_OPT_SIMS / corners).max(4);
+            Ok((
+                n,
+                Some(format!(
+                    "budget cut to {n} candidates, {corners} corners each, to stay within {MAX_OPT_SIMS} simulations"
+                )),
+            ))
+        }
+        None => Ok((80, None)),
+    }
 }
 
 pub struct Optimize {
@@ -1036,7 +1355,7 @@ impl Tool for Optimize {
         spec::<OptimizeInput>(
             "optimize",
             &format!(
-                "Size component values to meet a spec table with the simulator in the loop (Nelder-Mead or CMA-ES over log-scaled ranges), then round to standard E-series values and re-check. You choose the parameters and sensible ranges; the optimizer does the search. {SPEC_SYNTAX}"
+                "Size component values to meet a spec table with the simulator in the loop (Nelder-Mead or CMA-ES over log-scaled ranges), then round to standard E-series values and re-check. You choose the parameters and sensible ranges; the optimizer does the search. With corners it optimizes the worst case over every corner; the budget counts candidates, each simulated at every corner. {CORNERS_HELP} {SPEC_SYNTAX}"
             ),
         )
     }
@@ -1074,8 +1393,40 @@ impl Tool for Optimize {
         let objective = Objective {
             goal: input.goal.clone(),
         };
+        let sources = match analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure)) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(e),
+        };
+        // The size of the request, from the list lengths alone, before any
+        // netlist is built.
+        let corner_count = match input.corners.as_ref().map(CornerSet::count) {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => return ToolOutput::error(format!("corners: {e}")),
+            None => 1,
+        };
+        let (max_evals, budget_note) = match opt_candidates(input.max_evals, corner_count) {
+            Ok(v) => v,
+            Err(e) => return ToolOutput::error(e),
+        };
+        // The corners, checked against the circuit's libraries once here;
+        // candidates differ only in part values.
+        let netlist = if input.corners.is_some() {
+            analysis::as_simulator_reads_it(&self.ws, &p, netlist, input.simulator.as_deref()).await
+        } else {
+            netlist
+        };
+        let corners = match &input.corners {
+            Some(set) => {
+                if let Err(e) = corner_variants(&self.ws, &p, &input.circuit, &netlist, set) {
+                    return ToolOutput::error(e);
+                }
+                set.corners().unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        let per_candidate = corners.len().max(1);
         let options = RunOptions {
-            max_evals: input.max_evals.unwrap_or(80).clamp(4, 400),
+            max_evals,
             ..Default::default()
         };
         let ws = self.ws.clone();
@@ -1084,38 +1435,52 @@ impl Tool for Optimize {
         let sim = input.simulator.clone();
         let ctx2 = ctx.clone();
         let (specs_in, libs_in, netlist_in) = (specs.clone(), std_libs.clone(), netlist.clone());
+        let (corners_in, sources_in) = (corners.clone(), sources.clone());
         let handle = tokio::runtime::Handle::current();
         // The optimizer drives a synchronous batch callback; each batch runs
         // its simulations concurrently on the async runtime.
         let result = tokio::task::spawn_blocking(move || {
             optimize::run(opt.as_mut(), &params, &options, |batch: &[Vec<f64>]| {
-                let variants: Vec<(String, aispice_core::netlist::Netlist)> = batch
-                    .iter()
-                    .enumerate()
-                    .map(|(i, values)| {
-                        (
-                            format!("p{i}"),
-                            optimize::apply(&netlist_in, &params, values)
-                                .unwrap_or_else(|_| netlist_in.clone()),
-                        )
-                    })
-                    .collect();
+                let mut variants: Vec<(String, Netlist)> = Vec::new();
+                for (i, values) in batch.iter().enumerate() {
+                    let n = optimize::apply(&netlist_in, &params, values)
+                        .unwrap_or_else(|_| netlist_in.clone());
+                    if corners_in.is_empty() {
+                        variants.push((format!("p{i}"), n));
+                        continue;
+                    }
+                    for c in &corners_in {
+                        let at =
+                            corner::apply(&n, c, &corner::no_lookup).unwrap_or_else(|_| n.clone());
+                        variants.push((format!("p{i} {}", c.name), at));
+                    }
+                }
                 let results = handle.block_on(run_variants(
                     &ws,
                     &circuit,
                     variants,
                     &libs_in,
                     sim.as_deref(),
+                    &sources_in,
                     &ctx2,
                 ));
-                results
-                    .iter()
-                    .map(|(_, r)| match r {
-                        Ok(run) => objective.score(&evaluate(&specs_in, &run.output.datasets)),
-                        Err(_) => optimize::Evaluation {
-                            value: optimize::MISSING_PENALTY,
-                            feasible: false,
-                        },
+                (0..batch.len())
+                    .map(|i| {
+                        let runs = results.get(i * per_candidate..(i + 1) * per_candidate);
+                        let reports: Option<Vec<SpecReport>> = runs.and_then(|runs| {
+                            runs.iter()
+                                .map(|(_, r)| {
+                                    r.as_ref().ok().map(|v| evaluate(&specs_in, &v.datasets))
+                                })
+                                .collect()
+                        });
+                        match reports {
+                            Some(reports) => objective.score_worst(&reports),
+                            None => optimize::Evaluation {
+                                value: optimize::MISSING_PENALTY,
+                                feasible: false,
+                            },
+                        }
                     })
                     .collect()
             })
@@ -1136,16 +1501,33 @@ impl Tool for Optimize {
             .map(|s| s.feasible)
             .unwrap_or(result.feasible);
         let mut best = serde_json::Map::new();
-        let mut t = format!(
-            "{} after {} simulations ({:?}).\n",
-            if feasible {
-                "All specs pass"
-            } else {
-                "Specs not all met"
-            },
-            result.evaluations,
-            result.stop
-        );
+        let mut t = if corners.is_empty() {
+            format!(
+                "{} after {} simulations ({:?}).\n",
+                if feasible {
+                    "All specs pass"
+                } else {
+                    "Specs not all met"
+                },
+                result.evaluations,
+                result.stop
+            )
+        } else {
+            format!(
+                "{} after {} candidates, each at {} corners ({:?}).\n",
+                if feasible {
+                    "All specs pass at every corner"
+                } else {
+                    "Specs not all met at every corner"
+                },
+                result.evaluations,
+                corners.len(),
+                result.stop
+            )
+        };
+        if let Some(note) = &budget_note {
+            t.push_str(&format!("  note: {note}\n"));
+        }
         for (name, v) in result.names.iter().zip(&values) {
             best.insert(name.clone(), json!(units::format(*v)));
             t.push_str(&format!("  {name} = {}\n", units::format(*v)));
@@ -1199,33 +1581,59 @@ impl Tool for Optimize {
                 Err(e) => t.push_str(&format!("Could not load: {e}\n")),
             }
         }
-        // Re-check the values actually reported (snapped) with a fresh run.
-        let final_report = {
-            match optimize::apply(&netlist, &input.params, &values) {
-                Ok(n) => match self
-                    .ws
-                    .runner
-                    .run_netlist_with(
-                        &p,
-                        &input.circuit,
-                        &n,
-                        &std_libs,
-                        input.simulator.as_deref(),
-                        &ctx.cancel,
-                        false,
-                    )
-                    .await
-                {
-                    Ok(run) => Some(evaluate(&specs, &run.output.datasets)),
-                    Err(_) => None,
-                },
-                Err(_) => None,
+        // Re-check the values actually reported (snapped) with fresh runs,
+        // at every corner when there are corners.
+        let mut corner_report = None;
+        let final_report = match optimize::apply(&netlist, &input.params, &values) {
+            Ok(n) => {
+                let (labels, variants): (Vec<String>, Vec<(String, Netlist)>) =
+                    if corners.is_empty() {
+                        (vec![String::new()], vec![(String::new(), n)])
+                    } else {
+                        corners
+                            .iter()
+                            .map(|c| {
+                                let at = corner::apply(&n, c, &corner::no_lookup)
+                                    .unwrap_or_else(|_| n.clone());
+                                (c.name.clone(), (c.name.clone(), at))
+                            })
+                            .unzip()
+                    };
+                let results = run_variants(
+                    &self.ws,
+                    &input.circuit,
+                    variants,
+                    &std_libs,
+                    input.simulator.as_deref(),
+                    &sources,
+                    ctx,
+                )
+                .await;
+                let reports: Vec<Result<SpecReport, String>> = results
+                    .iter()
+                    .map(|(_, r)| {
+                        r.as_ref()
+                            .map(|v| evaluate(&specs, &v.datasets))
+                            .map_err(Clone::clone)
+                    })
+                    .collect();
+                if corners.is_empty() {
+                    reports.into_iter().next().and_then(Result::ok)
+                } else {
+                    let r = corner::summarize(&specs, &labels[..reports.len()], &reports);
+                    let worst = r.worst.clone();
+                    corner_report = Some(r);
+                    Some(worst)
+                }
             }
+            Err(_) => None,
         };
-        if let Some(r) = &final_report {
-            t.push_str(&spec_text(r));
+        match (&corner_report, &final_report) {
+            (Some(c), _) => t.push_str(&analysis::corner_text(c)),
+            (None, Some(r)) => t.push_str(&spec_text(r)),
+            _ => {}
         }
-        ToolOutput::text(t).with_data(json!({"kind": "optimize", "best": best, "evaluations": result.evaluations, "report": final_report.as_ref().map(ui_spec_report)}))
+        ToolOutput::text(t).with_data(json!({"kind": "optimize", "best": best, "evaluations": result.evaluations, "report": final_report.as_ref().map(ui_spec_report), "corners": corner_report.as_ref().map(analysis::corner_json)}))
     }
 }
 
@@ -1812,6 +2220,31 @@ impl Tool for OperatingPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Oversized requests fail before anything is built; defaults shrink to
+    /// fit, and say so.
+    #[test]
+    fn run_budgets_are_checked_from_the_counts() {
+        assert_eq!(mc_runs(None, 1).unwrap(), (50, None));
+        assert_eq!(mc_runs(Some(500), 1).unwrap(), (500, None));
+        assert_eq!(mc_runs(Some(0), 1).unwrap(), (1, None));
+        let (n, note) = mc_runs(None, 20).unwrap();
+        assert_eq!(n, 25);
+        assert!(note.unwrap().contains("25 runs per corner"));
+        let err = mc_runs(Some(30), 20).unwrap_err();
+        assert!(err.contains("at most 25 runs"), "{err}");
+        assert!(mc_runs(Some(usize::MAX), 200).is_err());
+        assert!(mc_runs(Some(501), 1).is_err());
+
+        assert_eq!(opt_candidates(None, 1).unwrap(), (80, None));
+        assert_eq!(opt_candidates(Some(1000), 1).unwrap(), (400, None));
+        let (n, note) = opt_candidates(None, 50).unwrap();
+        assert_eq!(n, 40);
+        assert!(note.unwrap().contains("40 candidates"));
+        let err = opt_candidates(Some(100), 50).unwrap_err();
+        assert!(err.contains("at most 40"), "{err}");
+        assert_eq!(opt_candidates(None, 200).unwrap().0, 10);
+    }
 
     /// The measure and check_specs descriptions must say what bandwidth_3db
     /// is measured from and how freq_at_db differs, and name every kind.

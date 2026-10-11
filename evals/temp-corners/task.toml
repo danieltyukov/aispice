@@ -1,0 +1,18 @@
+id = "temp-corners"
+title = "Keep a filter corner in band from -40 C to 125 C"
+difficulty = "medium"
+prompt = """
+The RC low-pass in rc.asc has a resistor that drifts with temperature: R1 is 1 kOhm with tc1=2m, and it must stay as it is. Change C1 to a standard E24 value so the -3 dB corner stays between 1.5 kHz and 3 kHz at every temperature from -40 C to 125 C, and show that it does.
+"""
+circuit = "rc.asc"
+analysis = ".ac dec 50 10 1Meg"
+corners = { temperatures = [-40, 27, 125] }
+specs = """
+fc = bandwidth_3db(V(out)) in 1.5k..3k
+"""
+max_steps = 8
+constraints = [
+  { kind = "value", name = "R1", equals = "1k" },
+  { kind = "e_series", prefix = "C", series = "E24" },
+  { kind = "max_parts", count = 3 },
+]

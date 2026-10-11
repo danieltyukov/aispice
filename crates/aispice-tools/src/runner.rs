@@ -9,10 +9,12 @@ use crate::pdk::{PROJECT_FILE, ProjectConfig, Registry};
 use crate::project::{Project, ProjectError, now_ms};
 use aispice_core::netlist::{self, Line, Netlist, Policy};
 use aispice_sim::backend::ltspice::Ltspice;
+use aispice_sim::backend::ngspice::Ngspice;
 use aispice_sim::backend::spectre::{Spectre, SpectreConfig};
 use aispice_sim::backend::xyce::Xyce;
-use aispice_sim::backend::{self, Detection, SimId, SimJob, SimOutput, Simulator};
+use aispice_sim::backend::{Detection, SimId, SimJob, SimOutput, Simulator};
 use aispice_sim::dialect::{self, Target};
+use aispice_sim::library::{LibraryFiles, expand_lib_sections};
 use aispice_sim::models;
 use aispice_sim::pdk::{Pdk, PdkRun};
 use serde::{Deserialize, Serialize};
@@ -62,6 +64,9 @@ pub struct RunnerConfig {
     /// built with plugin support.
     #[serde(default)]
     pub xyce_exe: Option<PathBuf>,
+    /// The ngspice executable; `ngspice` on PATH when unset.
+    #[serde(default)]
+    pub ngspice_exe: Option<PathBuf>,
     /// The user's registered PDKs (`pdks.toml`).
     #[serde(default)]
     pub pdks: Registry,
@@ -84,6 +89,7 @@ impl Default for RunnerConfig {
             timeout_secs: 300,
             embedded_models_only: false,
             xyce_exe: None,
+            ngspice_exe: None,
             pdks: Registry::default(),
             pdks_error: None,
             gmid_cache_dir: None,
@@ -205,10 +211,13 @@ impl Runner {
             SimId::Xyce => Box::new(Xyce {
                 exe: self.config().xyce_exe,
             }),
+            SimId::Ngspice => Box::new(Ngspice {
+                exe: self.config().ngspice_exe,
+                ..Ngspice::default()
+            }),
             SimId::Spectre => Box::new(Spectre {
                 config: self.config().spectre,
             }),
-            other => backend::simulator(other),
         }
     }
 
@@ -410,6 +419,15 @@ impl Runner {
         }
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         let lib_dirs = self.model_lib_dirs();
+        let base = Self::base_dir(project, circuit)?;
+        let policy = self.policy_for(project, &base);
+        // Model resolution reads the files the netlist includes, so they go
+        // through the policy's resolver first.
+        check_includes(netlist, &policy)?;
+        // Model resolution keeps only includes it can find, and the simulator
+        // runs in a private folder, so files beside the circuit are named by
+        // their full path from here on. The policy checks those paths below.
+        let netlist = &canonical_netlist_includes(netlist, &policy);
         let mut notes = Vec::new();
         let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, pdk.as_ref());
         if let Some(t) = &text.1 {
@@ -438,22 +456,7 @@ impl Runner {
         }
         let deck = text.0;
 
-        let circuit_path = project.resolve(circuit)?;
-        let base = circuit_path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| project.root().to_path_buf());
-        let mut allowed = project.allowed_dirs();
-        allowed.extend(lib_dirs.iter().cloned());
-        // Every registered PDK folder may be included from, so a hand-written
-        // deck can name a PDK's libraries itself.
-        let trusted = self.config().pdks.trusted_roots();
-        let policy = Policy {
-            base_dir: base.clone(),
-            allowed_dirs: allowed,
-            allow_control_blocks: self.config().allow_control_blocks,
-            trusted_dirs: trusted.clone(),
-        };
+        let trusted = policy.trusted_dirs.clone();
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations
@@ -463,9 +466,19 @@ impl Runner {
                 .join("\n");
             return Err(RunError::Policy(msg));
         }
-        let deck = absolutize_includes(&deck, &base);
-        // Check again after the rewrite, so the deck the simulator receives is
-        // exactly a deck the policy accepted.
+        // ngspice in its LTspice mode, and LTspice, cannot select a section
+        // of a library file, so aispice inlines it, reading only files the
+        // policy approves; the check below sees the result. A PDK run puts
+        // ngspice in its native mode, which selects sections itself.
+        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
+            let files = LibraryFiles::new(policy.clone(), project.root());
+            expand_lib_sections(&deck, &files).map_err(RunError::Netlist)?
+        } else {
+            deck
+        };
+        let deck = netlist::canonical_includes(&deck, &policy);
+        // Check again after the rewrites, so the deck the simulator receives
+        // is exactly a deck the policy accepted.
         let violations = netlist::check_policy(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations
@@ -540,6 +553,32 @@ impl Runner {
             self.remember(run.clone());
         }
         Ok(run)
+    }
+
+    /// The netlist policy for a deck whose relative paths start at `base`:
+    /// the project, the model folders and the registered PDKs are the places
+    /// it may read.
+    pub fn policy_for(&self, project: &Project, base: &Path) -> Policy {
+        let mut allowed = project.allowed_dirs();
+        allowed.extend(self.model_lib_dirs());
+        Policy {
+            base_dir: base.to_path_buf(),
+            allowed_dirs: allowed,
+            allow_control_blocks: self.config().allow_control_blocks,
+            // Every registered PDK folder that still checks out may be
+            // included from, so a hand-written deck can name a PDK's
+            // libraries itself.
+            trusted_dirs: self.config().pdks.trusted_roots(),
+        }
+    }
+
+    /// The folder a circuit's relative paths start at.
+    pub fn base_dir(project: &Project, circuit: &str) -> Result<PathBuf, RunError> {
+        let circuit_path = project.resolve(circuit)?;
+        Ok(circuit_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project.root().to_path_buf()))
     }
 
     /// The deck text for a simulator, or the reason it cannot run there.
@@ -753,43 +792,49 @@ pub fn apply_mods(netlist: &mut Netlist, mods: &RunMods) {
     }
 }
 
-/// The simulator runs in a private temporary folder, so relative includes
-/// that point at files beside the circuit are made absolute. Only files that
-/// exist (and so already passed the policy) are rewritten; bare library names
-/// are left for the simulator's own search path.
+/// Include lines naming files beside the circuit, rewritten to name them by
+/// their full path, as [`netlist::canonical_includes`] does with the folder
+/// as the only allowed one. Kept for callers outside the runner, which
+/// itself rewrites with the project's whole policy.
 pub fn absolutize_includes(deck: &str, base: &Path) -> String {
-    let mut out = String::with_capacity(deck.len());
-    for line in deck.lines() {
-        let trimmed = line.trim_start();
-        let lower = trimmed.to_ascii_lowercase();
-        let kw = lower.split_whitespace().next().unwrap_or("");
-        if matches!(kw, ".include" | ".inc" | ".lib") {
-            let rest = trimmed[kw.len()..].trim();
-            let (arg, tail) = if let Some(q) = rest.strip_prefix('"') {
-                let end = q.find('"').unwrap_or(q.len());
-                (&q[..end], q.get(end + 1..).unwrap_or(""))
-            } else {
-                let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-                (&rest[..end], &rest[end..])
-            };
-            let p = Path::new(arg);
-            if !arg.is_empty() && !p.is_absolute() {
-                let candidate = base.join(p);
-                if let Ok(real) = std::fs::canonicalize(&candidate) {
-                    out.push_str(&format!(
-                        "{} \"{}\"{}\n",
-                        &trimmed[..kw.len()],
-                        real.display(),
-                        tail
-                    ));
-                    continue;
-                }
-            }
+    let policy = Policy {
+        base_dir: base.to_path_buf(),
+        ..Policy::default()
+    };
+    netlist::canonical_includes(deck, &policy)
+}
+
+/// [`netlist::canonical_includes`] on the top-level directives of a netlist.
+fn canonical_netlist_includes(netlist: &Netlist, policy: &Policy) -> Netlist {
+    let mut out = netlist.clone();
+    for item in &mut out.items {
+        if let aispice_core::netlist::Line::Directive { text } = item {
+            let fixed = netlist::canonical_includes(text, policy);
+            *text = fixed.trim_end_matches('\n').to_string();
         }
-        out.push_str(line);
-        out.push('\n');
     }
     out
+}
+
+/// Refuse a netlist whose own include lines the policy refuses, before
+/// anything reads the files they name.
+fn check_includes(netlist: &Netlist, policy: &Policy) -> Result<(), RunError> {
+    for text in netlist.directives() {
+        for line in netlist::logical_lines(text, false) {
+            let reason = match netlist::parse_include(&line) {
+                Some(Err(reason)) => reason,
+                Some(Ok(inc)) => {
+                    match netlist::resolve_include(&inc.file, &policy.base_dir, policy) {
+                        Err(reason) => reason,
+                        Ok(_) => continue,
+                    }
+                }
+                None => continue,
+            };
+            return Err(RunError::Policy(format!("  {reason} ({})", line.trim())));
+        }
+    }
+    Ok(())
 }
 
 /// LTspice and Xyce run one analysis per simulation: LTspice fails at a
@@ -865,18 +910,21 @@ mod tests {
     fn includes_beside_the_circuit_become_absolute() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("m.lib"), "* x\n").unwrap();
-        let deck = "t\n.lib m.lib\n.lib opamp.sub\n.include \"m.lib\" extra\n";
+        let deck = "t\n.lib m.lib\n.lib opamp.sub\n.include \"m.lib\"\n.include \"m.lib\" extra\n";
         let out = absolutize_includes(deck, dir.path());
         let real = std::fs::canonicalize(dir.path().join("m.lib")).unwrap();
         assert!(
-            out.contains(&format!(".lib \"{}\"", real.display())),
+            out.contains(&format!(".lib \"{}\"\n", real.display())),
             "{out}"
         );
         assert!(out.contains(".lib opamp.sub"));
         assert!(
-            out.contains(&format!(".include \"{}\" extra", real.display())),
+            out.contains(&format!(".include \"{}\"\n", real.display())),
             "{out}"
         );
+        // Not in the one form every simulator reads alike: left for the
+        // policy to refuse.
+        assert!(out.contains(".include \"m.lib\" extra\n"), "{out}");
     }
 
     /// Was machine-dependent: a model the netlist names was pulled from an
