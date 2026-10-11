@@ -136,11 +136,13 @@ async fn an_output_path_with_dotdot_is_refused() {
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("ota.cir"), "* ota\n.op\n").unwrap();
     let ws = workspace(&project);
+    let absolute = parent.path().join("evil.gds").display().to_string();
     for bad in [
         "../evil.gds",
         "sub/../../evil.gds",
         "~/evil.gds",
         "/etc/evil.gds",
+        absolute.as_str(),
     ] {
         let out = call(
             &ws,

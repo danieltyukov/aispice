@@ -224,8 +224,11 @@ impl Project {
             return Err(outside());
         }
         let p = Path::new(rel);
+        // A path rooted without a drive (`\x` on Windows) is relative to the
+        // current drive, not the project.
         if p.components()
             .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+            || (p.has_root() && !p.is_absolute())
         {
             return Err(outside());
         }
