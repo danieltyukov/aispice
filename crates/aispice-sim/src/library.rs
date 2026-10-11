@@ -342,6 +342,14 @@ mod tests {
         }
     }
 
+    /// Whether an error is the policy refusing a file. On Windows `/etc/x`
+    /// is a relative path, refused as one that does not exist.
+    fn refused(err: &str) -> bool {
+        err.contains("outside the project")
+            || err.contains("climbs out")
+            || (cfg!(windows) && err.contains("does not exist"))
+    }
+
     /// Library files that record every path they open.
     fn recording<'a>(root: &Path, opened: &'a Mutex<Vec<PathBuf>>) -> LibraryFiles<'a> {
         LibraryFiles::with_reader(
@@ -376,18 +384,18 @@ mod tests {
         assert_eq!(files.sections("standard.mos").unwrap(), None);
         // Refused as the policy refuses them, without opening anything.
         let outside = fx.outside.join("secret.lib");
-        for bad in [
+        let mut bad = vec![
             "../outside/secret.lib",
-            "link.lib",
             "/etc/passwd",
             outside.to_str().unwrap(),
             "lib/../../outside/secret.lib",
-        ] {
+        ];
+        if cfg!(unix) {
+            bad.push("link.lib");
+        }
+        for bad in bad {
             let err = files.sections(bad).unwrap_err();
-            assert!(
-                err.contains("outside the project") || err.contains("climbs out"),
-                "{bad}: {err}"
-            );
+            assert!(refused(&err), "{bad}: {err}");
         }
         let opened = opened.lock().unwrap();
         assert!(opened.iter().all(|p| p.starts_with(&fx.root)), "{opened:?}");
@@ -444,24 +452,27 @@ mod tests {
         );
         // Files the policy refuses are refused here, and never opened.
         let outside = fx.outside.join("secret.lib");
-        for bad in [
+        let mut bad = vec![
             "../outside/secret.lib".to_string(),
-            "link.lib".to_string(),
             "/etc/passwd".to_string(),
             outside.display().to_string(),
-        ] {
+        ];
+        if cfg!(unix) {
+            bad.push("link.lib".to_string());
+        }
+        for bad in bad {
             let err = expand_lib_sections(&format!("* t\n.lib {bad} private_section\n"), &files)
                 .unwrap_err();
-            assert!(
-                err.contains("outside the project") || err.contains("climbs out"),
-                "{bad}: {err}"
-            );
+            assert!(refused(&err), "{bad}: {err}");
         }
         assert!(expand_lib_sections("* t\n.lib lib/none.lib x\n", &files).is_err());
         let opened = opened.lock().unwrap();
         assert!(opened.iter().all(|p| p.starts_with(&fx.root)), "{opened:?}");
     }
 
+    /// Not on Windows, where the policy refuses every absolute drive path,
+    /// so no library outside the project can be named.
+    #[cfg(not(windows))]
     #[test]
     fn libraries_outside_the_project_are_not_listed() {
         let fx = fixture();

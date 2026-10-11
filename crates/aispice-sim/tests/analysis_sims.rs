@@ -8,7 +8,7 @@
 
 mod common;
 
-use aispice_core::netlist::{Policy, parse};
+use aispice_core::netlist::{Policy, canonical_includes, parse};
 use aispice_sim::backend::{SimId, Simulator};
 use aispice_sim::corner::{self, CornerSet};
 use aispice_sim::dialect::translate;
@@ -79,12 +79,8 @@ async fn temperature_corners_reach_every_simulator() {
 #[tokio::test]
 async fn process_corners_select_library_sections() {
     let dir = tempfile::tempdir().unwrap();
-    let lib = dir.path().join("corner.lib");
-    std::fs::write(&lib, LIBRARY).unwrap();
-    let deck = format!(
-        "* corner rc\n.lib \"{}\" res_typ\nV1 in 0 AC 1\nR1 in out {{rsh}}\nC1 out 0 100n\n.ac dec 50 10 1Meg\n.end\n",
-        lib.display()
-    );
+    std::fs::write(dir.path().join("corner.lib"), LIBRARY).unwrap();
+    let deck = "* corner rc\n.lib corner.lib res_typ\nV1 in 0 AC 1\nR1 in out {rsh}\nC1 out 0 100n\n.ac dec 50 10 1Meg\n.end\n";
     let set = CornerSet {
         process: vec!["tt".into(), "ss".into(), "ff".into()],
         ..Default::default()
@@ -97,7 +93,7 @@ async fn process_corners_select_library_sections() {
     };
     let files = LibraryFiles::new(policy.clone(), dir.path());
     let lookup = |file: &str| files.sections(file);
-    let variants = corner::variants(&parse(&deck), &set, &lookup).unwrap();
+    let variants = corner::variants(&parse(deck), &set, &lookup).unwrap();
     for (id, sim) in local_simulators().await {
         for ((name, n), r) in variants.iter().zip([1e3, 1.2e3, 800.0]) {
             let mut text = aispice_core::netlist::write(n);
@@ -107,6 +103,9 @@ async fn process_corners_select_library_sections() {
                 let files = LibraryFiles::new(policy.clone(), dir.path());
                 text = expand_lib_sections(&text, &files).unwrap();
             }
+            // And the simulator runs elsewhere, so the library is named by
+            // its full path.
+            let text = canonical_includes(&text, &policy);
             let got = bandwidth(id, sim.as_ref(), &text).await;
             let want = 1.0 / (2.0 * PI * r * 100e-9);
             eprintln!("{id} {name}: {got:.1} Hz (want {want:.1})");

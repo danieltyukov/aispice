@@ -424,8 +424,12 @@ async fn corner_libraries_go_through_the_policy() {
         .await;
         let text = out.text_content();
         assert!(out.is_error, "{name}: {text}");
+        // On Windows `/etc/passwd` is a relative path, refused as one that
+        // does not exist.
         assert!(
-            text.contains("outside the project") || text.contains("climbs out"),
+            text.contains("outside the project")
+                || text.contains("climbs out")
+                || (cfg!(windows) && text.contains("does not exist")),
             "{name}: {text}"
         );
         assert!(!text.contains("private_res_section"), "{name}: {text}");
