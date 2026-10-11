@@ -178,6 +178,9 @@ pub async fn run_task(
         circuit: None,
         simulators: vec![opts.simulator.clone()],
         ltspice_library: false,
+        pdk: crate::pdk::ProjectConfig::load(&root)
+            .ok()
+            .and_then(|c| c.pdk),
     });
     let mut agent = Agent::new(
         model.provider.clone(),

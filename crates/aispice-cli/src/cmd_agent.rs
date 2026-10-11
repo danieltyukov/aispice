@@ -113,6 +113,9 @@ pub fn chat(args: ChatArgs) -> Result<ExitCode> {
         circuit: None,
         simulators: sims,
         ltspice_library: ws.runner.ltspice_symbols().is_some(),
+        pdk: aispice_tools::pdk::ProjectConfig::load(&root)
+            .ok()
+            .and_then(|c| c.pdk),
     });
     let agent = Agent::new(provider, Arc::new(registry(ws.clone())), &model)
         .with_system(prompt)
