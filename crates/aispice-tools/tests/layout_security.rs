@@ -88,6 +88,8 @@ fn every_tool_declares_what_it_does_to_files() {
         ("pdk", Edit),
         ("gm_id", ReadOnly),
         ("check_macro", ReadOnly),
+        // Writes a package into the project after one approval.
+        ("macro_export", Edit),
     ]
     .into_iter()
     .map(|(n, a)| (n.to_string(), a))

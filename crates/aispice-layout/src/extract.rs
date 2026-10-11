@@ -262,6 +262,36 @@ pub async fn run(
     })
 }
 
+/// The extraction with one net renamed in its ports and its body: a macro's
+/// ground pin back to the test bench's `0`, for instance.
+pub fn rename_net(ex: &Extracted, from: &str, to: &str) -> Result<Extracted, String> {
+    let parsed = netlist::parse(&format!("* extracted\n{}", ex.text));
+    let sub = parsed
+        .subckts()
+        .next()
+        .ok_or("the extracted netlist has no subcircuit")?;
+    let swap = |n: &str| {
+        if n.eq_ignore_ascii_case(from) {
+            to.to_string()
+        } else {
+            n.to_string()
+        }
+    };
+    let ports: Vec<String> = ex.ports.iter().map(|p| swap(p)).collect();
+    let sub_ports: Vec<String> = sub.ports.iter().map(|p| swap(p)).collect();
+    let mut text = format!(".subckt {} {}\n", ex.cell, sub_ports.join(" "));
+    for e in elements(sub) {
+        let nodes: Vec<String> = e.nodes.iter().map(|n| swap(n)).collect();
+        text.push_str(&format!("{} {} {}\n", e.name, nodes.join(" "), e.rest));
+    }
+    text.push_str(&format!(".ends {}\n", ex.cell));
+    Ok(Extracted {
+        ports,
+        text,
+        ..ex.clone()
+    })
+}
+
 /// Whether a netlist line is one of the laid-out devices: its name is in
 /// `devices` (with or without the `X`).
 fn laid_out(e: &Element, devices: &[String]) -> bool {
@@ -411,6 +441,34 @@ mod tests {
             path: None,
             notes: vec![],
         }
+    }
+
+    #[test]
+    fn a_net_is_renamed_in_ports_and_body() {
+        let mut ex = extracted();
+        ex.text = ex
+            .text
+            .replace(" 0 ", " vss ")
+            .replace("ota5t 0 ", "ota5t vss ");
+        ex.ports = ex
+            .ports
+            .iter()
+            .map(|p| if p == "0" { "vss".into() } else { p.clone() })
+            .collect();
+        let back = rename_net(&ex, "vss", "0").unwrap();
+        assert_eq!(back.ports, extracted().ports);
+        assert!(
+            back.text
+                .starts_with(".subckt ota5t 0 inm inp out vbn vdd\n"),
+            "{}",
+            back.text
+        );
+        assert!(!back.text.contains("vss"), "{}", back.text);
+        assert!(
+            back.text.contains("C19 a_724_616_ 0 2.89731f"),
+            "{}",
+            back.text
+        );
     }
 
     #[test]

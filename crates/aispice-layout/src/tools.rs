@@ -236,6 +236,40 @@ pub async fn magic(
         })
 }
 
+/// The version a layout program reports (`klayout -v`, `magic --version`),
+/// for evidence summaries; `unknown` when it does not say.
+pub async fn version(programs: &Programs, magic: bool, cancel: &CancellationToken) -> String {
+    let (exe, flag) = if magic {
+        (programs.magic(), "--version")
+    } else {
+        (programs.klayout(), "-v")
+    };
+    let (Ok(exe), Ok(run)) = (exe, RunDir::new()) else {
+        return "unknown".into();
+    };
+    let spec = ProcessSpec::new(&exe, run.path())
+        .env("HOME", run.path())
+        .env("KLAYOUT_HOME", run.path())
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .arg(flag);
+    match process::run(&spec, Duration::from_secs(60), cancel).await {
+        Ok(out) => parse_version(&out.combined()).unwrap_or_else(|| "unknown".into()),
+        Err(_) => "unknown".into(),
+    }
+}
+
+/// The first word of a version banner that looks like a version number:
+/// `KLayout 0.30.7` gives `0.30.7`, `8.3.624` gives itself.
+pub fn parse_version(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .find(|w| {
+            w.contains('.')
+                && w.starts_with(|c: char| c.is_ascii_digit())
+                && w.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .map(str::to_string)
+}
+
 /// The last `n` lines of a program's output, without KLayout's memory
 /// usage lines.
 pub fn tail(text: &str, n: usize) -> String {
@@ -305,6 +339,15 @@ mod tests {
         assert!(check_path(Path::new("relative.gds")).is_err());
         assert!(check_path(Path::new("/tmp/a\nb.gds")).is_err());
         assert!(check_path(&std::env::temp_dir().join("a.gds")).is_ok());
+    }
+
+    #[test]
+    fn versions_are_read_from_banners() {
+        assert_eq!(parse_version("KLayout 0.30.7\n").as_deref(), Some("0.30.7"));
+        assert_eq!(parse_version("8.3.624").as_deref(), Some("8.3.624"));
+        assert_eq!(parse_version("Magic 8.3 revision 624").as_deref(), Some("8.3"));
+        assert_eq!(parse_version("no version here"), None);
+        assert_eq!(parse_version(""), None);
     }
 
     #[test]

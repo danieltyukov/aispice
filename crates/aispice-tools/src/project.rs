@@ -255,6 +255,80 @@ impl Project {
         Ok(target)
     }
 
+    /// The folders of an output path that do not exist yet, outermost first,
+    /// after checking the path as [`Project::resolve_output`] would once they
+    /// do: given without `..`, `~` or a drive, inside the project and outside
+    /// `.aispice/`, and every folder of it that exists a plain folder, not a
+    /// link.
+    pub fn missing_dirs(&self, rel: &str) -> Result<Vec<PathBuf>, ProjectError> {
+        let rel = rel.trim();
+        let outside = || ProjectError::Outside(rel.to_string());
+        if rel.is_empty()
+            || rel.contains('\0')
+            || rel.starts_with('~')
+            || rel.contains("..")
+            || rel.chars().any(char::is_control)
+        {
+            return Err(outside());
+        }
+        let p = Path::new(rel);
+        let p = if p.is_absolute() {
+            p.strip_prefix(&self.root).map_err(|_| outside())?
+        } else {
+            p
+        };
+        if p.components().any(|c| !matches!(c, Component::Normal(_))) {
+            return Err(outside());
+        }
+        let mut dirs: Vec<&std::ffi::OsStr> = p.components().map(|c| c.as_os_str()).collect();
+        dirs.pop();
+        if dirs.first().is_some_and(|d| *d == STATE_DIR) {
+            return Err(outside());
+        }
+        let mut cur = self.root.clone();
+        let mut missing = Vec::new();
+        for d in dirs {
+            cur = cur.join(d);
+            if !missing.is_empty() {
+                missing.push(cur.clone());
+                continue;
+            }
+            match std::fs::symlink_metadata(&cur) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+                Ok(_) => {
+                    return Err(ProjectError::Other(format!(
+                        "{} is not a plain folder; aispice does not write through it",
+                        self.relative(&cur)
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing.push(cur.clone()),
+                Err(e) => return Err(io(&cur, e)),
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Make the folders [`Project::missing_dirs`] lists, one level at a time:
+    /// a folder that appears in between as a link or a file stops it.
+    pub fn create_missing_dirs(&self, rel: &str) -> Result<(), ProjectError> {
+        for d in self.missing_dirs(rel)? {
+            match std::fs::create_dir(&d) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let m = std::fs::symlink_metadata(&d).map_err(|e| io(&d, e))?;
+                    if !m.is_dir() || m.file_type().is_symlink() {
+                        return Err(ProjectError::Other(format!(
+                            "{} is not a plain folder; aispice does not write through it",
+                            self.relative(&d)
+                        )));
+                    }
+                }
+                Err(e) => return Err(io(&d, e)),
+            }
+        }
+        Ok(())
+    }
+
     /// Write any file of the project (a layout, its record), recording the
     /// previous and new contents in the history so it can be undone like a
     /// schematic edit. Returns the snapshot ids before and after.
@@ -725,6 +799,43 @@ mod tests {
         std::fs::write(dir.path().join("sub/deck.cir"), "t\nR1 a 0 1\n.op\n").unwrap();
         let p = Project::open(dir.path(), ProjectOptions::default()).unwrap();
         (dir, p)
+    }
+
+    #[test]
+    fn output_folders_are_made_inside_and_never_through_links() {
+        let (_d, p) = project();
+        let missing = p
+            .missing_dirs("macros/ota.macro/evidence/drc.json")
+            .unwrap();
+        assert_eq!(missing.len(), 3);
+        assert!(p.missing_dirs("sub/x.gds").unwrap().is_empty());
+        for bad in [
+            "../x/y.gds",
+            "a/../../y.gds",
+            ".aispice/x/y.gds",
+            "~/y.gds",
+            "/etc/y.gds",
+            "",
+        ] {
+            assert!(p.missing_dirs(bad).is_err(), "{bad}");
+        }
+        p.create_missing_dirs("macros/ota.macro/evidence/drc.json")
+            .unwrap();
+        assert!(p.root().join("macros/ota.macro/evidence").is_dir());
+        // Absolute paths inside the project are fine.
+        let abs = p.root().join("macros/a/b.txt").display().to_string();
+        assert_eq!(p.missing_dirs(&abs).unwrap().len(), 1);
+        std::fs::write(p.root().join("file"), "x").unwrap();
+        assert!(p.missing_dirs("file/x.gds").is_err());
+        #[cfg(unix)]
+        {
+            let elsewhere = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), p.root().join("link")).unwrap();
+            let e = p.missing_dirs("link/new/x.gds").unwrap_err().to_string();
+            assert!(e.contains("not a plain folder"), "{e}");
+            assert!(p.create_missing_dirs("link/new/x.gds").is_err());
+            assert!(!elsewhere.path().join("new").exists());
+        }
     }
 
     #[test]

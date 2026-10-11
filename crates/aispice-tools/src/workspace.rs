@@ -114,8 +114,9 @@ impl Workspace {
     /// declares [`Access::Edit`] may; each path must pass the project's
     /// output resolver (inside the project, no `..`, not through a link);
     /// the user approves the whole set once, as for an edit; and each file
-    /// is recorded in the history so it can be undone. Returns the
-    /// project-relative paths written.
+    /// is recorded in the history so it can be undone. Folders a path needs
+    /// are made after the approval, one level at a time, never through a
+    /// link. Returns the project-relative paths written.
     pub async fn write_files(
         &self,
         tool: &dyn Tool,
@@ -132,19 +133,29 @@ impl Workspace {
             ));
         }
         let p = self.project().map_err(|e| e.to_string())?;
+        // Every path is checked now; one whose folder is still to be made is
+        // resolved again once it exists.
         let mut targets = Vec::new();
         for f in files {
-            let path = p.resolve_output(&f.rel).map_err(|e| e.to_string())?;
-            targets.push((p.relative(&path), path, &f.bytes));
+            let missing = p.missing_dirs(&f.rel).map_err(|e| e.to_string())?;
+            let rel = if missing.is_empty() {
+                p.relative(&p.resolve_output(&f.rel).map_err(|e| e.to_string())?)
+            } else {
+                f.rel.trim().to_string()
+            };
+            targets.push((rel, &f.bytes));
         }
-        let Some((first, _, _)) = targets.first() else {
+        let Some((first, _)) = targets.first() else {
             return Ok(Vec::new());
         };
         if !self.approve(first, summary, preview).await {
             return Err(format!("the user declined writing {}", names.join(", ")));
         }
         let mut written = Vec::new();
-        for (rel, path, bytes) in targets {
+        for (rel, bytes) in targets {
+            p.create_missing_dirs(&rel).map_err(|e| e.to_string())?;
+            let path = p.resolve_output(&rel).map_err(|e| e.to_string())?;
+            let rel = p.relative(&path);
             p.save_file_tracked(&rel, bytes, summary)
                 .map_err(|e| e.to_string())?;
             // The front end's hook reloads schematics (in LTspice too); a
