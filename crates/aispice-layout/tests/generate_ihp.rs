@@ -423,3 +423,29 @@ async fn a_generated_two_stage_op_amp_is_drc_and_lvs_clean() {
     }
     keep(dir);
 }
+
+/// Blocks with their pins brought to the bottom edge, as a macro package
+/// has them, stay DRC and LVS clean: the pins are on Metal4 now.
+#[tokio::test]
+async fn edge_pinned_blocks_are_drc_and_lvs_clean() {
+    let Some((programs, files)) = setup() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let params = Params {
+        pin_edge: true,
+        ..Default::default()
+    };
+    for (text, template, cell) in [
+        (OTA, Template::Ota5t, "ota_pins"),
+        (STRONGARM, Template::Comparator, "comparator_pins"),
+        (TWO_STAGE, Template::TwoStage, "two_stage_pins"),
+    ] {
+        let n = parse(text);
+        let c =
+            generate_and_check(&programs, &files, &n, template, &params, dir.path(), cell).await;
+        assert!(c.drc.clean(), "{cell}: {}", c.drc.to_text());
+        assert!(c.lvs.matched, "{cell}: {}", c.lvs.to_text());
+    }
+    keep(dir);
+}
