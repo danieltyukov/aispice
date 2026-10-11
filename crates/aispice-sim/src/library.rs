@@ -220,7 +220,19 @@ fn section_body(text: &str, section: &str) -> Result<Option<String>, String> {
 /// policy refuses; the result must still be checked again before it runs.
 pub fn expand_lib_sections(deck: &str, files: &LibraryFiles) -> Result<String, String> {
     let mut out = String::with_capacity(deck.len());
-    expand(deck, &files.policy.base_dir, 0, files, &mut out)?;
+    expand(deck, &files.policy.base_dir, 0, files, false, &mut out)?;
+    Ok(out)
+}
+
+/// Replace every include of a deck with what it selects: a `.lib <file>
+/// <section>` line with that section, as [`expand_lib_sections`] does, and
+/// an `.include <file>` line with the whole file, at every depth. For a
+/// simulator on another machine (Spectre over SSH), which has none of the
+/// files the deck names. Files are read through the policy exactly as for
+/// sections, within the same limits.
+pub fn inline_includes(deck: &str, files: &LibraryFiles) -> Result<String, String> {
+    let mut out = String::with_capacity(deck.len());
+    expand(deck, &files.policy.base_dir, 0, files, true, &mut out)?;
     Ok(out)
 }
 
@@ -229,6 +241,7 @@ fn expand(
     base: &Path,
     depth: usize,
     files: &LibraryFiles,
+    whole_files: bool,
     out: &mut String,
 ) -> Result<(), String> {
     for line in logical_lines(text, depth == 0) {
@@ -271,8 +284,35 @@ fn expand(
                 "* aispice: section {section} of {}\n",
                 path.display()
             ));
-            expand(&body, &dir, depth + 1, files, out)?;
+            expand(&body, &dir, depth + 1, files, whole_files, out)?;
             out.push_str(&format!("* aispice: end of section {section}\n"));
+            continue;
+        }
+        // A one-word `.lib name` inside a library opens a section rather
+        // than naming a file, so only `.include` and `.inc` take a file
+        // whole.
+        if whole_files
+            && let Some(inc) = &include
+            && inc.section.is_none()
+            && !inc.keyword.eq_ignore_ascii_case(".lib")
+        {
+            if depth >= MAX_SECTION_DEPTH {
+                return Err(format!(
+                    "included files nest deeper than {MAX_SECTION_DEPTH} levels"
+                ));
+            }
+            let path = files
+                .resolve(&inc.file, base)
+                .map_err(|reason| format!("`{}`: {reason}", inc.file))?
+                .ok_or_else(|| format!("`{}`: no such file", inc.file))?;
+            let text = files.text(&path)?;
+            let dir = path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| base.to_path_buf());
+            out.push_str(&format!("* aispice: {}\n", path.display()));
+            expand(&text, &dir, depth + 1, files, whole_files, out)?;
+            out.push_str(&format!("* aispice: end of {}\n", inc.file));
             continue;
         }
         // Inside a section, includes are relative to the library's folder,
@@ -488,6 +528,59 @@ mod tests {
             .unwrap_err();
         assert!(!err.contains("private_section"), "{err}");
         assert!(err.ends_with("has no section `other`"), "{err}");
+    }
+
+    /// For a simulator on another machine every include is inlined: a whole
+    /// file for `.include`, the section for `.lib file section`, includes
+    /// inside them too, all through the policy.
+    #[test]
+    fn includes_inline_whole_for_a_remote_simulator() {
+        let fx = fixture();
+        let opened = Mutex::new(Vec::new());
+        let files = recording(&fx.root, &opened);
+        let deck =
+            "* t\n.include \"lib/models.inc\"\n.lib lib/corner.lib res_typ\nR1 a 0 {rsh}\n.end\n";
+        let out = inline_includes(deck, &files).unwrap();
+        assert!(!out.contains(".include") && !out.contains(".lib "), "{out}");
+        // The file itself, and the include inside the section, each in full.
+        assert_eq!(out.matches(".model d1 D(IS=1e-14)\n").count(), 2, "{out}");
+        assert!(
+            out.contains(".param rsh=1k\n") && !out.contains("rsh=1.2k"),
+            "{out}"
+        );
+        assert!(out.contains(".param x=2\n"), "{out}");
+        assert!(
+            out.starts_with("* t\n") && out.contains("R1 a 0 {rsh}\n.end\n"),
+            "{out}"
+        );
+
+        // What the policy refuses is refused, and never opened.
+        let outside = fx.outside.join("secret.lib");
+        let mut bad = vec![
+            "../outside/secret.lib".to_string(),
+            "/etc/passwd".to_string(),
+            outside.display().to_string(),
+        ];
+        if cfg!(unix) {
+            bad.push("link.lib".to_string());
+        }
+        for bad in bad {
+            let err = inline_includes(&format!("* t\n.include {bad}\n"), &files).unwrap_err();
+            assert!(refused(&err), "{bad}: {err}");
+        }
+        let err = inline_includes("* t\n.include lib/none.inc\n", &files).unwrap_err();
+        assert!(err.contains("does not exist"), "{err}");
+        // A bare name another simulator would look up in its own library.
+        let err = inline_includes("* t\n.include opamp.sub\n", &files).unwrap_err();
+        assert!(err.contains("`opamp.sub`: no such file"), "{err}");
+        let opened = opened.lock().unwrap();
+        assert!(opened.iter().all(|p| p.starts_with(&fx.root)), "{opened:?}");
+
+        // A file that includes itself stops at the depth limit.
+        std::fs::write(fx.root.join("self.inc"), ".include self.inc\n").unwrap();
+        let files = LibraryFiles::new(policy(&fx.root), &fx.root);
+        let err = inline_includes("* t\n.include self.inc\n", &files).unwrap_err();
+        assert!(err.contains("nest deeper"), "{err}");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use aispice_sim::backend::spectre::{Spectre, SpectreConfig};
 use aispice_sim::backend::xyce::Xyce;
 use aispice_sim::backend::{Detection, SimId, SimJob, SimOutput, Simulator};
 use aispice_sim::dialect::{self, Target};
-use aispice_sim::library::{LibraryFiles, expand_lib_sections};
+use aispice_sim::library::{LibraryFiles, expand_lib_sections, inline_includes};
 use aispice_sim::models;
 use aispice_sim::pdk::{Pdk, PdkRun};
 use serde::{Deserialize, Serialize};
@@ -474,7 +474,14 @@ impl Runner {
         // of a library file, so aispice inlines it, reading only files the
         // policy approves; the check below sees the result. A PDK run puts
         // ngspice in its native mode, which selects sections itself.
-        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
+        // Spectre runs on another machine, which has none of the files the
+        // deck names, so everything it includes goes in the deck, with its
+        // expressions in the quotes Spectre reads.
+        let deck = if id == SimId::Spectre {
+            let files = LibraryFiles::new(policy.clone(), project.root());
+            let inlined = inline_includes(&deck, &files).map_err(RunError::Netlist)?;
+            aispice_sim::dialect::spectre_expressions(&inlined)
+        } else if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
             let files = LibraryFiles::new(policy.clone(), project.root());
             expand_lib_sections(&deck, &files).map_err(RunError::Netlist)?
         } else {
