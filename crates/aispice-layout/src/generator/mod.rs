@@ -244,6 +244,35 @@ impl Generated {
     }
 }
 
+/// The parameter change that usually fixes the DRC rules a generated block
+/// broke, and why, when the parameters have one: a wider track pitch for
+/// spacing on the routing layers, a guard ring and a larger row gap for
+/// well, implant and latch-up rules. `None` when no parameter addresses the
+/// rules (or the parameter is at its limit).
+pub fn adjust(params: &Params, rules: &[String]) -> Option<(Params, String)> {
+    let family = |r: &String| r.split('.').next().unwrap_or("").to_string();
+    let families: Vec<String> = rules.iter().map(family).collect();
+    let has = |names: &[&str]| families.iter().any(|f| names.contains(&f.as_str()));
+    let mut next = params.clone();
+    if has(&["M2", "M3", "M4", "V2", "V3"]) && params.track_pitch < 2.0 {
+        next.track_pitch = ((params.track_pitch + 0.2) * 1000.0).round() / 1000.0;
+        let why = format!("track_pitch {} um", next.track_pitch);
+        return Some((next, why));
+    }
+    if has(&["NW", "pSD", "nSD", "LU", "PWB"]) {
+        if !params.guard_ring {
+            next.guard_ring = true;
+            return Some((next, "guard_ring on".into()));
+        }
+        if params.row_gap < 5.0 {
+            next.row_gap = ((params.row_gap + 1.0) * 1000.0).round() / 1000.0;
+            let why = format!("row_gap {} um", next.row_gap);
+            return Some((next, why));
+        }
+    }
+    None
+}
+
 /// Plan a block from a circuit's netlist.
 pub fn generate(
     netlist: &Netlist,
@@ -325,4 +354,29 @@ pub async fn draw(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_rules_map_to_parameters() {
+        let p = Params::default();
+        let (n, why) = adjust(&p, &["M3.b".into()]).unwrap();
+        assert_eq!(n.track_pitch, 0.8);
+        assert_eq!(why, "track_pitch 0.8 um");
+        let off = Params {
+            guard_ring: false,
+            ..Default::default()
+        };
+        assert!(adjust(&off, &["LU.b".into()]).unwrap().0.guard_ring);
+        assert_eq!(adjust(&p, &["NW.b".into()]).unwrap().0.row_gap, 2.0);
+        assert!(adjust(&p, &["Gat.a".into()]).is_none());
+        let wide = Params {
+            track_pitch: 2.0,
+            ..Default::default()
+        };
+        assert!(adjust(&wide, &["M2.b".into()]).is_none());
+    }
 }

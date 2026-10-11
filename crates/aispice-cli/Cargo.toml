@@ -21,6 +21,7 @@ aispice-core.workspace = true
 aispice-tools.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"
+base64.workspace = true
 clap.workspace = true
 rmcp = { version = "3.5.1", features = ["server", "transport-io"] }
 serde.workspace = true

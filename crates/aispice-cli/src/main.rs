@@ -3,6 +3,7 @@
 mod cmd_agent;
 mod cmd_eval;
 mod cmd_files;
+mod cmd_layout;
 mod cmd_macro;
 mod cmd_pdk;
 mod cmd_sim;
@@ -79,6 +80,14 @@ enum Command {
         /// Repeatable.
         #[arg(long = "supply", value_name = "NAME=VALUES")]
         supplies: Vec<String>,
+        /// Also check after layout: extract this GDS and simulate it in
+        /// place of the circuit's devices (exit code 1 when a spec fails
+        /// after layout).
+        #[arg(long, value_name = "GDS")]
+        post_layout: Option<PathBuf>,
+        /// With --post-layout, extract resistor networks too.
+        #[arg(long, requires = "post_layout")]
+        resistance: bool,
     },
     /// Print the SPICE netlist of a schematic.
     Netlist { file: PathBuf },
@@ -156,6 +165,46 @@ enum Command {
         /// Time limit for one task run, in seconds.
         #[arg(long, default_value_t = 900, value_name = "SECONDS")]
         timeout: u64,
+    },
+    /// Analog layout: generate a layout from a circuit with the PDK's
+    /// pcells, or draw one as a picture.
+    Layout {
+        #[command(subcommand)]
+        action: LayoutAction,
+    },
+    /// Design rule check of a GDS with the PDK's KLayout decks (exit code 1
+    /// on violations).
+    Drc {
+        gds: PathBuf,
+        #[arg(long)]
+        cell: Option<String>,
+        /// Skip IHP's extra rules.
+        #[arg(long)]
+        no_extra: bool,
+        /// Skip the antenna rules.
+        #[arg(long)]
+        no_antenna: bool,
+        /// Add the density rules (chip level).
+        #[arg(long)]
+        density: bool,
+    },
+    /// Layout versus schematic with the PDK's KLayout deck (exit code 1 on a
+    /// mismatch).
+    Lvs {
+        gds: PathBuf,
+        /// The schematic or netlist the layout should match.
+        circuit: PathBuf,
+        #[arg(long)]
+        cell: Option<String>,
+    },
+    /// Extract a GDS with Magic: devices, capacitance and optionally
+    /// resistor networks, as a SPICE subcircuit.
+    Extract {
+        gds: PathBuf,
+        #[arg(long)]
+        cell: Option<String>,
+        #[arg(long)]
+        resistance: bool,
     },
     /// Register and inspect process design kits for IC design.
     Pdk {
@@ -254,6 +303,46 @@ enum MacroAction {
 }
 
 #[derive(Subcommand)]
+enum LayoutAction {
+    /// Lay out a circuit's transistors with a generator, then run DRC and
+    /// LVS (exit code 1 when either fails).
+    Generate {
+        circuit: PathBuf,
+        /// current_mirror, diff_pair, ota5t or comparator.
+        #[arg(long)]
+        template: String,
+        /// Role map as JSON, e.g. '{"pair": ["M1", "M2"], "tail": "M5"}'
+        /// (default: found from the topology).
+        #[arg(long, value_name = "JSON")]
+        roles: Option<String>,
+        /// Generator parameters as JSON, e.g. '{"pattern":
+        /// "interdigitated", "dummies": 2}'.
+        #[arg(long, value_name = "JSON")]
+        params: Option<String>,
+        #[arg(long)]
+        cell: Option<String>,
+        /// The GDS to write (default: <cell>.gds beside the circuit).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Skip DRC and LVS.
+        #[arg(long)]
+        no_check: bool,
+    },
+    /// Draw a GDS cell to PNG.
+    Render {
+        gds: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long)]
+        cell: Option<String>,
+        #[arg(long, default_value_t = 1200)]
+        width: u32,
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+    },
+}
+
+#[derive(Subcommand)]
 enum DocsWhat {
     /// Markdown reference of every tool.
     Tools,
@@ -301,10 +390,82 @@ fn run(cli: Cli) -> Result<ExitCode> {
             process,
             temperatures,
             supplies,
+            post_layout,
+            resistance,
         } => {
             let corners = cmd_sim::corners(&process, &temperatures, &supplies)?;
-            cmd_sim::check(&file, &cli.symbols, specs, simulator, corners, cli.json)
+            match post_layout {
+                Some(gds) => {
+                    let specs = specs.map(std::fs::read_to_string).transpose()?;
+                    cmd_layout::check_post_layout(cmd_layout::PostLayoutArgs {
+                        file: &file,
+                        layout: &gds,
+                        resistance,
+                        specs,
+                        simulator,
+                        corners,
+                        symbols: &cli.symbols,
+                        json_mode: cli.json,
+                    })
+                }
+                None => cmd_sim::check(&file, &cli.symbols, specs, simulator, corners, cli.json),
+            }
         }
+        Command::Layout { action } => match action {
+            LayoutAction::Generate {
+                circuit,
+                template,
+                roles,
+                params,
+                cell,
+                output,
+                no_check,
+            } => cmd_layout::generate(
+                cmd_layout::GenerateArgs {
+                    circuit,
+                    template,
+                    roles,
+                    params,
+                    cell,
+                    output,
+                    no_check,
+                },
+                &cli.symbols,
+                cli.json,
+            ),
+            LayoutAction::Render {
+                gds,
+                output,
+                cell,
+                width,
+                height,
+            } => cmd_layout::render(&gds, &output, cell, (width, height), &cli.symbols),
+        },
+        Command::Drc {
+            gds,
+            cell,
+            no_extra,
+            no_antenna,
+            density,
+        } => cmd_layout::drc(
+            cmd_layout::DrcArgs {
+                gds,
+                cell,
+                no_extra,
+                no_antenna,
+                density,
+            },
+            &cli.symbols,
+            cli.json,
+        ),
+        Command::Lvs { gds, circuit, cell } => {
+            cmd_layout::lvs(&gds, &circuit, cell, &cli.symbols, cli.json)
+        }
+        Command::Extract {
+            gds,
+            cell,
+            resistance,
+        } => cmd_layout::extract(&gds, cell, resistance, &cli.symbols, cli.json),
         Command::Netlist { file } => cmd_files::netlist(&ctx, &file),
         Command::Lint { file, strict } => cmd_files::lint(&ctx, &file, strict),
         Command::Show { file } => cmd_files::show(&ctx, &file),

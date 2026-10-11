@@ -293,7 +293,7 @@ pub struct LayoutInput {
     /// generate: the circuit to lay out.
     #[serde(default)]
     pub circuit: Option<String>,
-    /// generate: current_mirror, diff_pair or ota5t.
+    /// generate: current_mirror, diff_pair, ota5t or comparator.
     #[serde(default)]
     pub template: Option<Template>,
     /// generate: which instances play which part, e.g. {"pair": ["M1",
@@ -314,13 +314,17 @@ pub struct LayoutInput {
     /// generate: run DRC and LVS on the result (default true).
     #[serde(default = "yes")]
     pub check: bool,
+    /// generate: how many times to draw it, changing the parameter that
+    /// usually fixes a failed DRC between tries (default 3, at most 5).
+    #[serde(default)]
+    pub attempts: Option<u32>,
     /// render: image width and height in pixels (default 1200 x 900).
     #[serde(default)]
     pub size: Option<[u32; 2]>,
 }
 
 const LAYOUT_DESCRIPTION: &str = r#"
-Analog layout on the project's PDK (IHP SG13G2), drawn with the PDK's own pcells. `generate` lays out a circuit's transistors with a generator: current_mirror (roles ref, out), diff_pair (pair) or ota5t (pair, load, tail, bias). Each matched group becomes a row of two-finger units in a common-centroid or interdigitated pattern with dummy fingers at both ends and a guard ring; nets run on Metal3 tracks, joined across rows on Metal4, and pin nets are labelled. It writes <cell>.gds and <cell>.layout.json (how it was made) and then runs DRC and LVS, returning every violation with a hint on which parameter to change. Parameters: pattern (common_centroid, interdigitated), dummies (0 to 4 per row end), guard_ring, fingers (of the smallest device in a row, even), track_pitch and row_gap in um. GDS is never edited by hand: when a check fails, change parameters or roles and generate again. `render` draws a layout as a PNG.
+Analog layout on the project's PDK (IHP SG13G2), drawn with the PDK's own pcells. `generate` lays out a circuit's transistors with a generator: current_mirror (roles ref, out), diff_pair (pair), ota5t (pair, load, tail, bias) or comparator, a StrongARM latch (tail, pair, latch_n, latch_p, reset); roles are found from the topology when not given. Each matched group becomes a row of two-finger units in a common-centroid or interdigitated pattern with dummy fingers at both ends and a guard ring; nets run on Metal3 tracks, joined across rows on Metal4, and pin nets are labelled. It draws the block, runs DRC and LVS, and when DRC fails on a rule a parameter addresses (routing spacing, wells, latch-up) it changes that parameter and draws again, up to `attempts` times; then it writes <cell>.gds and <cell>.layout.json (how it was made) and returns every remaining violation with a hint on which parameter to change. Parameters: pattern (common_centroid, interdigitated), dummies (0 to 4 per row end), guard_ring, fingers (of the smallest device in a row, even), track_pitch and row_gap in um. GDS is never edited by hand: when a check fails, change parameters or roles and generate again. `render` draws a layout as a PNG.
 "#;
 
 pub struct LayoutTool {
@@ -359,7 +363,7 @@ impl LayoutTool {
         };
         let Some(template) = input.template else {
             return ToolOutput::error(
-                "generate needs a template: current_mirror, diff_pair or ota5t",
+                "generate needs a template: current_mirror, diff_pair, ota5t or comparator",
             );
         };
         let env = tri!(layout::env(&self.ws));
@@ -369,12 +373,8 @@ impl LayoutTool {
             .or_else(|| cell_from(&circuit))
             .unwrap_or_else(|| template.name().to_string());
         let (netlist, _, _) = tri!(self.ws.runner.netlist_for(&env.project, &circuit));
-        let params = input.params.clone().unwrap_or_default();
         let roles = input.roles.clone().unwrap_or_default();
-        let mut generated = tri!(generator::generate(
-            &netlist, template, &roles, &params, &cell
-        ));
-        generated.meta.circuit = Some(circuit.clone());
+        let mut params = input.params.clone().unwrap_or_default();
 
         // Where it goes: beside the circuit unless named.
         let out_rel = input.layout.clone().unwrap_or_else(|| {
@@ -401,10 +401,48 @@ impl LayoutTool {
                 "{out_rel} exists and was not made by the layout tool; name another file with `layout`"
             ));
         }
-        // Draw in a run folder, then move it into the project once approved.
+
+        // Draw and check in a run folder; only the result goes into the
+        // project. A failed DRC that a parameter addresses is drawn again.
         let (_, dir) = tri!(layout::run_dir(&env.project));
-        let tmp = dir.join(format!("{cell}.gds"));
-        tri!(generator::draw(&env.programs, &env.files, &generated.plan, &tmp, cancel).await);
+        let attempts = input.attempts.unwrap_or(3).clamp(1, 5);
+        let mut log = String::new();
+        let mut k = 1;
+        let (generated, tmp, checks) = loop {
+            let mut generated = tri!(generator::generate(
+                &netlist, template, &roles, &params, &cell
+            ));
+            generated.meta.circuit = Some(circuit.clone());
+            let tmp = dir.join(format!("try{k}.gds"));
+            tri!(generator::draw(&env.programs, &env.files, &generated.plan, &tmp, cancel).await);
+            if !input.check {
+                break (generated, tmp, None);
+            }
+            let gds = GdsFile {
+                path: tmp.clone(),
+                rel: String::new(),
+                cell: cell.clone(),
+                meta: Some(generated.meta.clone()),
+            };
+            let drc = tri!(run_drc(&env, &gds, DrcChecks::default(), cancel).await);
+            let lvs = tri!(run_lvs(&self.ws, &env, &gds, &circuit, cancel).await);
+            let rules: Vec<String> = drc.rules.iter().map(|r| r.rule.clone()).collect();
+            let next = (!drc.clean() && k < attempts)
+                .then(|| generator::adjust(&params, &rules))
+                .flatten();
+            match next {
+                Some((p, why)) => {
+                    log.push_str(&format!(
+                        "Try {k}: DRC failed ({}); drawing again with {why}.\n",
+                        rules.join(", ")
+                    ));
+                    params = p;
+                    k += 1;
+                }
+                None => break (generated, tmp, Some((drc, lvs))),
+            }
+        };
+
         let summary = generated.summary();
         let rel = env.project.relative(&out);
         if !self
@@ -421,16 +459,13 @@ impl LayoutTool {
         self.ws.after_save(&out);
 
         let mut t = format!(
-            "Wrote {rel} and {}.\n{summary}",
+            "{log}Wrote {rel} and {}.\n{summary}",
             env.project.relative(&sidecar)
         );
-        let mut data = json!({"layout": rel, "meta": generated.meta});
-        if input.check {
-            let gds = tri!(layout::open_gds(&env.project, &rel, Some(&cell)));
-            let drc = tri!(run_drc(&env, &gds, DrcChecks::default(), cancel).await);
+        let mut data = json!({"layout": rel, "meta": generated.meta, "attempts": k});
+        if let Some((drc, lvs)) = checks {
             t.push_str(&drc.to_text());
             t.push_str(&hints_text(&layout::drc_hints(&drc)));
-            let lvs = tri!(run_lvs(&self.ws, &env, &gds, &circuit, cancel).await);
             t.push_str(&lvs.to_text());
             t.push_str(&hints_text(&layout::lvs_hints(&lvs, true)));
             if drc.clean() && lvs.matched {

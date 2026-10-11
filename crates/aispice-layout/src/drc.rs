@@ -161,8 +161,44 @@ pub fn layer_of(rule: &str) -> Option<String> {
     Some(name.to_string())
 }
 
+/// Elements in a report database nest at most this deep; KLayout writes
+/// five levels.
+const MAX_XML_DEPTH: usize = 64;
+
+/// How deep elements nest, counted from the tags without parsing, so a
+/// hostile file is refused before the XML reader recurses into it.
+fn xml_depth(text: &str) -> usize {
+    let b = text.as_bytes();
+    let (mut depth, mut max) = (0usize, 0usize);
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        match b.get(i + 1) {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(b'?') | Some(b'!') | None => {}
+            Some(_) => {
+                let end = b[i..].iter().position(|c| *c == b'>').map(|p| i + p);
+                if !matches!(end, Some(e) if e > i && b[e - 1] == b'/') {
+                    depth += 1;
+                    max = max.max(depth);
+                }
+            }
+        }
+        i += 1;
+    }
+    max
+}
+
 /// Parse a KLayout report database.
 pub fn parse_lyrdb(text: &str) -> Result<(String, Vec<RuleCount>, Vec<Violation>), String> {
+    if xml_depth(text) > MAX_XML_DEPTH {
+        return Err(format!(
+            "the report nests deeper than {MAX_XML_DEPTH} levels"
+        ));
+    }
     let doc = roxmltree::Document::parse_with_options(
         text,
         roxmltree::ParsingOptions {
@@ -478,6 +514,9 @@ mod tests {
         assert_eq!(rules[0].count, MAX_PER_RULE + 5);
         assert_eq!(v.len(), MAX_PER_RULE);
         assert!(parse_lyrdb("<html/>").is_err());
+        assert_eq!(xml_depth("<a><b/><c>x</c></a>"), 2);
+        let deep = format!("{}{}", "<a>".repeat(100), "</a>".repeat(100));
+        assert!(parse_lyrdb(&deep).unwrap_err().contains("deeper"));
         assert!(parse_lyrdb("<!DOCTYPE x [<!ENTITY a 'b'>]><report-database/>").is_err());
     }
 }
