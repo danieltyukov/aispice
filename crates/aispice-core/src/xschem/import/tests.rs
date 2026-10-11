@@ -203,6 +203,10 @@ fn ihp_test_benches_import() {
                 .with_var("SG13G2_MODELS", &models),
             ..Default::default()
         },
+        layout: crate::layout::LayoutOptions {
+            effort: 0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let lib = SymbolLibrary::builtin_only();

@@ -29,6 +29,7 @@ mod wire;
 pub use quality::{Quality, quality};
 pub use verify::compare_netlists;
 
+pub(crate) use circuit::tokens;
 pub(crate) use geom::{Dir, centre, core_body, pin_facing, place_rect, segment_hits};
 pub(crate) use text::{flag_box, symbol_texts};
 

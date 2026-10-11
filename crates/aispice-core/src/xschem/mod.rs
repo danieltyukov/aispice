@@ -12,6 +12,7 @@
 //! run on a file.
 
 mod builtin;
+pub mod export;
 pub mod file;
 pub mod import;
 pub mod netlist;

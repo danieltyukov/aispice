@@ -128,6 +128,7 @@ pub fn import(
     let mut deck = crate::netlist::parse(&cleaned.text);
     deck.title = format!("Imported from xschem: {name}");
     notes.extend(rename_for_ltspice(&mut deck));
+    strip_default_cards(&mut deck);
 
     let laid =
         crate::layout::from_netlist(&deck, lib, &opts.layout).map_err(ImportError::Layout)?;
@@ -391,6 +392,36 @@ fn rename_for_ltspice(deck: &mut Netlist) -> Vec<String> {
         ));
     }
     notes
+}
+
+/// Drop the generic model cards (`.model NMOS NMOS`) the `.asc`'s netlist
+/// adds by itself: as LTspice does, it adds a family's cards whenever a part
+/// of that kind is drawn, whatever model the part names. Kept, the drawing
+/// would netlist with each card twice.
+fn strip_default_cards(deck: &mut Netlist) {
+    let family = |name: &str| match name {
+        "d" => Some('D'),
+        "npn" | "pnp" => Some('Q'),
+        "nmos" | "pmos" => Some('M'),
+        "njf" | "pjf" => Some('J'),
+        _ => None,
+    };
+    let letters: BTreeSet<char> = deck.elements().map(|e| e.letter()).collect();
+    deck.items.retain(|item| {
+        let Line::Directive { text } = item else {
+            return true;
+        };
+        let w: Vec<String> = text
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        match w.as_slice() {
+            [kw, name, kind] if kw == ".model" && name == kind => {
+                !family(name).is_some_and(|l| letters.contains(&l))
+            }
+            _ => true,
+        }
+    });
 }
 
 fn is_xschem_auto(n: &str) -> bool {
