@@ -93,7 +93,7 @@ pub struct MacroExportInput {
     /// Changes to the pins found from the circuit, by pin name, e.g.
     /// `{"clk": {"kind": "clock"}, "out": {"description": "Output, 1 pF"}}`.
     #[serde(default)]
-    pub pins: BTreeMap<String, PinOverride>,
+    pub pins: Option<BTreeMap<String, PinOverride>>,
     /// Specs to measure, one per line; default the circuit's `.specs` file.
     #[serde(default)]
     pub specs: Option<String>,
@@ -109,7 +109,7 @@ pub struct MacroExportInput {
     pub voltage: Option<f64>,
     /// The Verilog model: `blackbox` (default) or `wreal`.
     #[serde(default)]
-    pub verilog: VerilogModel,
+    pub verilog: Option<VerilogModel>,
     /// A line about the block for `macro.toml`.
     #[serde(default)]
     pub description: Option<String>,
@@ -587,7 +587,7 @@ async fn build(
         &generated.meta.ports,
         &ground,
     );
-    for (pin, o) in &input.pins {
+    for (pin, o) in input.pins.iter().flatten() {
         let Some(found) = pins.iter_mut().find(|p| &p.name == pin) else {
             return Err(format!(
                 "pins: the block has no pin {pin}; its pins are {}",
@@ -725,7 +725,11 @@ async fn build(
     write(
         &pkg,
         &format!("{name}.v"),
-        &mx::verilog(&manifest, input.verilog == VerilogModel::Wreal, VERSION),
+        &mx::verilog(
+            &manifest,
+            input.verilog == Some(VerilogModel::Wreal),
+            VERSION,
+        ),
     )?;
     let spice_path = write(
         &pkg,

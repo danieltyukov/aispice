@@ -345,7 +345,10 @@ mod tests {
     fn versions_are_read_from_banners() {
         assert_eq!(parse_version("KLayout 0.30.7\n").as_deref(), Some("0.30.7"));
         assert_eq!(parse_version("8.3.624").as_deref(), Some("8.3.624"));
-        assert_eq!(parse_version("Magic 8.3 revision 624").as_deref(), Some("8.3"));
+        assert_eq!(
+            parse_version("Magic 8.3 revision 624").as_deref(),
+            Some("8.3")
+        );
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version(""), None);
     }

@@ -1,8 +1,11 @@
 //! `aispice macro`: macro packages shared with ChipLeap (macro/v1).
 
+use crate::cmd_layout::{done, in_project, run_tool};
+use crate::cmd_sim::workspace_for;
 use aispice_core::macropkg::{CheckOptions, MacroError, SCHEMA_JSON, check_package};
 use anyhow::Result;
-use std::path::Path;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// Check a package. Exit code 0 when it passes, 1 when it does not (or has
@@ -40,4 +43,29 @@ pub fn check(dir: &Path, pdk: Option<String>, strict: bool, json: bool) -> Resul
 pub fn schema() -> Result<ExitCode> {
     print!("{SCHEMA_JSON}");
     Ok(ExitCode::SUCCESS)
+}
+
+pub struct ExportArgs<'a> {
+    pub circuit: &'a Path,
+    pub layout: &'a Path,
+    /// The tool's other inputs.
+    pub input: Value,
+    pub symbols: &'a [PathBuf],
+    pub json_mode: bool,
+}
+
+/// `aispice macro export`: the `macro_export` tool on the circuit's
+/// project. Exit code 1 when the export stops (nothing is written then).
+pub fn export(a: ExportArgs) -> Result<ExitCode> {
+    let (ws, circuit) = workspace_for(a.circuit, a.symbols)?;
+    let layout = in_project(&ws, a.layout)?;
+    let mut input = a.input;
+    input["circuit"] = Value::String(circuit);
+    input["layout"] = Value::String(layout);
+    let out = run_tool(&ws, "macro_export", input)?;
+    if out.is_error {
+        println!("{}", crate::cmd_agent::terminal_safe(&out.text_content()));
+        return Ok(ExitCode::from(1));
+    }
+    done(&out, a.json_mode, true)
 }

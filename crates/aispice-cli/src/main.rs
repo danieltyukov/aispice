@@ -284,6 +284,8 @@ enum PdkAction {
     Remove { name: String },
 }
 
+// Parsed once per run, so the export variant's size does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum MacroAction {
     /// Check a macro package against macro/v1 (exit code 1 when it fails).
@@ -297,6 +299,61 @@ enum MacroAction {
         /// Also fail on warnings.
         #[arg(long)]
         strict: bool,
+    },
+    /// Export a block laid out by `aispice layout generate` as a macro
+    /// package: redrawn with its pins at the edge, DRC and LVS clean,
+    /// extracted, its specs measured at every corner before and after
+    /// layout (exit code 1 when anything fails; nothing is written then).
+    Export {
+        /// The circuit with its test bench, in a project whose aispice.toml
+        /// names the PDK.
+        circuit: PathBuf,
+        /// The block's layout (a GDS with its .layout.json record).
+        #[arg(long)]
+        layout: PathBuf,
+        /// The macro's name (default: the layout's cell).
+        #[arg(long)]
+        name: Option<String>,
+        /// The package folder, relative to the project (default:
+        /// macros/<name>.macro).
+        #[arg(long)]
+        out: Option<String>,
+        /// The ground pin's name; the circuit's net 0 (default: vss).
+        #[arg(long)]
+        ground: Option<String>,
+        /// A specs file (default: the .specs file beside the circuit).
+        #[arg(long)]
+        specs: Option<PathBuf>,
+        #[arg(long)]
+        simulator: Option<String>,
+        /// Process corners, comma-separated (default: tt).
+        #[arg(long, value_delimiter = ',', value_name = "CORNERS")]
+        process: Vec<String>,
+        /// Temperatures in Celsius, comma-separated (default: 27).
+        #[arg(
+            long = "temp",
+            value_delimiter = ',',
+            allow_hyphen_values = true,
+            value_name = "C"
+        )]
+        temperatures: Vec<String>,
+        /// A supply source and its values: VDD=1.08,1.2,1.32. Repeatable.
+        #[arg(long = "supply", value_name = "NAME=VALUES")]
+        supplies: Vec<String>,
+        /// Pin changes as JSON, e.g. '{"clk": {"kind": "clock"}}'.
+        #[arg(long)]
+        pins: Option<String>,
+        /// The block's supply voltage in volts.
+        #[arg(long)]
+        voltage: Option<f64>,
+        /// The Verilog model: blackbox (default) or wreal.
+        #[arg(long)]
+        verilog: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Extract resistor networks too.
+        #[arg(long)]
+        resistance: bool,
     },
     /// Print the JSON schema of macro.toml.
     Schema,
@@ -541,6 +598,39 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Macro { action } => match action {
             MacroAction::Check { dir, pdk, strict } => {
                 cmd_macro::check(&dir, pdk, strict, cli.json)
+            }
+            MacroAction::Export {
+                circuit,
+                layout,
+                name,
+                out,
+                ground,
+                specs,
+                simulator,
+                process,
+                temperatures,
+                supplies,
+                pins,
+                voltage,
+                verilog,
+                description,
+                resistance,
+            } => {
+                let corners = cmd_sim::corners(&process, &temperatures, &supplies)?;
+                let specs = specs.map(std::fs::read_to_string).transpose()?;
+                cmd_macro::export(cmd_macro::ExportArgs {
+                    circuit: &circuit,
+                    layout: &layout,
+                    input: serde_json::json!({
+                        "name": name, "out": out, "ground": ground, "specs": specs,
+                        "simulator": simulator, "corners": corners,
+                        "pins": cmd_layout::json_arg("pins", pins.as_deref())?,
+                        "voltage": voltage, "verilog": verilog,
+                        "description": description, "resistance": resistance,
+                    }),
+                    symbols: &cli.symbols,
+                    json_mode: cli.json,
+                })
             }
             MacroAction::Schema => cmd_macro::schema(),
         },

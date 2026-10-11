@@ -18,7 +18,7 @@ async fn call(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutpu
     Ok(t.call(&ToolContext::default(), input).await)
 }
 
-fn run_tool(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutput> {
+pub fn run_tool(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutput> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -41,7 +41,7 @@ fn print(out: &ToolOutput, json_mode: bool) {
 }
 
 /// A file's path relative to the project folder `ws` was opened on.
-fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
+pub fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
     let p = ws.project()?;
     let abs =
         std::fs::canonicalize(file).with_context(|| format!("{} not found", file.display()))?;
@@ -55,7 +55,7 @@ fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-fn done(out: &ToolOutput, json_mode: bool, ok: bool) -> Result<ExitCode> {
+pub fn done(out: &ToolOutput, json_mode: bool, ok: bool) -> Result<ExitCode> {
     print(out, json_mode);
     if out.is_error {
         bail!("{}", out.text_content());
@@ -139,7 +139,7 @@ pub struct GenerateArgs {
     pub no_check: bool,
 }
 
-fn json_arg(what: &str, text: Option<&str>) -> Result<Value> {
+pub fn json_arg(what: &str, text: Option<&str>) -> Result<Value> {
     match text {
         Some(t) => serde_json::from_str(t).with_context(|| format!("--{what} is not JSON")),
         None => Ok(Value::Null),
