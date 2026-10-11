@@ -17,6 +17,38 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The folder aispice keeps its own state in, inside the project.
 pub const STATE_DIR: &str = ".aispice";
 
+/// What makes two paths the same folder on disk, whatever their spelling:
+/// device and inode on Unix, read with a stat (never an open, so a FIFO in
+/// the project cannot block it); volume serial and file index on Windows,
+/// from a handle opened without access rights.
+#[cfg(unix)]
+type FileId = (u64, u64);
+#[cfg(windows)]
+type FileId = same_file::Handle;
+
+/// The identity of a folder; `None` for anything else, or when it cannot
+/// be read. Only folders are compared: the state folder is one.
+#[cfg(unix)]
+fn file_id(p: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(p).ok().filter(|m| m.is_dir())?;
+    Some((m.dev(), m.ino()))
+}
+#[cfg(windows)]
+fn file_id(p: &Path) -> Option<FileId> {
+    std::fs::metadata(p).ok().filter(|m| m.is_dir())?;
+    same_file::Handle::from_path(p).ok()
+}
+
+/// An output path after its checks: its deepest existing folder (real),
+/// the names below it still to make (the file's last), and the identity
+/// of the state folder they were checked against.
+struct OutputWalk {
+    folder: PathBuf,
+    rest: Vec<String>,
+    state: FileId,
+}
+
 /// File types listed as circuits.
 const CIRCUIT_EXTS: &[&str] = &["asc", "cir", "net", "sp", "spi", "spice", "ckt"];
 /// Folders never searched for circuits.
@@ -220,60 +252,114 @@ impl Project {
         Ok(real)
     }
 
-    fn same_name(&self, a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    fn same_name(&self, a: &str, b: &str) -> bool {
         if self.fold_case {
-            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+            a.to_lowercase() == b.to_lowercase()
         } else {
             a == b
         }
     }
 
-    /// Whether a real path (symlinks resolved) lies in aispice's own
-    /// `.aispice/` folder. Names compare as the file system compares them,
-    /// and as Windows opens them: a stream (`:name`) and trailing dots and
-    /// spaces dropped.
-    pub fn in_state_dir(&self, real: &Path) -> bool {
-        match self.below_root(real) {
-            Some(rest) => rest.components().next().is_some_and(|c| {
-                let name = c.as_os_str().to_string_lossy();
-                let name = name.split(':').next().unwrap_or_default();
-                let name = name.trim_end_matches(['.', ' ']);
-                self.same_name(std::ffi::OsStr::new(name), std::ffi::OsStr::new(STATE_DIR))
-            }),
-            None => false,
+    /// Whether a path below the project folder is named as `.aispice/`
+    /// would be where names fold: an early refusal with a plain message.
+    /// Names cannot settle it (every file system folds its own way), so the
+    /// state folder's identity does ([`Project::in_state_dir`]).
+    fn named_state(&self, below: &Path) -> bool {
+        below.components().next().is_some_and(|c| {
+            let name = c.as_os_str().to_string_lossy();
+            let name = name.split(':').next().unwrap_or_default();
+            self.same_name(name.trim_end_matches(['.', ' ']), STATE_DIR)
+        })
+    }
+
+    /// The state folder's identity, when it is a plain folder. With `make`
+    /// it is created first if missing (never through a link), so a folder a
+    /// tool makes cannot become it afterwards; one that is a link or a file
+    /// stops every write.
+    fn state_id(&self, make: bool) -> Result<Option<FileId>, ProjectError> {
+        let dir = self.root.join(STATE_DIR);
+        if make {
+            self.state_subdir(&[])?;
+        }
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => match file_id(&dir) {
+                Some(id) => Ok(Some(id)),
+                None => Err(ProjectError::Other(format!(
+                    "{} cannot be opened",
+                    dir.display()
+                ))),
+            },
+            _ => Ok(None),
         }
     }
 
-    /// The part of a real path below the project folder, comparing names as
-    /// the file system does; `None` when it is not below it.
-    fn below_root(&self, real: &Path) -> Option<PathBuf> {
-        let mut path = real.components();
-        for r in self.root.components() {
-            let c = path.next()?;
-            if !self.same_name(c.as_os_str(), r.as_os_str()) {
-                return None;
-            }
+    /// Whether a real path (symlinks resolved) is aispice's own `.aispice/`
+    /// folder or inside it: the path, or a folder above it up to the
+    /// project folder, is the same folder on disk as `.aispice/`, however
+    /// it was spelled or reached.
+    pub fn in_state_dir(&self, real: &Path) -> bool {
+        let Ok(below) = real.strip_prefix(&self.root) else {
+            return false;
+        };
+        if self.named_state(below) {
+            return true;
         }
-        Some(path.as_path().to_path_buf())
+        match self.state_id(false) {
+            Ok(Some(state)) => self.reaches(real, &state),
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Whether `real` or a folder above it, below the project folder, has
+    /// the state folder's identity.
+    fn reaches(&self, real: &Path, state: &FileId) -> bool {
+        real.ancestors()
+            .take_while(|a| *a != self.root.as_path())
+            .any(|a| file_id(a).as_ref() == Some(state))
     }
 
     /// The one check every path aispice reads or writes for a tool passes
-    /// once its symlinks are resolved: inside the project folder and outside
-    /// `.aispice/`. `rel` is the path as given, for the message.
+    /// once its symlinks are resolved: inside the project folder (compared
+    /// as paths, both canonical) and not in `.aispice/` (by identity).
+    /// `rel` is the path as given, for the message.
     pub fn check_real(&self, real: &Path, rel: &str) -> Result<(), ProjectError> {
-        if self.below_root(real).is_none() || self.in_state_dir(real) {
-            return Err(ProjectError::Outside(rel.to_string()));
+        let state = self.state_id(false)?;
+        self.check_with(real, rel, state.as_ref())
+    }
+
+    fn check_with(
+        &self,
+        real: &Path,
+        rel: &str,
+        state: Option<&FileId>,
+    ) -> Result<(), ProjectError> {
+        let outside = || ProjectError::Outside(rel.to_string());
+        let below = real.strip_prefix(&self.root).map_err(|_| outside())?;
+        if self.named_state(below) || state.is_some_and(|s| self.reaches(real, s)) {
+            return Err(outside());
         }
         Ok(())
     }
 
-    /// Whether aispice writes a file or folder of this name: none that
-    /// Windows reads as something else, so no trailing dot or space (dropped
-    /// there), no colon (an alternate data stream), and no `~` before a
-    /// digit (a short 8.3 name such as `AISPIC~1`).
+    /// Whether aispice writes a file or folder of this name: an early
+    /// refusal of names Windows reads as something else, so no trailing dot
+    /// or space (dropped there), no colon (an alternate data stream), no `~`
+    /// before a digit (a short 8.3 name such as `AISPIC~1`) and no device
+    /// name (`CON`, `NUL`, `COM1`...).
     pub fn plain_name(name: &str) -> bool {
         let b = name.as_bytes();
+        let stem = name.split('.').next().unwrap_or_default().trim_end();
+        let device = matches!(
+            stem.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || (stem.len() == 4
+            && ["COM", "LPT"]
+                .iter()
+                .any(|d| stem.is_char_boundary(3) && stem[..3].eq_ignore_ascii_case(d))
+            && stem.as_bytes()[3].is_ascii_digit());
         !name.is_empty()
+            && !device
             && !name.ends_with(['.', ' '])
             && !name.contains(':')
             && !b.windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
@@ -282,10 +368,9 @@ impl Project {
     /// The checks an output path gets before anything is made or written:
     /// given without `..`, `~`, a drive or control characters, every name
     /// below the project plain ([`Project::plain_name`]), and its deepest
-    /// existing folder, symlinks resolved, inside the project and outside
-    /// `.aispice/`. Returns that folder (real) and the names below it still
-    /// to make, the file's name last.
-    fn output_walk(&self, rel: &str) -> Result<(PathBuf, Vec<String>), ProjectError> {
+    /// existing folder, symlinks resolved, inside the project and not in
+    /// `.aispice/`, which is made first so its identity can be compared.
+    fn output_walk(&self, rel: &str) -> Result<OutputWalk, ProjectError> {
         let rel = rel.trim();
         let outside = || ProjectError::Outside(rel.to_string());
         if rel.is_empty()
@@ -307,7 +392,7 @@ impl Project {
         }
         let bad_name = |n: &str| {
             ProjectError::Other(format!(
-                "{rel}: aispice does not write a file or folder named `{n}` (a trailing dot or space, a colon or a short name)"
+                "{rel}: aispice does not write a file or folder named `{n}` (a trailing dot or space, a colon, a short name or a device name)"
             ))
         };
         if !p.is_absolute() {
@@ -349,19 +434,28 @@ impl Project {
                 base.display()
             )));
         }
-        self.check_real(&real, rel)?;
+        // Containment first, so nothing is made for a path outside.
+        self.check_with(&real, rel, None)?;
+        let state = self.state_id(true)?.ok_or_else(|| {
+            ProjectError::Other(format!("{STATE_DIR} is not a plain folder of the project"))
+        })?;
+        self.check_with(&real, rel, Some(&state))?;
         for n in &rest {
             if !Self::plain_name(n) {
                 return Err(bad_name(n));
             }
         }
-        // Each name still to make, as it will be once made.
+        // Each name still to make, by name only until it exists.
         let mut at = real.clone();
         for n in &rest {
             at = at.join(n);
-            self.check_real(&at, rel)?;
+            self.check_with(&at, rel, Some(&state))?;
         }
-        Ok((real, rest))
+        Ok(OutputWalk {
+            folder: real,
+            rest,
+            state,
+        })
     }
 
     /// Where a tool may write a new or replaced file: a path that passes the
@@ -370,11 +464,11 @@ impl Project {
     /// resolved, and still inside), and whose final name is not a symbolic
     /// link, since aispice never writes through one.
     pub fn resolve_output(&self, rel: &str) -> Result<PathBuf, ProjectError> {
-        let (folder, rest) = self.output_walk(rel)?;
-        let [name] = &rest[..] else {
+        let walk = self.output_walk(rel)?;
+        let [name] = &walk.rest[..] else {
             return Err(ProjectError::Missing(rel.trim().to_string()));
         };
-        let target = folder.join(name);
+        let target = walk.folder.join(name);
         if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
             return Err(ProjectError::Other(format!(
                 "{} is a symbolic link; aispice does not write through links",
@@ -387,10 +481,10 @@ impl Project {
     /// The folders of an output path that do not exist yet, outermost first,
     /// after the checks [`Project::resolve_output`] makes.
     pub fn missing_dirs(&self, rel: &str) -> Result<Vec<PathBuf>, ProjectError> {
-        let (folder, rest) = self.output_walk(rel)?;
-        let mut at = folder;
+        let walk = self.output_walk(rel)?;
+        let mut at = walk.folder;
         let mut out = Vec::new();
-        for n in &rest[..rest.len() - 1] {
+        for n in &walk.rest[..walk.rest.len() - 1] {
             at = at.join(n);
             out.push(at.clone());
         }
@@ -399,13 +493,14 @@ impl Project {
 
     /// Make the folders [`Project::missing_dirs`] lists, one level at a
     /// time. Each is checked again as the file system made it, symlinks
-    /// resolved: one that turns out outside the project or in `.aispice/`
-    /// (a link put there in between, a name the file system folds onto
-    /// another) is removed again and stops it.
+    /// resolved: one that turns out outside the project or to be
+    /// `.aispice/` or inside it (a link put there in between, a name the
+    /// file system folds onto it) is removed again if this made it, and
+    /// stops it.
     pub fn create_missing_dirs(&self, rel: &str) -> Result<(), ProjectError> {
-        let (folder, rest) = self.output_walk(rel)?;
-        let mut at = folder;
-        for n in &rest[..rest.len() - 1] {
+        let walk = self.output_walk(rel)?;
+        let mut at = walk.folder;
+        for n in &walk.rest[..walk.rest.len() - 1] {
             let next = at.join(n);
             let made = match std::fs::create_dir(&next) {
                 Ok(()) => true,
@@ -413,7 +508,7 @@ impl Project {
                 Err(e) => return Err(io(&next, e)),
             };
             let real = std::fs::canonicalize(&next).map_err(|e| io(&next, e))?;
-            if !real.is_dir() || self.check_real(&real, rel).is_err() {
+            if !real.is_dir() || self.check_with(&real, rel, Some(&walk.state)).is_err() {
                 if made {
                     let _ = std::fs::remove_dir(&next);
                 }
@@ -1013,6 +1108,10 @@ mod tests {
             "x.gds:stream",
             ".aispice:x/out.gds",
             "macros/a:b/x.gds",
+            // Devices.
+            "CON/x.gds",
+            "macros/nul.gds",
+            "macros/Com1.v",
         ] {
             refused_everywhere(&p, bad);
         }
@@ -1020,11 +1119,60 @@ mod tests {
         assert!(Project::plain_name("ota~v1.gds"));
         assert!(Project::plain_name("x.gds"));
         assert!(!Project::plain_name("run~1"));
+        assert!(Project::plain_name("console.v"));
+        assert!(Project::plain_name("com10.v"));
+        assert!(!Project::plain_name("LPT9"));
         // The state check reads names as Windows opens them.
         for real in [".aispice.", ".aispice ", ".aispice:s", ".aispice::$DATA"] {
             assert!(p.in_state_dir(&p.root().join(real).join("x")), "{real}");
         }
         assert!(!p.in_state_dir(&p.root().join(".aispice2/x")));
+    }
+
+    /// Another name for the state folder, as a case variant or a short name
+    /// is on file systems that fold names, is refused by its identity.
+    #[cfg(unix)]
+    #[test]
+    fn the_state_folder_is_known_by_identity_not_name() {
+        let (d, p) = project();
+        // An output makes the state folder first, as a plain folder.
+        assert!(p.missing_dirs("out/x.gds").is_ok());
+        assert!(d.path().join(".aispice").is_dir());
+        std::fs::create_dir(d.path().join(".aispice/runs")).unwrap();
+        std::os::unix::fs::symlink(d.path().join(".aispice"), d.path().join("alias")).unwrap();
+        for path in ["alias", "alias/runs", "alias/runs/x.gds", "alias/new"] {
+            let path = p.root().join(path);
+            assert!(p.in_state_dir(&path), "{}", path.display());
+            assert!(p.check_real(&path, "alias").is_err());
+        }
+        assert!(!p.in_state_dir(&p.root().join("sub")));
+        assert!(!p.in_state_dir(&p.root().join("sub/x.gds")));
+        refused_everywhere(&p, "alias/runs/x.gds");
+        refused_everywhere(&p, "alias/new/x.gds");
+        assert_eq!(names_in(&d.path().join(".aispice")), ["runs"]);
+        // Normal nested outputs still work.
+        p.create_missing_dirs("out/deep/x.gds").unwrap();
+        assert_eq!(
+            p.resolve_output("out/deep/x.gds").unwrap(),
+            p.root().join("out/deep/x.gds")
+        );
+    }
+
+    #[test]
+    fn a_state_folder_that_is_not_a_plain_folder_stops_outputs() {
+        let (d, p) = project();
+        std::fs::write(d.path().join(".aispice"), "x").unwrap();
+        refused_everywhere(&p, "out/x.gds");
+        refused_everywhere(&p, "x.gds");
+        assert!(!d.path().join("out").exists());
+        #[cfg(unix)]
+        {
+            let (d, p) = project();
+            let elsewhere = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(elsewhere.path(), d.path().join(".aispice")).unwrap();
+            refused_everywhere(&p, "out/x.gds");
+            assert!(names_in(elsewhere.path()).is_empty());
+        }
     }
 
     #[cfg(unix)]
