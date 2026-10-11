@@ -181,6 +181,8 @@ pub async fn klayout(
     let mut spec = ProcessSpec::new(&exe, dir)
         .env("HOME", dir)
         .env("KLAYOUT_HOME", dir)
+        // Batch mode opens no window; this keeps Qt off the display too.
+        .env("QT_QPA_PLATFORM", "offscreen")
         .arg("-b")
         .arg("-r")
         .arg(script);
@@ -223,6 +225,16 @@ pub async fn magic(
             program: "Magic".into(),
             message: e.to_string(),
         })
+}
+
+/// The last `n` lines of a program's output, without KLayout's memory
+/// usage lines.
+pub fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.contains("Memory Usage"))
+        .collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Whether a cell or net name is safe to hand to a layout program: letters,

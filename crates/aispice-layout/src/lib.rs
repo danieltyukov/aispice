@@ -8,5 +8,6 @@
 
 pub mod drc;
 pub mod gds;
+pub mod generator;
 pub mod lvs;
 pub mod tools;

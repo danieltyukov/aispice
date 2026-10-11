@@ -106,49 +106,86 @@ fn device_line(
     })
 }
 
-/// Write the LVS schematic netlist of a circuit: its PDK devices as CDL in
-/// `.subckt <cell> <ports>`.
-pub fn lvs_netlist(netlist: &Netlist, cell: &str) -> Result<LvsNetlist, String> {
+/// The PDK device a netlist line instantiates, if any.
+fn pdk_device(e: &aispice_core::netlist::Element) -> Option<&'static Device> {
+    (e.letter() == 'X')
+        .then(|| e.first_word().and_then(aispice_core::pdk::device))
+        .flatten()
+}
+
+/// Whether a netlist line is one of the devices LVS keeps: a PDK device,
+/// and among `only` (netlist names, `XM1` or `M1`) when that is given.
+fn kept(e: &aispice_core::netlist::Element, only: Option<&[String]>) -> bool {
+    pdk_device(e).is_some()
+        && only.is_none_or(|o| {
+            let bare = e.name.strip_prefix(['X', 'x']).unwrap_or(&e.name);
+            o.iter().any(|n| {
+                n.eq_ignore_ascii_case(&e.name)
+                    || n.strip_prefix(['X', 'x'])
+                        .unwrap_or(n)
+                        .eq_ignore_ascii_case(bare)
+            })
+        })
+}
+
+/// The nets a block of devices shares with the rest of the circuit (and
+/// ground): what its layout must label. `only` picks the block's devices by
+/// netlist name; without it the block is every PDK device.
+pub fn block_ports(netlist: &Netlist, only: Option<&[String]>) -> Vec<String> {
+    let mut inside: BTreeSet<String> = BTreeSet::new();
+    let mut outside: BTreeSet<String> = BTreeSet::new();
+    for e in netlist.elements() {
+        if kept(e, only) {
+            inside.extend(e.nodes.iter().cloned());
+        } else {
+            outside.extend(e.nodes.iter().cloned());
+        }
+    }
+    inside
+        .into_iter()
+        .filter(|n| outside.contains(n) || n == "0")
+        .collect()
+}
+
+/// Write the LVS schematic netlist of a circuit: its PDK devices (or the
+/// `only` ones) as CDL in `.subckt <cell> <ports>`, plus devices the layout
+/// adds on purpose (`extra`: a generator's dummies).
+pub fn lvs_netlist(
+    netlist: &Netlist,
+    cell: &str,
+    only: Option<&[String]>,
+    extra: &[crate::generator::ExtraDevice],
+) -> Result<LvsNetlist, String> {
     tools::check_name("cell", cell).map_err(|e| e.to_string())?;
     let mut lines = Vec::new();
     let mut devices = Vec::new();
-    let mut device_nets: BTreeSet<String> = BTreeSet::new();
-    let mut other_nets: BTreeSet<String> = BTreeSet::new();
     for item in &netlist.items {
         match item {
-            Line::Element(e) => {
-                let pdk = (e.letter() == 'X')
-                    .then(|| e.first_word().and_then(aispice_core::pdk::device))
-                    .flatten();
-                match pdk {
-                    Some(device) => {
-                        if e.nodes.len() != device.pins.len() {
-                            return Err(format!(
-                                "{} has {} nodes, but {} has {} pins",
-                                e.name,
-                                e.nodes.len(),
-                                device.name,
-                                device.pins.len()
-                            ));
-                        }
-                        let inst = e.name.strip_prefix(['X', 'x']).unwrap_or(&e.name);
-                        tools::check_name("instance", inst).map_err(|e| e.to_string())?;
-                        for n in &e.nodes {
-                            tools::check_name("net", n).map_err(|e| e.to_string())?;
-                        }
-                        let rest = e.rest.split_once(char::is_whitespace).map_or("", |x| x.1);
-                        lines.push(device_line(inst, &e.nodes, device, &params(rest))?);
-                        devices.push(inst.to_string());
-                        device_nets.extend(e.nodes.iter().cloned());
-                    }
-                    None => other_nets.extend(e.nodes.iter().cloned()),
+            Line::Element(e) if kept(e, only) => {
+                let device = pdk_device(e).expect("kept lines are PDK devices");
+                if e.nodes.len() != device.pins.len() {
+                    return Err(format!(
+                        "{} has {} nodes, but {} has {} pins",
+                        e.name,
+                        e.nodes.len(),
+                        device.name,
+                        device.pins.len()
+                    ));
                 }
+                let inst = e.name.strip_prefix(['X', 'x']).unwrap_or(&e.name);
+                tools::check_name("instance", inst).map_err(|e| e.to_string())?;
+                for n in &e.nodes {
+                    tools::check_name("net", n).map_err(|e| e.to_string())?;
+                }
+                let rest = e.rest.split_once(char::is_whitespace).map_or("", |x| x.1);
+                lines.push(device_line(inst, &e.nodes, device, &params(rest))?);
+                devices.push(inst.to_string());
             }
             Line::Subckt(s) => {
-                let hidden = s.body.iter().any(|l| {
-                    matches!(l, Line::Element(e) if e.letter() == 'X'
-                        && e.first_word().and_then(aispice_core::pdk::device).is_some())
-                });
+                let hidden = s
+                    .body
+                    .iter()
+                    .any(|l| matches!(l, Line::Element(e) if pdk_device(e).is_some()));
                 if hidden {
                     return Err(format!(
                         "subcircuit {} holds PDK devices; LVS compares a flat circuit, so draw them at the top level",
@@ -160,13 +197,39 @@ pub fn lvs_netlist(netlist: &Netlist, cell: &str) -> Result<LvsNetlist, String> 
         }
     }
     if devices.is_empty() {
-        return Err("the circuit has no PDK devices to compare".into());
+        return Err(match only {
+            Some(o) => format!("none of {} is a PDK device of the circuit", o.join(", ")),
+            None => "the circuit has no PDK devices to compare".into(),
+        });
     }
-    let ports: Vec<String> = device_nets
-        .iter()
-        .filter(|n| other_nets.contains(*n) || n.as_str() == "0")
-        .cloned()
-        .collect();
+    for x in extra {
+        // KLayout drops a transistor whose terminals are all one net when it
+        // extracts the layout, so such a dummy is not compared.
+        if x.d == x.g && x.g == x.s && x.s == x.b {
+            continue;
+        }
+        tools::check_name("instance", &x.name).map_err(|e| e.to_string())?;
+        for n in [&x.d, &x.g, &x.s, &x.b] {
+            tools::check_name("net", n).map_err(|e| e.to_string())?;
+        }
+        if aispice_core::pdk::device(&x.model).is_none_or(|d| !d.is_mosfet()) {
+            return Err(format!("{} is not a PDK transistor", x.model));
+        }
+        lines.push(format!(
+            "M{} {} {} {} {} {} w={}u l={}u ng={} m=1",
+            x.name,
+            x.d,
+            x.g,
+            x.s,
+            x.b,
+            x.model,
+            x.w as f64 / 1000.0,
+            x.l as f64 / 1000.0,
+            x.ng
+        ));
+        devices.push(x.name.clone());
+    }
+    let ports = block_ports(netlist, only);
     let mut text = format!(
         "* LVS netlist written by aispice\n.subckt {cell} {}\n",
         ports.join(" ")
@@ -416,7 +479,7 @@ mod tests {
         let n = parse(
             "* ota\nVDD vdd 0 1.2\nVIN inp 0 0.6 AC 1\nIB vdd vbn 20u\nC1 out 0 1p\nXM1 d1 inp tail 0 sg13_lv_nmos w=2u l=0.5u ng=2 m=1\nXM2 out inm tail 0 sg13_lv_nmos w=2u l=0.5u\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\nXR1 a b 0 rppd w=1u l=4u\nXC1 out 0 cap_cmim w=10u l=10u m=1\nXQ1 c b e 0 npn13G2 Nx=2\nXM9 vdd inm vdd vdd sg13_lv_pmos\n.ac dec 10 1 1G\n",
         );
-        let l = lvs_netlist(&n, "ota").unwrap();
+        let l = lvs_netlist(&n, "ota", None, &[]).unwrap();
         assert_eq!(l.devices, ["M1", "M2", "M5", "R1", "C1", "Q1", "M9"]);
         // Ports: nets a device shares with a source or a test-bench part,
         // and ground.
@@ -437,21 +500,67 @@ mod tests {
     }
 
     #[test]
+    fn a_block_of_the_circuit_with_its_dummies() {
+        let n = parse(
+            "* ota\nVDD vdd 0 1.2\nXM1 x inp tail 0 sg13_lv_nmos w=2u l=0.5u\nXM2 out inm tail 0 sg13_lv_nmos w=2u l=0.5u\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u\n.op\n",
+        );
+        let only = vec!["XM1".to_string(), "M2".to_string()];
+        // The pair alone: tail now leaves the block (to M5), x and out
+        // stay inside.
+        assert_eq!(block_ports(&n, Some(&only)), ["0", "tail"]);
+        let dummy = crate::generator::ExtraDevice {
+            name: "pair_dummy1".into(),
+            model: "sg13_lv_nmos".into(),
+            w: 1000,
+            l: 500,
+            ng: 1,
+            d: "tail".into(),
+            g: "0".into(),
+            s: "tail".into(),
+            b: "0".into(),
+        };
+        let l = lvs_netlist(&n, "pair", Some(&only), &[dummy]).unwrap();
+        assert_eq!(l.devices, ["M1", "M2", "pair_dummy1"]);
+        assert!(l.text.contains(".subckt pair 0 tail\n"), "{}", l.text);
+        assert!(
+            l.text
+                .contains("Mpair_dummy1 tail 0 tail 0 sg13_lv_nmos w=1u l=0.5u ng=1 m=1"),
+            "{}",
+            l.text
+        );
+        assert!(!l.text.contains("MM5"));
+        let none = vec!["M7".to_string()];
+        assert!(
+            lvs_netlist(&n, "pair", Some(&none), &[])
+                .unwrap_err()
+                .contains("M7")
+        );
+    }
+
+    #[test]
     fn what_lvs_cannot_compare_is_refused() {
         assert!(
-            lvs_netlist(&parse("t\nR1 a 0 1k\n.op\n"), "x")
+            lvs_netlist(&parse("t\nR1 a 0 1k\n.op\n"), "x", None, &[])
                 .unwrap_err()
                 .contains("no PDK devices")
         );
         let tap = parse("t\nXT1 a 0 ptap1\n.op\n");
-        assert!(lvs_netlist(&tap, "x").unwrap_err().contains("ptap1"));
+        assert!(
+            lvs_netlist(&tap, "x", None, &[])
+                .unwrap_err()
+                .contains("ptap1")
+        );
         let nested =
             parse("t\nXA a b blk\n.subckt blk a b\nXM1 a b 0 0 sg13_lv_nmos\n.ends\n.op\n");
-        assert!(lvs_netlist(&nested, "x").unwrap_err().contains("flat"));
+        assert!(
+            lvs_netlist(&nested, "x", None, &[])
+                .unwrap_err()
+                .contains("flat")
+        );
         let odd = parse("t\nXM1 a b 0 0 sg13_lv_nmos\n.op\n");
-        assert!(lvs_netlist(&odd, "bad name").is_err());
+        assert!(lvs_netlist(&odd, "bad name", None, &[]).is_err());
         let net = parse("t\nXM1 a;b g 0 0 sg13_lv_nmos\n.op\n");
-        assert!(lvs_netlist(&net, "x").is_err());
+        assert!(lvs_netlist(&net, "x", None, &[]).is_err());
     }
 
     #[test]

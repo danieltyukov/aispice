@@ -359,20 +359,9 @@ pub async fn run(
         async move {
             let out = tools::klayout(programs, &dir, deck, &vars, cancel).await?;
             if !out.success() || !report.is_file() {
-                let tail: String = out
-                    .combined()
-                    .lines()
-                    .filter(|l| !l.contains("Memory Usage"))
-                    .rev()
-                    .take(8)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join("\n");
                 return Err(LayoutError::Failed {
                     program: format!("KLayout DRC ({name} deck)"),
-                    message: tail,
+                    message: tools::tail(&out.combined(), 8),
                 });
             }
             Ok::<PathBuf, LayoutError>(report)
