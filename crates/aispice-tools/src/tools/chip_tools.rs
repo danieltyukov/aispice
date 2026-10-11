@@ -162,10 +162,10 @@ fn package_dir(p: &Project, rel: &str) -> Result<PathBuf, String> {
         if let Ok(list) = std::fs::read_dir(&sub) {
             for e in list.filter_map(Result::ok) {
                 if let Ok(real) = e.path().canonicalize()
-                    && !real.starts_with(p.root())
+                    && p.check_real(&real, rel).is_err()
                 {
                     return Err(format!(
-                        "{} leads outside the project folder; refusing to read it",
+                        "{} leads outside the project folder or into .aispice; refusing to read it",
                         e.path().display()
                     ));
                 }

@@ -306,6 +306,19 @@ async fn bad_chip_descriptions_and_outputs_are_refused() {
             out.text_content()
         );
     }
+    // Names Windows opens as another file: `.aispice.` is `.aispice`.
+    for bad in [".aispice./out", "AISPIC~1/out", "out:stream"] {
+        let out = call(
+            &s.ws,
+            json!({"action": "assemble", "spec": "t.chip.toml", "out": bad}),
+        )
+        .await;
+        assert!(
+            out.is_error && out.text_content().contains("does not write"),
+            "{bad}: {}",
+            out.text_content()
+        );
+    }
     assert_eq!(
         std::fs::read_to_string(s.project.path().join("t.chip/notes.txt")).unwrap(),
         "mine"
