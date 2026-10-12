@@ -341,6 +341,27 @@ pub async fn build(
     cancel: &CancellationToken,
 ) -> Result<Library, BuildError> {
     let modules = check(sources)?;
+    build_checked(
+        verilator, tool, cxx, shim, model, top, sources, &modules, cancel,
+    )
+    .await
+}
+
+/// The build itself, for sources [`check`] passed. Tests call it directly
+/// with sources the check refuses, to prove the sandbox around ngspice
+/// holds even when a check is wrong.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_checked(
+    verilator: &Path,
+    tool: &str,
+    cxx: &Path,
+    shim: &Path,
+    model: &str,
+    top: &str,
+    sources: &[Source],
+    modules: &[String],
+    cancel: &CancellationToken,
+) -> Result<Library, BuildError> {
     if !modules.iter().any(|m| m == top) {
         return Err(BuildError::Refused(format!(
             "no module `{top}` in the sources (they declare {})",
