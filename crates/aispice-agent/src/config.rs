@@ -119,6 +119,11 @@ pub struct SpectreSettings {
     pub remote_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_command: Option<String>,
+    /// Folders outside a project that the server has its own copy of, as
+    /// `"local folder" = "folder on the server"`: an include of a file in
+    /// one names the server's copy. Nothing outside the project is sent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remote_folders: BTreeMap<String, String>,
 }
 
 /// Whether the agent's schematic edits apply at once (with undo) or wait for
@@ -303,6 +308,7 @@ remote_dir = "/scratch/me/aispice"
             ssh_host: "eda".into(),
             remote_dir: "/tmp/x".into(),
             setup_command: Some("source /cad/setup.sh".into()),
+            remote_folders: BTreeMap::from([("/home/me/pdk".into(), "/cad/pdk".into())]),
         });
         config.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path).unwrap(), config);

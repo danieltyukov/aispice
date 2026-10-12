@@ -510,6 +510,39 @@ fn parse_xyce_measurement(line: &str) -> Option<Measurement> {
 /// Parse Spectre's log: `ERROR (SFE-868): ...` and `WARNING (...)` blocks,
 /// whose message continues on indented lines, and the elapsed time from
 /// `Total time required for simulation ...: ... elapsed = 1.2 s`.
+/// The results of `.meas` lines from Spectre's `<deck>.measure` file, which
+/// every release tried (19.1 to 25.1) writes in SPICE mode instead of
+/// printing them: `name = value` lines under the `Analysis Type` that made
+/// them, `NaN` for a measurement that failed. The lines before the first
+/// analysis (date, design, version) are not results.
+pub fn parse_spectre_measure(text: &str) -> Vec<Measurement> {
+    let mut out = Vec::new();
+    let mut analysis: Option<String> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(kind) = t.strip_prefix("Analysis Type") {
+            analysis = Some(kind.trim_start_matches([' ', '\t', ':']).trim().to_string());
+            continue;
+        }
+        let (Some(kind), Some((name, value))) = (&analysis, t.split_once('=')) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            continue;
+        }
+        out.push(Measurement {
+            name: name.to_string(),
+            step: None,
+            value: value.trim().parse::<f64>().ok().filter(|v| v.is_finite()),
+            complex: None,
+            expr: String::new(),
+            detail: kind.clone(),
+        });
+    }
+    out
+}
+
 pub fn parse_spectre_output(text: &str) -> LogReport {
     let mut r = LogReport::default();
     let lines: Vec<&str> = text.lines().map(|l| l.trim_end_matches('\r')).collect();
@@ -634,6 +667,29 @@ mod tests {
             vec!["WARNING (SPECTRE-16707): Only tran analysis is supported in this mode."]
         );
         assert_eq!(r.elapsed, Some(0.25));
+    }
+
+    /// `<deck>.measure` as Spectre 25.1 writes it (19.1 pads less).
+    #[test]
+    fn spectre_measure_file() {
+        let text = "Exported variables from results directory:  ./t.raw.psf\n\ndate               :  11:15:14 PM, Sun Oct 11, 2026\ndesign             :  * t\nsimulator          :  spectre\nversion            :  25.1.0.156.isr2\n\n\nMeasurement Name   :  timeSweep\nAnalysis Type      :  tran\nnever                 =  NaN \nvend                  =  0.993339 \nvmax                  =  0.999956 \n\n\nMeasurement Name   :  frequencySweep\nAnalysis Type      :  ac\nf3                    =  1587.8 \ng1k                   =  -1.44507 \n";
+        let m = parse_spectre_measure(text);
+        let got: Vec<(&str, Option<f64>, &str)> = m
+            .iter()
+            .map(|m| (m.name.as_str(), m.value, m.detail.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("never", None, "tran"),
+                ("vend", Some(0.993339), "tran"),
+                ("vmax", Some(0.999956), "tran"),
+                ("f3", Some(1587.8), "ac"),
+                ("g1k", Some(-1.44507), "ac"),
+            ]
+        );
+        assert!(m[0].failed());
+        assert!(parse_spectre_measure("version : 19.1\nx = 1\n").is_empty());
     }
 
     #[test]

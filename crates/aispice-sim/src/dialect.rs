@@ -66,8 +66,12 @@ pub fn translate(netlist: &Netlist, target: Target) -> Translated {
         let mut lines = body.lines();
         let title = lines.next().unwrap_or("");
         let title = title.trim_start_matches('*').trim();
-        let rest: Vec<&str> = lines.collect();
-        format!("* {title}\nsimulator lang=spice\n{}\n", rest.join("\n"))
+        let rest = lines.collect::<Vec<_>>().join("\n");
+        let quoted = spectre_expressions(&rest);
+        if quoted != rest {
+            cx.note("wrote {expression} values in single quotes, the form Spectre reads");
+        }
+        format!("* {title}\nsimulator lang=spice\n{quoted}\n")
     } else {
         body
     };
@@ -701,14 +705,7 @@ impl Cx {
                     None
                 }
             }
-            ".meas" | ".measure" => {
-                if target == Target::Spectre {
-                    self.note("Spectre accepts .measure in SPICE mode only in recent releases");
-                    Some(text)
-                } else {
-                    Some(self.meas(&text))
-                }
-            }
+            ".meas" | ".measure" => Some(self.meas(&text)),
             ".tran" => Some(self.tran(&text)),
             ".temp" if target == Target::Xyce => {
                 // Xyce ignores `.temp` with a warning; its temperature is a
@@ -1100,6 +1097,27 @@ impl Cx {
 /// Every X instance passes parameters by name; ngspice refuses one the
 /// subcircuit does not declare, which LTspice allows. Declare them, with the
 /// first instance's value as the default.
+/// SPICE text with `{expression}` values in single quotes, outside
+/// comment lines. Spectre's SPICE reader takes expressions in quotes, as
+/// HSPICE does, and reads `{rsh}` as an unknown parameter `[rsh]`: every
+/// release tried, 19.1 to 25.1, refuses braces. Files a deck includes are
+/// not translated, so the runner applies this again once it has inlined
+/// them for Spectre.
+pub fn spectre_expressions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with('*') {
+            out.push_str(line);
+        } else {
+            out.push_str(&line.replace(['{', '}'], "'"));
+        }
+    }
+    out
+}
+
 fn declare_subckt_params(n: &mut Netlist, notes: &mut Vec<String>) {
     let mut passed: HashMap<String, Vec<(String, String)>> = HashMap::new();
     fn collect(items: &[Line], passed: &mut HashMap<String, Vec<(String, String)>>) {
@@ -1606,6 +1624,47 @@ mod tests {
             lines(&t).contains(&".subckt opamp 1 2 3 Aol=100K GBW=10Meg"),
             "{:?}",
             lines(&t)
+        );
+    }
+
+    /// Every Spectre release tried reads `{rsh}` as an unknown parameter
+    /// `[rsh]` in SPICE mode and `'rsh'` as the expression.
+    #[test]
+    fn spectre_gets_expressions_in_quotes() {
+        let t = tr(
+            "t\n* a {comment} stays\n.param rsh=1k g={2*rsh}\nR1 a 0 {rsh}\nR2 a 0 r={g/2}\n.op\n",
+            Target::Spectre,
+        );
+        let l = lines(&t);
+        assert!(l.contains(&".param rsh=1k g='2*rsh'"), "{l:?}");
+        assert!(l.contains(&"R1 a 0 'rsh'"), "{l:?}");
+        assert!(l.contains(&"R2 a 0 r='g/2'"), "{l:?}");
+        assert!(l.contains(&"* a {comment} stays"), "{l:?}");
+        assert!(
+            t.notes.iter().any(|n| n.contains("single quotes")),
+            "{:?}",
+            t.notes
+        );
+        // Other simulators keep braces.
+        let t = tr("t\nR1 a 0 {rsh}\n.param rsh=1k\n.op\n", Target::Ngspice);
+        assert!(lines(&t).contains(&"R1 a 0 {rsh}"));
+    }
+
+    /// Spectre runs `.meas` in SPICE mode (19.1 to 25.1, results in its
+    /// `.measure` file), in the same normalized form as ngspice.
+    #[test]
+    fn spectre_measures_are_normalized_like_ngspice() {
+        let t = tr(
+            "t\nV1 a 0 1\nR1 a 0 1k\n.tran 1m\n.meas tran vend FIND V(a) AT 0.5m\n.meas tran half PARAM vend/2\n",
+            Target::Spectre,
+        );
+        let l = lines(&t);
+        assert!(l.contains(&".meas tran vend FIND V(a) AT=0.5m"), "{l:?}");
+        assert!(l.contains(&".meas tran half PARAM='vend/2'"), "{l:?}");
+        assert!(
+            !t.notes.iter().any(|n| n.contains("recent releases")),
+            "{:?}",
+            t.notes
         );
     }
 

@@ -121,6 +121,8 @@ struct TaskFile {
     analysis: Option<String>,
     #[serde(default)]
     corners: Option<CornerSet>,
+    #[serde(default)]
+    pdk: Option<String>,
     max_steps: u32,
     #[serde(default = "yes")]
     lint: bool,
@@ -147,6 +149,10 @@ pub struct Task {
     pub analysis: Option<String>,
     /// Corners the specs must hold at, when the task names any.
     pub corners: Option<CornerSet>,
+    /// The kind of PDK the task's circuits are drawn in (`ihp-sg13g2`). The
+    /// runner opts the project into a registered PDK of that kind, and
+    /// skips the task when there is none.
+    pub pdk: Option<String>,
     /// Model calls the agent may make.
     pub max_steps: u32,
     /// Whether lint errors fail the task.
@@ -262,6 +268,18 @@ pub fn load_task(dir: &Path) -> Result<Task, TaskError> {
         set.corners()
             .map_err(|e| task_err(&path, format!("corners: {e}")))?;
     }
+    if let Some(kind) = &f.pdk
+        && aispice_core::pdk::kit(kind).is_none()
+    {
+        let known: Vec<&str> = aispice_core::pdk::KITS.iter().map(|k| k.kind).collect();
+        return Err(task_err(
+            &path,
+            format!(
+                "pdk `{kind}` is not a kind of PDK aispice knows ({})",
+                known.join(", ")
+            ),
+        ));
+    }
     for c in &f.constraints {
         match c {
             Constraint::Value { equals, .. } => {
@@ -304,13 +322,26 @@ pub fn load_task(dir: &Path) -> Result<Task, TaskError> {
         specs,
         analysis: f.analysis,
         corners: f.corners,
+        pdk: f.pdk,
         max_steps: f.max_steps,
         lint: f.lint,
         constraints: f.constraints,
         dir: dir.to_path_buf(),
     };
-    if let Some(bad) = task.start_files().into_iter().find(|f| !safe_relative(f)) {
+    let files = task.start_files();
+    if let Some(bad) = files.iter().find(|f| !safe_relative(f)) {
         return Err(task_err(dir, format!("unusable file name `{bad}`")));
+    }
+    // The runner writes the project file from `pdk`, naming whichever PDK
+    // of that kind is registered where the suite runs.
+    if files.iter().any(|f| f == crate::pdk::PROJECT_FILE) {
+        return Err(task_err(
+            dir,
+            format!(
+                "files/{} is written by the runner; name the kind of PDK with `pdk` in task.toml",
+                crate::pdk::PROJECT_FILE
+            ),
+        ));
     }
     Ok(task)
 }
@@ -421,10 +452,32 @@ constraints = [
                 "id = \"i\"\ncircuit = \"x.asc\"\nconstraints = [{ kind = \"part_count\", min = 1 }]",
                 "either a symbol or a prefix",
             ),
+            (
+                "j",
+                "id = \"j\"\ncircuit = \"x.asc\"\npdk = \"acme-7\"",
+                "pdk `acme-7` is not a kind of PDK aispice knows (ihp-sg13g2)",
+            ),
         ] {
             let d = write_task(tmp.path(), id, &format!("{base}{extra}\n"));
             let e = load_task(&d).unwrap_err().to_string();
             assert!(e.contains(needle), "{id}: {e}");
         }
+    }
+
+    /// A task names the kind of PDK; the project file that opts into a
+    /// registered one is the runner's to write.
+    #[test]
+    fn a_task_names_its_pdk_kind_not_a_project_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = "id = \"ic\"\nprompt = \"x\"\ncircuit = \"ota.asc\"\nmax_steps = 5\npdk = \"ihp-sg13g2\"\n";
+        let d = write_task(tmp.path(), "ic", body);
+        assert_eq!(load_task(&d).unwrap().pdk.as_deref(), Some("ihp-sg13g2"));
+        std::fs::create_dir_all(d.join("files")).unwrap();
+        std::fs::write(d.join("files/aispice.toml"), "pdk = \"mine\"\n").unwrap();
+        let e = load_task(&d).unwrap_err().to_string();
+        assert!(
+            e.contains("files/aispice.toml is written by the runner"),
+            "{e}"
+        );
     }
 }

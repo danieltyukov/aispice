@@ -38,7 +38,7 @@ aispice eval --provider google --model gemini-3.1-flash-lite --jobs 1 --rpm 5 --
 
 ## What happens in one run
 
-1. The task's `files/` folder is copied into a new temporary project named after the task. A task without `files/` starts from an empty project.
+1. The task's `files/` folder is copied into a new temporary project named after the task. A task without `files/` starts from an empty project. A task that names a `pdk` gets an `aispice.toml` that opts the project into a registered PDK of that kind (`aispice pdk add`); where none is registered the task is skipped, not failed, and the report says why.
 2. The agent gets the task prompt as the user's message, the usual system prompt and tools, and the task's step budget (the number of model calls it may make). Edits are applied at once; nobody is asked to approve them.
 3. The project uses aispice's built-in symbols and embedded models only (the `embedded_models_only` runner setting), even when LTspice is installed, so results compare across machines. The agent's simulations and the judge's run on ngspice.
 4. The judge then:
@@ -73,6 +73,7 @@ The RC low-pass filter in rc.asc has its -3 dB corner near 1.6 kHz. ...
 circuit = "rc.asc"               # the file the result is judged on
 analysis = ".ac dec 50 10 1Meg"  # optional: the analysis the judge runs
 corners = { temperatures = [-40, 27, 125] }  # optional: specs must hold at every corner
+pdk = "ihp-sg13g2"               # optional: the kind of PDK the circuits are drawn in
 specs = """
 fc = bandwidth_3db(V(out)) in 9.5k..10.5k
 """
@@ -114,7 +115,7 @@ Constraints:
 ]
 ```
 
-The test suite plays every reference solution through the real tools and judge (`cargo test -p aispice-tools --test eval_suite`), which proves each task can be solved with ngspice and the built-in symbols. It also checks that a model which does nothing fails every task, and that every task file, starting circuit and spec table is valid.
+The test suite plays every reference solution through the real tools and judge (`cargo test -p aispice-tools --test eval_suite`), which proves each task can be solved with ngspice and the built-in symbols. It also checks that a model which does nothing fails every task, and that every task file, starting circuit and spec table is valid. The IC tasks need IHP SG13G2: with `AISPICE_PDK_IHP` pointing at its `ihp-sg13g2` folder their reference solutions are played too, and without it they are checked to be skipped.
 
 ## Adding a task
 
@@ -141,3 +142,6 @@ The test suite plays every reference solution through the real tools and judge (
 | `gain-bandwidth` | hard | Reach 26 dB and 100 kHz with op-amps whose GBW is 1 MHz, which takes two stages. |
 | `noise-tia` | medium | Choose a front-end resistor that meets an input noise current and an output noise voltage budget, proved with a noise analysis. |
 | `temp-corners` | medium | Choose C1 so an RC corner stays in band from -40 C to 125 C with a drifting resistor; judged at every temperature. |
+| `ic-comparator-ss` | medium | IHP SG13G2: resize a StrongARM comparator that decides in time at tt but not at ss, so it does at all 15 process and temperature corners. |
+| `ic-opamp-noise` | medium | IHP SG13G2: find the input-referred noise density of a two-stage op-amp at 1 kHz and 1 MHz with a noise analysis, without changing it. |
+| `ic-opamp-corners` | hard | IHP SG13G2: size a two-stage Miller op-amp for 50 dB, 20 MHz and 60 degrees of phase margin at every process corner from -40 C to 125 C. |

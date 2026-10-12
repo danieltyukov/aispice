@@ -19,8 +19,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// The crate's folder: as cargo sets it for the run, else where it was at
+/// build time. The Spectre tests run where the SSH keys are, which need not
+/// be where the test binary was built.
 pub fn crate_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
 pub fn deck(name: &str) -> String {

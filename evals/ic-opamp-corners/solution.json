@@ -1,0 +1,13 @@
+[
+  {"tools": [{"name": "read_schematic", "input": {"circuit": "opamp.asc"}}]},
+  {"tools": [{"name": "check_specs", "input": {"circuit": "opamp.asc", "specs": "gain = gain_db_at(V(out), 10) >= 50\ngbw = unity_gain_freq(V(out)) >= 20Meg\npm = phase_margin(V(out)) >= 60", "corners": {"process": ["tt", "ss", "ff", "sf", "fs"], "temperatures": [-40, 27, 125]}}}]},
+  {"tools": [{"name": "edit_schematic", "input": {"circuit": "opamp.asc", "reason": "More first-stage current for bandwidth at ss and 125 C; a stronger second stage and a faster mirror for phase margin at ff and -40 C", "edits": [
+    {"op": "set_value", "name": "IB", "value": "18u"},
+    {"op": "set_attr", "name": "M3", "key": "SpiceLine", "value": "w=2u l=0.5u ng=1 m=1"},
+    {"op": "set_attr", "name": "M4", "key": "SpiceLine", "value": "w=2u l=0.5u ng=1 m=1"},
+    {"op": "set_attr", "name": "M6", "key": "SpiceLine", "value": "w=7.75u l=0.5u ng=1 m=8"},
+    {"op": "set_attr", "name": "M7", "key": "SpiceLine", "value": "w=6u l=1u ng=1 m=4"}
+  ]}}]},
+  {"tools": [{"name": "check_specs", "input": {"circuit": "opamp.asc", "corners": {"process": ["tt", "ss", "ff", "sf", "fs"], "temperatures": [-40, 27, 125]}}}]},
+  {"answer": "At the start the op-amp missed 20 MHz at ss/125C (15.2 MHz) and 60 degrees at ff/-40C (57 degrees). Raising IB to 18 uA gives the first stage more gm, so the unity-gain frequency at ss and 125 C reaches about 21 MHz. That also moves the bandwidth up at ff and -40 C, so the second stage needs more transconductance: M6 now has 8 fingers and M7 sinks 4/3 of its old current per IB, which pushes the output pole and the right-half-plane zero out, and shorter mirror devices M3 and M4 (2/0.5 um) move the mirror pole up. check_specs at all 15 corners: gain at least 52.8 dB (fs/125C), unity-gain frequency at least 21.3 MHz (ss/125C), phase margin at least 66 degrees (ff/-40C)."}
+]
