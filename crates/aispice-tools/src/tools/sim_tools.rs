@@ -53,7 +53,7 @@ fn parse_measures(lines: &[String]) -> Result<Vec<(String, Measure)>, String> {
 }
 
 /// Specs for a circuit: given text, or the `<circuit>.specs` file beside it.
-fn load_specs(
+pub(crate) fn load_specs(
     ws: &Workspace,
     circuit: &str,
     given: Option<&str>,
@@ -633,7 +633,7 @@ fn corner_variants(
 /// or the post-layout one, which corner rewrites treat the same way since
 /// its PDK model header is untouched.
 #[allow(clippy::too_many_arguments)]
-async fn corner_report(
+pub(crate) async fn corner_report(
     ws: &Workspace,
     p: &crate::project::Project,
     circuit: &str,

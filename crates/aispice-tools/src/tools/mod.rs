@@ -5,8 +5,10 @@
 //! the `ToolData` union in `app/src/ipc/types.ts`.
 
 pub(crate) mod analysis;
+mod chip_tools;
 mod gmid_tools;
 mod layout_tools;
+mod macro_export;
 mod macro_tools;
 mod pdk_tools;
 mod render_tools;
@@ -19,8 +21,10 @@ use crate::workspace::Workspace;
 use aispice_agent::{Registry, ToolOutput};
 use std::sync::Arc;
 
+pub use chip_tools::*;
 pub use gmid_tools::*;
 pub use layout_tools::*;
+pub use macro_export::*;
 pub use macro_tools::*;
 pub use pdk_tools::*;
 pub use render_tools::*;
@@ -60,6 +64,8 @@ pub fn registry(ws: Arc<Workspace>) -> Registry {
     r.register(LvsTool { ws: ws.clone() });
     r.register(ExtractTool { ws: ws.clone() });
     r.register(CheckMacro { ws: ws.clone() });
+    r.register(MacroExport { ws: ws.clone() });
+    r.register(ChipTool { ws: ws.clone() });
     r.register(XschemImport { ws: ws.clone() });
     r.register(XschemExport { ws });
     r
