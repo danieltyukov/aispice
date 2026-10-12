@@ -41,7 +41,9 @@ pub const MAX_DEPTH: usize = 16;
 const MAX_SHEETS: usize = 256;
 /// Netlist text larger than this is an error.
 const MAX_TEXT: usize = 16 << 20;
-/// Point-on-wire tests per sheet before the sheet is refused as too complex.
+/// Point-on-wire tests in one conversion, every sheet together, before it
+/// is refused as too complex. Per conversion, not per sheet: the sheets of
+/// one hierarchy would otherwise multiply it.
 const MAX_TESTS: usize = 50_000_000;
 /// Pins on one sheet, all instances together, before the sheet is refused
 /// as too complex.
@@ -70,6 +72,9 @@ pub struct Options {
     pub env: Env,
     /// How deep subcircuit schematics may nest.
     pub max_depth: usize,
+    /// Point-on-wire tests in the whole conversion before it is refused as
+    /// too complex.
+    pub max_tests: usize,
 }
 
 impl Default for Options {
@@ -77,6 +82,7 @@ impl Default for Options {
         Self {
             env: Env::new("ngspice"),
             max_depth: MAX_DEPTH,
+            max_tests: MAX_TESTS,
         }
     }
 }
@@ -147,6 +153,7 @@ pub fn netlist(
         cache: HashMap::new(),
         out: XNetlist::default(),
         written: 0,
+        tests: 0,
         seen: Default::default(),
         globals: Vec::new(),
         device_models: Vec::new(),
@@ -180,6 +187,9 @@ struct Netlister<'a> {
     out: XNetlist,
     /// Bytes of element lines so far, against [`MAX_TEXT`].
     written: usize,
+    /// Point-on-wire tests so far, all sheets together, against
+    /// [`Options::max_tests`].
+    tests: usize,
     /// Findings already reported, so each is reported once.
     seen: std::collections::HashSet<(String, String)>,
     globals: Vec<String>,
@@ -338,18 +348,18 @@ impl<'a> Netlister<'a> {
         }
         let mut uf = UnionFind::new(total);
         let index = SegIndex::new(&wires);
-        let mut tests = 0usize;
+        let max_tests = self.opts.max_tests;
         let complex = || NetlistError::TooComplex(sheet.path.display().to_string());
         for (k, w) in wires.iter().enumerate() {
             for (x, y) in [(w[0], w[1]), (w[2], w[3])] {
                 for n in index.at(x, y) {
-                    tests += 1;
+                    self.tests += 1;
                     if n != k && touch(&wires[n], x, y) {
                         uf.union(k, n);
                     }
                 }
             }
-            if tests > MAX_TESTS {
+            if self.tests > max_tests {
                 return Err(complex());
             }
         }
@@ -361,7 +371,7 @@ impl<'a> Netlister<'a> {
             for (j, &(x, y)) in inst.points.iter().enumerate() {
                 let id = pin_base[i] + j;
                 for n in index.at(x, y) {
-                    tests += 1;
+                    self.tests += 1;
                     if touch(&wires[n], x, y) {
                         uf.union(id, n);
                     }
@@ -385,7 +395,7 @@ impl<'a> Netlister<'a> {
                     uf.union(pin_base[i] + k, pin_base[i] + j);
                 }
             }
-            if tests > MAX_TESTS {
+            if self.tests > max_tests {
                 return Err(complex());
             }
         }
@@ -764,15 +774,16 @@ impl<'a> Netlister<'a> {
     fn element(&mut self, sheet: &Sheet, i: usize, marker: bool) -> String {
         let inst = &sheet.insts[i];
         let env = self.opts.env.clone();
+        let format = props::get(&inst.raw.props, "format").or_else(|| inst.sym.attr("format"));
+        let Some(format) = format.filter(|f| !f.is_empty()) else {
+            return String::new();
+        };
         let mut ex = Expander {
             inst,
             sheet,
             env: &env,
             problems: Vec::new(),
-        };
-        let format = props::get(&inst.raw.props, "format").or_else(|| inst.sym.attr("format"));
-        let Some(format) = format.filter(|f| !f.is_empty()) else {
-            return String::new();
+            tcl_format: format.starts_with("tcleval("),
         };
         let mut line = ex.expand(&format);
         if line.len() > MAX_ELEMENT || self.written > MAX_TEXT {
@@ -1141,6 +1152,8 @@ struct Expander<'s, 'f> {
     sheet: &'s Sheet<'f>,
     env: &'s Env,
     problems: Vec<String>,
+    /// The format is `tcleval(...)`: Tcl reads its tokens' values.
+    tcl_format: bool,
 }
 
 impl Expander<'_, '_> {
@@ -1189,6 +1202,20 @@ impl Expander<'_, '_> {
     }
 
     fn token(&mut self, t: &str, out: &mut String) {
+        // `@savecurrent` is one of xschem's predefined tokens from 3.4.5 on
+        // (`devices/vsource.sym`: `@name @pinlist @value@savecurrent`): it
+        // writes nothing, or a `.save` of the instance's current when the
+        // instance's `savecurrent`, else the template's, is true. Up to
+        // 3.4.4 xschem's symbols read it inside `tcleval(...)` as the
+        // attribute's text (`[expr {@savecurrent ? ...}]`), which a Tcl
+        // format keeps, so each xschem's own symbols netlist as it does.
+        if t == "@savecurrent" && !self.tcl_format {
+            let flag = self.value("savecurrent").unwrap_or_default();
+            if props::reads_true(&flag) {
+                let _ = write!(out, "\n.save I( ?1 {} )", self.inst.name);
+            }
+            return;
+        }
         let key = &t[1..];
         let (value, exists) = if t == "@spiceprefix" {
             match tok(&self.inst.raw.props, "spiceprefix", self.env) {

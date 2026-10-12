@@ -46,6 +46,18 @@ pub fn get(props: &str, key: &str) -> Option<String> {
     found
 }
 
+/// Whether xschem reads the value `v` as true, as its `strboolcmp(v,
+/// "true")` does: a number other than zero, or `true`, `on` or `yes` in any
+/// case.
+pub fn reads_true(v: &str) -> bool {
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) {
+        return v.bytes().any(|b| b != b'0');
+    }
+    ["true", "on", "yes"]
+        .iter()
+        .any(|t| v.eq_ignore_ascii_case(t))
+}
+
 /// Whether `key` is set to a true value (`true`, `1`, `yes`, any case).
 pub fn is_true(props: &str, key: &str) -> bool {
     get(props, key).is_some_and(|v| {

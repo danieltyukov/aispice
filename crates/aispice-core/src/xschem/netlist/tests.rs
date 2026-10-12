@@ -546,3 +546,139 @@ fn symbols_with_very_many_pins_are_refused_quickly() {
     assert!(matches!(res, Err(NetlistError::TooComplex(_))), "{res:?}");
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
+
+/// xschem 3.4.5 and later write `@savecurrent` as a predefined token in a
+/// plain format: nothing when the flag is false, a `.save` of the current
+/// when it is true, never the flag's text. (aispice's built-in symbols are
+/// 3.4.4's Tcl form, covered by `ihp_devices_and_tcl`.)
+#[test]
+fn savecurrent_is_a_token_in_plain_formats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    // devices/vsource.sym and ammeter.sym as xschem 3.4.5 to 3.4.7 ship them.
+    std::fs::write(
+        dir.join("vsource.sym"),
+        r#"v {xschem version=3.4.5 file_version=1.2}
+K {type=vsource
+format="@name @pinlist @value@savecurrent"
+template="name=V1 value=3 savecurrent=false"}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=inout}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=inout}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("ammeter.sym"),
+        r#"v {xschem version=3.4.5 file_version=1.2}
+K {type=ammeter
+format="@name @pinlist 0 @savecurrent"
+template="name=Vmeas savecurrent=true spice_ignore=0"}
+B 5 -2.5 -32.5 2.5 -27.5 {name=plus dir=inout}
+B 5 -2.5 27.5 2.5 32.5 {name=minus dir=inout}
+"#,
+    )
+    .unwrap();
+    let top = r#"v {xschem version=3.4.5 file_version=1.2}
+C {vsource.sym} 0 0 0 0 {name=Vgs value=0.75}
+C {vsource.sym} 100 0 0 0 {name=Vds value=1.5 savecurrent=true}
+C {vsource.sym} 200 0 0 0 {name=Von value=2 savecurrent=On}
+C {vsource.sym} 300 0 0 0 {name=Vno value=4 savecurrent=0}
+C {ammeter.sym} 400 0 0 0 {name=Vd}
+C {ammeter.sym} 500 0 0 0 {name=Voff savecurrent=false}
+"#;
+    let f = file::parse(top).unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let n = netlist(&dir.join("tb.sch"), &f, &r, &Options::default()).unwrap();
+    assert!(n.findings.is_empty(), "{:?}", n.findings);
+    assert!(
+        !n.text.contains("false") && !n.text.contains("true"),
+        "{}",
+        n.text
+    );
+    let net = parse(&n.text);
+    for (name, value) in [
+        ("Vgs", "0.75"),
+        ("Vds", "1.5"),
+        ("Von", "2"),
+        ("Vno", "4"),
+        ("Vd", "0"),
+        ("Voff", "0"),
+    ] {
+        let e = net
+            .element(name)
+            .unwrap_or_else(|| panic!("{name}\n{}", n.text));
+        assert_eq!(e.rest, value, "{name}\n{}", n.text);
+    }
+    let l = lines(&n);
+    for saved in ["vds", "von", "vd"] {
+        let want = format!(".save i({saved})");
+        assert!(l.contains(&want), "{want}\n{}", n.text);
+    }
+    for unsaved in ["vgs", "vno", "voff"] {
+        assert!(!n.text.contains(&format!("i({unsaved})")), "{}", n.text);
+    }
+}
+
+#[test]
+fn xschem_reads_true_as_strboolcmp_does() {
+    for t in ["true", "TRUE", "on", "Yes", "1", "007"] {
+        assert!(props::reads_true(t), "{t}");
+    }
+    for f in ["false", "off", "no", "0", "000", "", "maybe", " true"] {
+        assert!(!props::reads_true(f), "{f}");
+    }
+}
+
+/// The point-on-wire budget covers a whole conversion: two sheets that
+/// each fit alone are refused together, so a hierarchy cannot multiply it.
+#[test]
+fn the_wire_test_budget_is_per_conversion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    // 100 wires meeting at one point, on each sheet.
+    let stacked: String = (0..100)
+        .map(|i| format!("N 0 0 {} {} {{}}\n", 1000 + i * 10, 2000 + i * 10))
+        .collect();
+    std::fs::write(
+        dir.join("sub.sym"),
+        "v {xschem version=3.4.4 file_version=1.2}\nK {type=subcircuit\nformat=\"@name @pinlist @symname\"\ntemplate=\"name=x1\"}\nB 5 -2.5 -2.5 2.5 2.5 {name=A dir=inout}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.sch"),
+        format!(
+            "v {{xschem version=3.4.4 file_version=1.2}}\nC {{devices/iopin.sym}} 0 0 0 0 {{name=p1 lab=A}}\n{stacked}"
+        ),
+    )
+    .unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let run = |max_tests: usize, text: &str, name: &str| {
+        let f = file::parse(text).unwrap();
+        let opts = Options {
+            max_tests,
+            ..Options::default()
+        };
+        netlist(&dir.join(name), &f, &r, &opts)
+    };
+    let alone = format!("v {{xschem version=3.4.4 file_version=1.2}}\n{stacked}");
+    let both = format!(
+        "v {{xschem version=3.4.4 file_version=1.2}}\nC {{sub.sym}} -500 -500 0 0 {{name=x1}}\n{stacked}"
+    );
+    // The smallest budget one sheet of these wires needs.
+    let (mut lo, mut hi) = (1usize, 10_000_000usize);
+    assert!(run(hi, &alone, "alone.sch").is_ok());
+    assert!(run(hi, &both, "top.sch").is_ok());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if run(mid, &alone, "alone.sch").is_ok() {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let one = lo;
+    assert!(one > 1000, "{one}");
+    // Half as much again holds either sheet, but not both together.
+    let err = run(one * 3 / 2, &both, "top.sch").unwrap_err();
+    assert!(matches!(err, NetlistError::TooComplex(_)), "{err}");
+}
