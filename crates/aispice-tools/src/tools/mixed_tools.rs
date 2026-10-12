@@ -350,7 +350,7 @@ pub struct TrimInput {
     pub first: i64,
     pub last: i64,
     /// The code without trimming, for the untrimmed yield (default: the
-    /// middle of the range).
+    /// value the circuit sets, or the middle of the range).
     #[serde(default)]
     pub nominal: Option<i64>,
     /// Specs to meet; default: the `<circuit>.specs` file.
@@ -527,9 +527,14 @@ async fn trim_check(
             codes,
         });
     }
-    let nominal = input
-        .nominal
-        .unwrap_or(input.first + (input.last - input.first) / 2);
+    // Untrimmed: the code the circuit sets, when it is in the range.
+    let nominal = input.nominal.unwrap_or_else(|| {
+        sweep::get_value(&netlist, &input.param)
+            .ok()
+            .map(|v| v.round() as i64)
+            .filter(|c| (input.first..=input.last).contains(c))
+            .unwrap_or(input.first + (input.last - input.first) / 2)
+    });
     let r = trim::summarize(&per_sample, nominal);
     let mut t = format!("{}\n", r.summary());
     if let Some(f) = &first_failure {

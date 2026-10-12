@@ -323,3 +323,65 @@ async fn a_trim_range_covers_every_sample_or_says_which_not() {
     let out = call(&tool, bad).await;
     assert!(out.is_error, "{}", out.text_content());
 }
+
+/// The IHP bandgap template with a 5-bit trim of its output resistor R3 in
+/// 0.6% steps: device mismatch spreads vref far beyond a 1% window, and at
+/// every process corner and mismatch sample some code brings it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_bandgap_trims_into_range_at_every_corner_and_mismatch_sample() {
+    let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP") else {
+        eprintln!("skipped: AISPICE_PDK_IHP is not set");
+        return;
+    };
+    if !have("ngspice") {
+        eprintln!("skipped: ngspice not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut pdks = Registry::default();
+    pdks.add("ihp", Path::new(&pdk)).unwrap();
+    std::fs::write(dir.path().join(PROJECT_FILE), "pdk = \"ihp\"\n").unwrap();
+    let asc = String::from_utf8(
+        aispice_tools::templates::find("bandgap")
+            .unwrap()
+            .asc
+            .to_vec(),
+    )
+    .unwrap()
+    .replace(
+        "SYMATTR SpiceLine w=0.5u l=26.7u b=0 m=1",
+        "SYMATTR SpiceLine w=0.5u l={26.7u*(1+(trim-16)*0.006)} b=0 m=1",
+    )
+    .replace(
+        "TEXT 48 672 Left 2 !.dc temp -40 125 5",
+        "TEXT 48 672 Left 2 !.dc temp -40 125 5\nTEXT 48 712 Left 2 !.param trim=16",
+    );
+    assert!(asc.contains("(trim-16)") && asc.contains(".param trim=16"));
+    std::fs::write(dir.path().join("bandgap.asc"), asc).unwrap();
+    let ws = Workspace::new();
+    ws.runner.set_config(RunnerConfig {
+        pdks,
+        embedded_models_only: true,
+        ..RunnerConfig::default()
+    });
+    ws.set_project(Project::open(dir.path(), Default::default()).unwrap());
+    let ws = Arc::new(ws);
+    let out = call(
+        &TrimCheck { ws },
+        json!({
+            "circuit": "bandgap.asc", "param": "trim", "first": 0, "last": 31,
+            "specs": "vref = value_at(V(vref), 27) in 0.597..0.603",
+            "corners": {"process": ["tt", "ff"]},
+            "mismatch": "local", "runs": 4, "seed": 1, "simulator": "ngspice"
+        }),
+    )
+    .await;
+    let text = out.text_content();
+    println!("{text}");
+    assert!(!out.is_error, "{text}");
+    let r = &out.data.unwrap()["value"];
+    assert_eq!(r["samples"], 8, "{text}");
+    assert_eq!(r["all_covered"], true, "{text}");
+    assert_eq!(r["nominal_code"], 16);
+    assert!(r["nominal_pass"].as_u64().unwrap() < 8, "{text}");
+}
