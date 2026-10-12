@@ -354,6 +354,14 @@ impl SchText {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Tests only (feature `testing`): text that is not an export, such as
+    /// IHP's own test benches, which aispice's tests hand to xschem to check
+    /// aispice's netlister against it. No product build has this.
+    #[cfg(feature = "testing")]
+    pub fn trusted_for_tests(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
 }
 
 impl std::ops::Deref for SchText {

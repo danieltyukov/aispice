@@ -29,7 +29,7 @@ use aispice_core::symbol::SymbolLibrary;
 use aispice_core::xschem::import::clean;
 use aispice_core::xschem::safety;
 use aispice_sim::pdk::Pdk;
-use aispice_sim::xschem::{Run, Sandbox};
+use aispice_sim::xschem::{Run, Sandbox, SchText};
 use aispice_tools::templates;
 use aispice_tools::xschem::{
     Effort, Setup, XschemCheck, check_export, export_schematic, import_file, import_xschem_check,
@@ -107,7 +107,9 @@ async fn xschem_netlist(
         models_xyce: Some(pdk.join("libs.tech/xyce/models")),
     };
     run.library.push(sch.parent().unwrap().to_path_buf());
-    let text = std::fs::read_to_string(sch).unwrap();
+    // IHP's own bench, trusted test input: only test code may wrap text
+    // that is not an export.
+    let text = SchText::trusted_for_tests(std::fs::read_to_string(sch).unwrap());
     let name = sch.file_name().unwrap().to_str().unwrap();
     aispice_sim::xschem::netlist(x, sandbox, name, &text, &run, cancel)
         .await

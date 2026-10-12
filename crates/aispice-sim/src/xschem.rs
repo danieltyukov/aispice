@@ -3,18 +3,18 @@
 //! xschem evaluates Tcl from the files it opens: property values, symbol
 //! formats and texts, symbols it loads by library path, and the rc files it
 //! sources. So aispice never gives it a file it did not write: [`netlist`]
-//! takes the schematic's text, not a path, and writes it into a fresh
+//! takes an export's text ([`SchText`], which only the export writer makes,
+//! keeping every value literal), not a path, and writes it into a fresh
 //! private folder itself. The only caller in the product is the check of an
-//! export, whose text comes from the export writer that keeps every value
-//! literal (`aispice_core::xschem::export`); an imported schematic is never
-//! run through xschem.
+//! export; an imported schematic is never run through xschem.
 //!
 //! The run is sandboxed as defense in depth, in this order
 //! ([`Sandbox::select`]):
 //!
 //! - bubblewrap (`bwrap`), when it can make its namespaces on this machine:
-//!   new user, PID, IPC, UTS and network namespaces (no network at all), a
-//!   fresh root on which only these are visible: the system folders (`/usr`
+//!   new user, PID, IPC, UTS and network namespaces (no network at all), no
+//!   further user namespace inside (`--disable-userns`, on bubblewrap 0.8
+//!   and later, which has it), a fresh root on which only these are visible: the system folders (`/usr`
 //!   and the links into it) read-only, xschem itself and its shared folder
 //!   read-only, the library and model folders and the private input folder
 //!   read-only, the rc file read-only, a private `/tmp` (and the home inside
@@ -26,8 +26,10 @@
 //! - when neither works, xschem is not run, and the caller reports the file
 //!   as not verified with xschem.
 //!
-//! Either way the process gets a file size and address space limit, dies
-//! with aispice, starts in its own process group, and is run:
+//! Either way the process gets a file size, address space and process count
+//! limit, keeps no descriptor of aispice's but stdin, stdout and stderr,
+//! dies with aispice, starts in its own process group, which is killed
+//! when it exits, and is run:
 //!
 //! - from an argument vector, with stdin closed, a timeout and capped
 //!   output, headless (`-x`: no window, `-q`: quit when done), in the
@@ -40,14 +42,18 @@
 //!   xschem sources no other rc file: not `~/.xschem/xschemrc`, not an
 //!   `xschemrc` in the working folder;
 //! - only when every path xschem sees consists of letters, digits and
-//!   `/ . _ - + , = @` (xschem splices file names into Tcl commands).
+//!   `/ . _ - + , = @` (xschem splices file names into Tcl commands): the
+//!   library and model folders, and the private folders aispice makes
+//!   under `TMPDIR`.
 //!
 //! The netlist it writes is read back through one descriptor opened without
-//! following a symlink, so nothing left behind in the writable folder can
-//! point the read elsewhere.
+//! following a symlink and without blocking (a fifo left in its place
+//! cannot stall the read), so nothing left behind in the writable folder
+//! can point the read elsewhere.
 
 use crate::backend::process::{self, Confinement, Landlock, ProcessSpec};
 use crate::backend::{SimError, which};
+pub use aispice_core::xschem::export::SchText;
 use aispice_core::xschem::safety::safe_path;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -64,6 +70,11 @@ const TMP_BYTES: u64 = 64 << 20;
 const MAX_FILE: u64 = 64 << 20;
 /// xschem's address space (`RLIMIT_AS`).
 const MAX_MEMORY: u64 = 4 << 30;
+/// Processes and threads xschem and its helpers may add to what the user
+/// runs (`RLIMIT_NPROC`, relative): a shell, awk and gzip need a handful.
+const NPROC_HEADROOM: u64 = 128;
+/// The first bubblewrap release with `--disable-userns`.
+const BWRAP_DISABLE_USERNS: (u32, u32, u32) = (0, 8, 0);
 
 /// Where things appear inside the bubblewrap namespace. None of these exist
 /// outside it; the Landlock path uses the real host folders instead.
@@ -137,8 +148,13 @@ impl Xschem {
 /// The way xschem is confined on this machine, chosen by [`Sandbox::select`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sandbox {
-    /// bubblewrap, with its own namespaces. The `PathBuf` is `bwrap`.
-    Bwrap(PathBuf),
+    /// bubblewrap, with its own namespaces. `disable_userns` when this
+    /// bubblewrap (0.8 or later) can stop the sandbox making user
+    /// namespaces of its own.
+    Bwrap {
+        program: PathBuf,
+        disable_userns: bool,
+    },
     /// Landlock, applied in a pre_exec hook (Linux only). `abi` is the
     /// kernel's Landlock ABI, kept only for messages and tests.
     Landlock { abi: i32 },
@@ -154,10 +170,20 @@ impl Sandbox {
     pub async fn select(cancel: &CancellationToken) -> Result<Self, String> {
         let mut why = Vec::new();
         match which("bwrap") {
-            Some(bwrap) => match probe_bwrap(&bwrap, cancel).await {
-                Ok(()) => return Ok(Sandbox::Bwrap(bwrap)),
-                Err(e) => why.push(format!("bubblewrap could not start a sandbox: {e}")),
-            },
+            Some(bwrap) => {
+                let disable_userns = bwrap_version(&bwrap, cancel)
+                    .await
+                    .is_some_and(|v| v >= BWRAP_DISABLE_USERNS);
+                match probe_bwrap(&bwrap, disable_userns, cancel).await {
+                    Ok(()) => {
+                        return Ok(Sandbox::Bwrap {
+                            program: bwrap,
+                            disable_userns,
+                        });
+                    }
+                    Err(e) => why.push(format!("bubblewrap could not start a sandbox: {e}")),
+                }
+            }
             None => why.push("bubblewrap (bwrap) is not installed".into()),
         }
         match landlock_choice() {
@@ -197,10 +223,34 @@ fn landlock_choice() -> Result<i32, String> {
     Err("this platform has no Landlock".into())
 }
 
-/// Start an empty bubblewrap sandbox and run `true` in it: whether this
-/// machine lets it make its namespaces (some kernels restrict unprivileged
-/// user namespaces).
-async fn probe_bwrap(bwrap: &Path, cancel: &CancellationToken) -> Result<(), String> {
+/// bubblewrap's version, from `bwrap --version` ("bubblewrap 0.9.0").
+async fn bwrap_version(bwrap: &Path, cancel: &CancellationToken) -> Option<(u32, u32, u32)> {
+    let mut spec = ProcessSpec::new(bwrap, std::env::temp_dir()).arg("--version");
+    spec.clear_env = true;
+    let out = process::run(&spec, Duration::from_secs(10), cancel)
+        .await
+        .ok()?;
+    parse_bwrap_version(&out.stdout)
+}
+
+fn parse_bwrap_version(text: &str) -> Option<(u32, u32, u32)> {
+    let v = text.split_whitespace().nth(1)?;
+    let mut parts = v.split('.').map(|p| p.parse::<u32>().ok());
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+    ))
+}
+
+/// Start an empty bubblewrap sandbox, with the flags a run would use, and
+/// run `true` in it: whether this machine lets it make its namespaces
+/// (some kernels restrict unprivileged user namespaces).
+async fn probe_bwrap(
+    bwrap: &Path,
+    disable_userns: bool,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
     let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let rc = tmp.path().join("rc");
     std::fs::write(&rc, "").map_err(|e| e.to_string())?;
@@ -211,7 +261,7 @@ async fn probe_bwrap(bwrap: &Path, cancel: &CancellationToken) -> Result<(), Str
     };
     let truth = which("true").unwrap_or_else(|| PathBuf::from("/usr/bin/true"));
     let mut spec = ProcessSpec::new(bwrap, tmp.path());
-    spec.args = bwrap_args(&view, &[], &truth, &[]);
+    spec.args = bwrap_args(&view, &[], &truth, &[], disable_userns);
     spec.clear_env = true;
     let out = process::run(&spec, Duration::from_secs(10), cancel)
         .await
@@ -252,12 +302,14 @@ fn under_system(p: &Path) -> bool {
 }
 
 /// The bubblewrap arguments that run `program args` seeing only `view`, the
-/// system folders and `env`.
+/// system folders and `env`. `disable_userns` adds bubblewrap's refusal of
+/// nested user namespaces and its check that it held.
 pub fn bwrap_args(
     view: &View,
     env: &[(String, OsString)],
     program: &Path,
     args: &[OsString],
+    disable_userns: bool,
 ) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     let mut push = |items: &[&dyn AsRef<std::ffi::OsStr>]| {
@@ -272,6 +324,9 @@ pub fn bwrap_args(
         &"--new-session",
         &"--clearenv",
     ]);
+    if disable_userns {
+        push(&[&"--disable-userns", &"--assert-userns-disabled"]);
+    }
     for (k, v) in env {
         push(&[&"--setenv", k, v]);
     }
@@ -401,6 +456,7 @@ fn limits() -> Confinement {
         landlock: None,
         rlimit_fsize: Some(MAX_FILE),
         rlimit_as: Some(MAX_MEMORY),
+        nproc_headroom: Some(NPROC_HEADROOM),
     }
 }
 
@@ -490,7 +546,10 @@ pub fn netlist_command(
         .unwrap_or_else(|_| x.program.clone());
     let trusted = trusted_roots(run);
     match sandbox {
-        Sandbox::Bwrap(bwrap) => {
+        Sandbox::Bwrap {
+            program: bwrap,
+            disable_userns,
+        } => {
             // bubblewrap's own network, IPC and PID namespaces stand in for
             // seccomp and Landlock; it shows xschem the private input folder
             // and the trusted roots read-only.
@@ -511,7 +570,7 @@ pub fn netlist_command(
             );
             let args = xschem_args(Path::new(SANDBOX_RC), Path::new(SANDBOX_OUT), input);
             let mut spec = ProcessSpec::new(bwrap, &dirs.out);
-            spec.args = bwrap_args(&view, &env, &program, &args);
+            spec.args = bwrap_args(&view, &env, &program, &args, *disable_userns);
             spec.clear_env = true;
             spec.confine = Some(limits());
             spec
@@ -576,7 +635,9 @@ fn write_new(p: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// the sandbox, and a process it left behind could still change it, so the
 /// file is opened once without following a symlink and everything else (it
 /// is a plain file, its size, its text) is read through that one descriptor,
-/// never by the path again.
+/// never by the path again. The open does not block, so a fifo made in its
+/// place (bubblewrap's writable folder allows one) is refused as not a
+/// plain file instead of stalling the read; a plain file reads the same.
 fn read_netlist(path: &Path, log: &str) -> Result<String, SimError> {
     use std::io::Read as _;
     #[cfg(unix)]
@@ -584,7 +645,7 @@ fn read_netlist(path: &Path, log: &str) -> Result<String, SimError> {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
     };
     #[cfg(not(unix))]
@@ -629,7 +690,24 @@ fn read_netlist(path: &Path, log: &str) -> Result<String, SimError> {
     String::from_utf8(bytes).map_err(|_| SimError::NoOutput("xschem's netlist is not text".into()))
 }
 
-/// Netlist `text`, a schematic aispice wrote itself, with xschem inside
+/// The first host path one run hands xschem that has characters xschem
+/// would read as Tcl. The run's folders sit under `TMPDIR`, which aispice
+/// does not choose; under Landlock xschem sees all of them, under
+/// bubblewrap the input at its own path.
+fn unsafe_run_path<'p>(dirs: &'p Dirs, input: &'p Path) -> Option<&'p Path> {
+    [
+        dirs.out.as_path(),
+        dirs.rc.as_path(),
+        dirs.home.as_path(),
+        dirs.tmp.as_path(),
+        dirs.staging.as_path(),
+        input,
+    ]
+    .into_iter()
+    .find(|p| !safe_path(p))
+}
+
+/// Netlist `text`, an export aispice wrote itself, with xschem inside
 /// `sandbox`, and return the netlist text. There is no path parameter on
 /// purpose: aispice writes the file into a fresh private folder (`name` is
 /// only its file name), so xschem never opens a file it did not write. The
@@ -638,7 +716,7 @@ pub async fn netlist(
     x: &Xschem,
     sandbox: &Sandbox,
     name: &str,
-    text: &str,
+    text: &SchText,
     run: &Run,
     cancel: &CancellationToken,
 ) -> Result<String, SimError> {
@@ -658,13 +736,19 @@ pub async fn netlist(
         tmp: tmp.path().join("tmp"),
         staging: tmp.path().join("in"),
     };
+    let input = dirs.staging.join(name);
+    if let Some(p) = unsafe_run_path(&dirs, &input) {
+        return Err(SimError::Config(format!(
+            "xschem was not run: its private folder {} has characters xschem would read as Tcl; set TMPDIR to a folder of letters, digits and / . _ - + , = @",
+            p.display()
+        )));
+    }
     for d in [&dirs.out, &dirs.home, &dirs.tmp] {
         std::fs::create_dir(d).map_err(|e| SimError::Io(e.to_string()))?;
     }
     make_private_dir(&dirs.staging).map_err(|e| SimError::Io(e.to_string()))?;
     write_new(&dirs.rc, RC.as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
-    let input = dirs.staging.join(name);
-    write_new(&input, text.as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
+    write_new(&input, text.as_str().as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
     let spec = netlist_command(x, sandbox, &input, run, &dirs);
     let result = process::run(&spec, TIMEOUT, cancel).await?;
     read_netlist(&dirs.out.join("netlist.spice"), &result.combined())
@@ -733,12 +817,15 @@ mod tests {
             program: tmp.path().join("no-xschem"),
             share: None,
         };
-        let sandbox = Sandbox::Bwrap(tmp.path().join("no-bwrap"));
+        let sandbox = Sandbox::Bwrap {
+            program: tmp.path().join("no-bwrap"),
+            disable_userns: true,
+        };
         let err = netlist(
             &x,
             &sandbox,
             "a b.sch",
-            "v {xschem version=3.4.4 file_version=1.2}\n",
+            &SchText::trusted_for_tests("v {xschem version=3.4.4 file_version=1.2}\n"),
             &Run::default(),
             &CancellationToken::new(),
         )
@@ -774,9 +861,12 @@ mod tests {
         };
         let err = netlist(
             &x,
-            &Sandbox::Bwrap(broken),
+            &Sandbox::Bwrap {
+                program: broken,
+                disable_userns: false,
+            },
             "tb.sch",
-            "v {xschem version=3.4.4 file_version=1.2}\n",
+            &SchText::trusted_for_tests("v {xschem version=3.4.4 file_version=1.2}\n"),
             &Run::default(),
             &CancellationToken::new(),
         )
@@ -793,7 +883,10 @@ mod tests {
             program: PathBuf::from("/usr/bin/xschem"),
             share: Some(PathBuf::from("/usr/share/xschem")),
         };
-        let sandbox = Sandbox::Bwrap(PathBuf::from("/usr/bin/bwrap"));
+        let sandbox = Sandbox::Bwrap {
+            program: PathBuf::from("/usr/bin/bwrap"),
+            disable_userns: true,
+        };
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
         let pdk = dir.join("pdk/libs.tech/xschem");
@@ -825,12 +918,27 @@ mod tests {
         for flag in [
             "--unshare-all",
             "--unshare-user",
+            "--disable-userns",
+            "--assert-userns-disabled",
             "--die-with-parent",
             "--new-session",
             "--clearenv",
         ] {
             assert!(args.contains(&flag.to_string()), "{flag}: {args:?}");
         }
+        // The limits every run gets: file size, memory, process count.
+        assert!(confine.nproc_headroom.is_some());
+        // An older bubblewrap, without --disable-userns, gets neither flag.
+        let old = Sandbox::Bwrap {
+            program: PathBuf::from("/usr/bin/bwrap"),
+            disable_userns: false,
+        };
+        let old_args = netlist_command(&x, &old, &sch, &run, &d).args;
+        assert!(
+            !old_args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("userns"))
+        );
         // Read-only views of the system, the PDK and the private folder
         // holding the input; the one writable folder; a private, bounded
         // /tmp and home.
@@ -979,7 +1087,15 @@ mod tests {
             library: x.library(),
             ..Run::default()
         };
-        let text = netlist(&x, &sandbox, "rc.sch", sch, &run, &CancellationToken::new()).await;
+        let text = netlist(
+            &x,
+            &sandbox,
+            "rc.sch",
+            &SchText::trusted_for_tests(sch),
+            &run,
+            &CancellationToken::new(),
+        )
+        .await;
         if wrote_cwd_rc {
             let _ = std::fs::remove_file(&cwd_rc);
         }
@@ -1006,7 +1122,7 @@ mod tests {
             &x,
             sandbox,
             "tb.sch",
-            "",
+            &SchText::trusted_for_tests(""),
             &Run::default(),
             &CancellationToken::new(),
         )
@@ -1112,6 +1228,67 @@ mod tests {
                 .to_string()
                 .contains("wrote no netlist: boom")
         );
+    }
+
+    /// A fifo left at the netlist's place (bubblewrap's writable folder
+    /// allows one) is refused at once, not waited on for a writer that
+    /// never comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_netlist_that_is_a_fifo_does_not_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("netlist.spice");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let p = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_netlist(&p, "").map_err(|e| e.to_string()));
+        });
+        let got = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("reading a fifo netlist blocked");
+        assert!(got.unwrap_err().contains("not a plain file"));
+    }
+
+    /// The run's private folders come from TMPDIR; one with characters xschem
+    /// would read as Tcl stops the run before xschem starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_private_folder_with_tcl_characters_is_refused() {
+        let ok = dirs_at(Path::new("/tmp/.tmpAbC123"));
+        assert_eq!(unsafe_run_path(&ok, &ok.staging.join("tb.sch")), None);
+        for bad in ["/tmp/a b", "/tmp/[x]", "/tmp/$HOME", "/tmp/a;b", "/tmp/{x}"] {
+            let d = dirs_at(Path::new(bad));
+            assert!(
+                unsafe_run_path(&d, &d.staging.join("tb.sch")).is_some(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn dirs_at(dir: &Path) -> Dirs {
+        Dirs {
+            out: dir.join("out"),
+            rc: dir.join("aispicerc.tcl"),
+            home: dir.join("home"),
+            tmp: dir.join("tmp"),
+            staging: dir.join("in"),
+        }
+    }
+
+    #[test]
+    fn bubblewrap_versions_parse() {
+        assert_eq!(parse_bwrap_version("bubblewrap 0.9.0\n"), Some((0, 9, 0)));
+        assert_eq!(parse_bwrap_version("bubblewrap 0.11.1"), Some((0, 11, 1)));
+        assert_eq!(parse_bwrap_version("bubblewrap 0.6"), Some((0, 6, 0)));
+        assert_eq!(parse_bwrap_version("nonsense"), None);
+        assert!(parse_bwrap_version("bubblewrap 0.8.0").unwrap() >= BWRAP_DISABLE_USERNS);
+        assert!(parse_bwrap_version("bubblewrap 0.7.0").unwrap() < BWRAP_DISABLE_USERNS);
     }
 
     #[cfg(target_os = "linux")]

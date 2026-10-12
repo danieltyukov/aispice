@@ -23,13 +23,25 @@
 //!   escape would use: sockets of every family and anything done on one,
 //!   io_uring (which can open and connect sockets without the socket
 //!   syscall), tracing or reading another process or taking its
-//!   descriptors, the keyring, BPF, perf, userfaultfd, mounts, and new
-//!   namespaces through `unshare`, `setns` or `clone`; `clone3`, whose flags
-//!   a filter cannot read, gets `ENOSYS` so the C library falls back to
-//!   `clone`. `socketpair`, `fork` and `execve` stay allowed, and the filters
-//!   are inherited across exec, so whatever runs in the process is bound.
-//! - **Resource limits** cap the output size and address space, and the
-//!   process is asked to die with its parent.
+//!   descriptors, the keyring, BPF, perf, userfaultfd, System V shared
+//!   memory, message queues and semaphores and POSIX message queues (which
+//!   a process of the same user could otherwise share), mounts, new
+//!   namespaces through `unshare`, `setns` or `clone`, and leaving the
+//!   process group through `setsid` or `setpgid`; `clone3`, whose flags a
+//!   filter cannot read, gets `ENOSYS` so the C library falls back to
+//!   `clone`. On x86_64 a second program refuses every x32 system call,
+//!   which carries the x86_64 architecture and so would match none of the
+//!   first program's rules. `socketpair`, `fork` and `execve` stay
+//!   allowed, and the filters are inherited across exec, so whatever runs
+//!   in the process is bound.
+//! - **Descriptors**: every descriptor above stderr is marked close-on-exec
+//!   before the program starts, so nothing aispice holds open (a project
+//!   folder, a socket) reaches it; Landlock does not restrict descriptors
+//!   opened before it applies.
+//! - **Resource limits** cap the size of each file written, the address
+//!   space and the number of processes (a margin over what the user runs
+//!   now), and the process is asked to die with its parent. Nothing caps
+//!   the total bytes written across many files in a writable folder.
 //!
 //! The Landlock ruleset and the seccomp programs are built here, in the
 //! parent, where allocation is safe. The child's `pre_exec` hook does
@@ -53,6 +65,10 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+/// Bit 30 of the system call number marks an x32 call on x86_64.
+#[cfg(target_arch = "x86_64")]
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 /// The lowest Landlock ABI aispice will use. ABI 6 (Linux 6.12) is the
 /// first that can scope abstract UNIX sockets and signals.
@@ -194,7 +210,11 @@ fn build_landlock(ll: &Landlock) -> io::Result<OwnedFd> {
 /// sockets of every family and anything done on one, the asynchronous
 /// interfaces that can open or connect a socket without the socket syscall
 /// (io_uring), tracing or reading another process, taking its descriptors,
-/// the keyring, BPF, perf, userfaultfd, and namespaces and mounts.
+/// the keyring, BPF, perf, userfaultfd, System V and POSIX inter-process
+/// communication (another program of the same user, such as an X server's
+/// shared memory, is reachable through it without an IPC namespace),
+/// namespaces and mounts, and leaving the process group, which is how
+/// aispice finds every process the run started.
 fn denied_syscalls() -> Vec<libc::c_long> {
     vec![
         libc::SYS_socket,
@@ -221,6 +241,26 @@ fn denied_syscalls() -> Vec<libc::c_long> {
         libc::SYS_bpf,
         libc::SYS_perf_event_open,
         libc::SYS_userfaultfd,
+        libc::SYS_shmget,
+        libc::SYS_shmat,
+        libc::SYS_shmctl,
+        libc::SYS_shmdt,
+        libc::SYS_msgget,
+        libc::SYS_msgsnd,
+        libc::SYS_msgrcv,
+        libc::SYS_msgctl,
+        libc::SYS_semget,
+        libc::SYS_semop,
+        libc::SYS_semtimedop,
+        libc::SYS_semctl,
+        libc::SYS_mq_open,
+        libc::SYS_mq_unlink,
+        libc::SYS_mq_timedsend,
+        libc::SYS_mq_timedreceive,
+        libc::SYS_mq_notify,
+        libc::SYS_mq_getsetattr,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
         libc::SYS_unshare,
         libc::SYS_setns,
         libc::SYS_mount,
@@ -264,12 +304,41 @@ fn compile(rules: BTreeMap<i64, Vec<SeccompRule>>, errno: libc::c_int) -> io::Re
     BpfProgram::try_from(filter).map_err(|e| io::Error::other(e.to_string()))
 }
 
-/// The two seccomp programs. The first denies [`denied_syscalls`] and any
+/// x86_64 only: refuse every x32 system call. An x32 call carries the
+/// x86_64 audit architecture with bit 30 set in its number, so it passes
+/// seccompiler's architecture check and then matches none of the rules,
+/// which name only the 64-bit numbers: `0x40000000 | SYS_socket` would make
+/// a socket. The programs aispice confines are 64-bit and never make one.
+/// seccompiler generates no such check, so this program is written out.
+#[cfg(target_arch = "x86_64")]
+fn x32_program() -> BpfProgram {
+    use seccompiler::sock_filter;
+    // Opcodes from linux/filter.h, and the audit architecture of x86_64.
+    const LD_W_ABS: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS
+    const JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+    const JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+    const RET_K: u16 = 0x06; // BPF_RET | BPF_K
+    const AUDIT_ARCH_X86_64: u32 = 62 | 0x8000_0000 | 0x4000_0000;
+    // struct seccomp_data: `nr` at offset 0, `arch` at offset 4.
+    let op = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+    vec![
+        op(LD_W_ABS, 0, 0, 4),
+        // Another architecture: the first program kills it, allow here.
+        op(JEQ_K, 0, 3, AUDIT_ARCH_X86_64),
+        op(LD_W_ABS, 0, 0, 0),
+        op(JGE_K, 0, 1, X32_SYSCALL_BIT),
+        op(RET_K, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EACCES as u32),
+        op(RET_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+    ]
+}
+
+/// The seccomp programs. The first denies [`denied_syscalls`] and any
 /// `clone` that asks for a new namespace, with `EACCES`. The second answers
 /// `clone3` (whose flags sit in memory a filter cannot read) with `ENOSYS`,
-/// so the C library falls back to `clone`, which the first one checks.
-/// Everything else, including `socketpair`, `fork` and `execve`, is allowed.
-fn build_seccomp() -> io::Result<[BpfProgram; 2]> {
+/// so the C library falls back to `clone`, which the first one checks. On
+/// x86_64 a third refuses every x32 call ([`x32_program`]). Everything
+/// else, including `socketpair`, `fork` and `execve`, is allowed.
+fn build_seccomp() -> io::Result<Vec<BpfProgram>> {
     let to_io = |e: seccompiler::BackendError| io::Error::other(e.to_string());
     // c_long is i64 on the 64-bit targets aispice builds for, but the
     // conversion keeps this correct on a 32-bit libc where it is i32.
@@ -292,7 +361,95 @@ fn build_seccomp() -> io::Result<[BpfProgram; 2]> {
     let clone3: BTreeMap<i64, Vec<SeccompRule>> = [(i64::from(libc::SYS_clone3), Vec::new())]
         .into_iter()
         .collect();
-    Ok([compile(deny, libc::EACCES)?, compile(clone3, libc::ENOSYS)?])
+    #[allow(unused_mut)]
+    let mut programs = vec![compile(deny, libc::EACCES)?, compile(clone3, libc::ENOSYS)?];
+    #[cfg(target_arch = "x86_64")]
+    programs.push(x32_program());
+    Ok(programs)
+}
+
+/// Tasks (processes and threads) whose real user is `uid` right now, which
+/// is what `RLIMIT_NPROC` counts. Read from `/proc`, in the parent.
+fn tasks_of(uid: libc::uid_t) -> u64 {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut n = 0u64;
+    for e in dir.flatten() {
+        if !e.file_name().as_bytes().iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(e.path().join("status")) else {
+            continue;
+        };
+        let mut real = None;
+        let mut threads = 1;
+        for line in status.lines() {
+            if let Some(v) = line.strip_prefix("Uid:") {
+                real = v.split_whitespace().next().and_then(|s| s.parse().ok());
+            } else if let Some(v) = line.strip_prefix("Threads:") {
+                threads = v.trim().parse().unwrap_or(1);
+            }
+        }
+        if real == Some(uid) {
+            n += threads;
+        }
+    }
+    n
+}
+
+/// The `RLIMIT_NPROC` value for a child that may start `headroom` more
+/// tasks than its user has now, never above the current hard limit. A
+/// count of zero (no `/proc`) leaves only the headroom, which fails closed.
+fn nproc_limit(headroom: u64) -> io::Result<u64> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid resource id and a stack rlimit to fill.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut lim) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let want = tasks_of(uid).saturating_add(headroom);
+    Ok(want.min(lim.rlim_max))
+}
+
+/// Mark every descriptor from 3 up close-on-exec, so the program keeps only
+/// stdin, stdout and stderr. One `close_range` call on Linux 5.11 and later;
+/// on an older kernel a loop up to the descriptor limit. Syscalls only,
+/// safe in `pre_exec`.
+unsafe fn cloexec_above_stderr() -> io::Result<()> {
+    // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only sets flags.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: a valid resource id and a stack rlimit to fill.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let top = lim.rlim_cur.min(1 << 20) as libc::c_int;
+    for fd in 3..top {
+        // SAFETY: fcntl on any number is harmless; a closed one is EBADF.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
+    }
+    Ok(())
 }
 
 /// Set one resource limit. A syscall only, safe in `pre_exec`.
@@ -322,20 +479,29 @@ pub fn apply(cmd: &mut tokio::process::Command, c: &Confinement) -> io::Result<(
     };
     let fsize = c.rlimit_fsize;
     let as_limit = c.rlimit_as;
+    let nproc = match c.nproc_headroom {
+        Some(h) => Some(nproc_limit(h)?),
+        None => None,
+    };
     // SAFETY: the hook runs in the forked child before exec. It only makes
-    // syscalls over state built in the parent (the two limit values, the
-    // seccomp program and the ruleset descriptor); it allocates nothing and
+    // syscalls over state built in the parent (the limit values, the
+    // seccomp programs and the ruleset descriptor); it allocates nothing and
     // takes no lock, so it cannot deadlock against a thread that held one at
     // fork. The ruleset fd is valid in the child and closes on exec.
     unsafe {
         cmd.pre_exec(move || {
+            cloexec_above_stderr()?;
+            if let Some(v) = nproc {
+                setrlimit(libc::RLIMIT_NPROC, v)?;
+            }
             if let Some(v) = fsize {
                 setrlimit(libc::RLIMIT_FSIZE, v)?;
             }
             if let Some(v) = as_limit {
                 setrlimit(libc::RLIMIT_AS, v)?;
             }
-            // Die if aispice dies, so no confined xschem is left behind.
+            // Die if aispice dies. This is not inherited across fork, so
+            // the run's process group is also killed when the run ends.
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -366,13 +532,15 @@ mod tests {
     use super::*;
 
     /// The seccomp programs refuse creating any socket (so no TCP, UDP,
-    /// abstract-UNIX or pathname-UNIX connection), io_uring, a new namespace
-    /// through `unshare` or `clone`, and answer `clone3` with `ENOSYS`, while a
-    /// local `socketpair` and a plain `fork` still work. Checked in a forked
-    /// child so the filters do not bind the test runner; the child reports
-    /// by exit code, having allocated nothing after the fork.
+    /// abstract-UNIX or pathname-UNIX connection), also through the x32 call
+    /// numbers, io_uring, System V and POSIX inter-process communication, a
+    /// new session or process group, a new namespace through `unshare` or
+    /// `clone`, and answer `clone3` with `ENOSYS`, while a local `socketpair`
+    /// and a plain `fork` still work. Checked in a forked child so the
+    /// filters do not bind the test runner; the child reports which check
+    /// failed by exit code, having allocated nothing after the fork.
     #[test]
-    fn seccomp_denies_sockets_namespaces_and_io_uring() {
+    fn seccomp_denies_sockets_ipc_sessions_namespaces_and_io_uring() {
         let programs = build_seccomp().expect("build the seccomp programs");
         // SAFETY: the child only makes syscalls and _exit, no allocation.
         match unsafe { libc::fork() } {
@@ -415,6 +583,52 @@ mod tests {
                     unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<u8>(), 0usize) },
                     libc::ENOSYS,
                 );
+                // An x32 socket call: without the third program it would
+                // be ENOSYS on a kernel without x32 and a socket with it.
+                #[cfg(target_arch = "x86_64")]
+                let x32 = fails_with(
+                    unsafe {
+                        libc::syscall(
+                            libc::c_long::from(X32_SYSCALL_BIT) | libc::SYS_socket,
+                            libc::AF_UNIX,
+                            libc::SOCK_STREAM,
+                            0,
+                        )
+                    },
+                    libc::EACCES,
+                );
+                #[cfg(not(target_arch = "x86_64"))]
+                let x32 = true;
+                let shm = fails_with(
+                    unsafe { libc::shmget(libc::IPC_PRIVATE, 4096, libc::IPC_CREAT | 0o600) }
+                        as libc::c_long,
+                    libc::EACCES,
+                );
+                let msg = fails_with(
+                    unsafe { libc::msgget(libc::IPC_PRIVATE, libc::IPC_CREAT | 0o600) }
+                        as libc::c_long,
+                    libc::EACCES,
+                );
+                let sem = fails_with(
+                    unsafe { libc::semget(libc::IPC_PRIVATE, 1, libc::IPC_CREAT | 0o600) }
+                        as libc::c_long,
+                    libc::EACCES,
+                );
+                let mq = fails_with(
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_mq_open,
+                            c"aispice-confine-test".as_ptr(),
+                            libc::O_RDWR | libc::O_CREAT,
+                            0o600,
+                            std::ptr::null::<u8>(),
+                        )
+                    },
+                    libc::EACCES,
+                );
+                let session = fails_with(unsafe { libc::setsid() } as libc::c_long, libc::EACCES);
+                let group =
+                    fails_with(unsafe { libc::setpgid(0, 0) } as libc::c_long, libc::EACCES);
                 let mut sv = [0i32; 2];
                 let pair_ok = unsafe {
                     libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr())
@@ -428,27 +642,71 @@ mod tests {
                     }
                     _ => false,
                 };
-                let good = applied
-                    && inet
-                    && unix
-                    && udp
-                    && ring
-                    && userns
-                    && clone_ns
-                    && clone3
-                    && pair_ok
-                    && fork_ok;
-                unsafe { libc::_exit(if good { 0 } else { 1 }) };
+                // The first check that failed, numbered from 1, or 0.
+                let checks = [
+                    applied, inet, unix, udp, ring, userns, clone_ns, clone3, x32, shm, msg, sem,
+                    mq, session, group, pair_ok, fork_ok,
+                ];
+                let failed = checks.iter().position(|ok| !ok).map_or(0, |i| i + 1);
+                unsafe { libc::_exit(failed as libc::c_int) };
             }
             pid => {
                 let mut status = 0;
                 unsafe { libc::waitpid(pid, &mut status, 0) };
                 let code = libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
-                assert_eq!(
-                    code,
-                    Some(0),
-                    "the seccomp programs did not hold as expected"
-                );
+                // 1 applied, 2 inet, 3 unix, 4 udp, 5 io_uring, 6 unshare,
+                // 7 clone, 8 clone3, 9 x32, 10 shm, 11 msg, 12 sem, 13 mq,
+                // 14 setsid, 15 setpgid, 16 socketpair, 17 fork.
+                assert_eq!(code, Some(0), "seccomp check {code:?} did not hold");
+            }
+        }
+    }
+
+    /// The process count covers at least this test's own threads, and the
+    /// limit is that count plus the headroom, capped by the hard limit.
+    #[test]
+    fn the_process_limit_is_relative_to_what_the_user_runs() {
+        let uid = unsafe { libc::getuid() };
+        let now = tasks_of(uid);
+        assert!(now >= 1, "{now}");
+        let limit = nproc_limit(1000).unwrap();
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut lim) }, 0);
+        assert!(limit <= lim.rlim_max);
+        if lim.rlim_max > now + 2000 {
+            assert!(limit >= 1000 && limit < now + 2000, "{limit} vs {now}");
+        }
+    }
+
+    /// In a forked child, a descriptor without close-on-exec gets it, and
+    /// stdin, stdout and stderr keep theirs.
+    #[test]
+    fn descriptors_above_stderr_are_closed_on_exec() {
+        let mut p = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        let fd = p[0];
+        let flag = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC;
+        assert_eq!(flag(fd), 0, "pipe() makes descriptors without CLOEXEC");
+        match unsafe { libc::fork() } {
+            -1 => panic!("fork failed"),
+            0 => {
+                let ok = unsafe { cloexec_above_stderr() }.is_ok()
+                    && flag(fd) != 0
+                    && flag(p[1]) != 0
+                    && flag(2) == 0;
+                unsafe { libc::_exit(if ok { 0 } else { 1 }) };
+            }
+            pid => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                unsafe {
+                    libc::close(p[0]);
+                    libc::close(p[1]);
+                }
+                assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
             }
         }
     }

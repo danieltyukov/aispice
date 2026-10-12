@@ -5,7 +5,9 @@
 //! to a size cap. On Unix the child leads its own process group so a timeout
 //! or cancel kills everything it started: Wine's Windows process and the
 //! virtual X server from `xvfb-run` are grandchildren that outlive a plain
-//! kill of the direct child.
+//! kill of the direct child. A confined child's group is also killed when
+//! the child exits, so nothing it started outlives the run (an unconfined
+//! one may leave a shared daemon such as wineserver running on purpose).
 
 use super::SimError;
 use std::ffi::OsString;
@@ -45,7 +47,10 @@ pub struct Landlock {
 }
 
 /// How a child is confined on Linux: resource limits, and an optional
-/// Landlock domain. Ignored on other systems, where it is never set.
+/// Landlock domain. Ignored on other systems, where it is never set. Every
+/// confined child also gets its descriptors above stderr closed on exec,
+/// is asked to die with aispice, and has its process group killed when it
+/// exits.
 #[derive(Debug, Clone, Default)]
 pub struct Confinement {
     pub landlock: Option<Landlock>,
@@ -53,6 +58,10 @@ pub struct Confinement {
     pub rlimit_fsize: Option<u64>,
     /// `RLIMIT_AS`: the child's address space.
     pub rlimit_as: Option<u64>,
+    /// `RLIMIT_NPROC` as a margin: the child and everything it starts may
+    /// add at most this many processes and threads to what its user runs
+    /// when it starts.
+    pub nproc_headroom: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -239,6 +248,11 @@ pub async fn run(
     };
     let status = match end {
         End::Exited(s) => {
+            // Whatever a confined child started goes with it; its group
+            // cannot be left, since setsid and setpgid are refused.
+            if spec.confine.is_some() {
+                kill_tree(pid).await;
+            }
             s.map_err(|e| SimError::Io(format!("waiting for {}: {e}", spec.display())))?
         }
         End::Timeout | End::Cancelled => {
@@ -254,9 +268,10 @@ pub async fn run(
             });
         }
     };
-    for r in readers {
-        if tokio::time::timeout(PIPE_GRACE, r).await.is_err() {
+    for mut r in readers {
+        if tokio::time::timeout(PIPE_GRACE, &mut r).await.is_err() {
             tracing::debug!("{}: output pipe still open after exit", spec.display());
+            r.abort();
         }
     }
     let stdout = out.lock().expect("capture lock").text();
@@ -270,23 +285,19 @@ pub async fn run(
 }
 
 /// Kill the child's whole process group (Unix) or process tree (Windows).
+/// The group id is the child's pid, since it leads its own group. The id
+/// stays reserved while any member of the group lives, so after the child
+/// is reaped this reaches only what it left behind.
 async fn kill_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     #[cfg(unix)]
-    let mut killer = {
-        let mut c = tokio::process::Command::new("kill");
-        c.arg("-KILL").arg("--").arg(format!("-{pid}"));
-        c
-    };
+    kill_group(pid);
     #[cfg(windows)]
-    let mut killer = {
-        let mut c = tokio::process::Command::new("taskkill");
-        c.args(["/T", "/F", "/PID"]).arg(pid.to_string());
-        c
-    };
-    #[cfg(any(unix, windows))]
     {
+        let mut killer = tokio::process::Command::new("taskkill");
         killer
+            .args(["/T", "/F", "/PID"])
+            .arg(pid.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -294,6 +305,20 @@ async fn kill_tree(pid: Option<u32>) {
     }
     #[cfg(not(any(unix, windows)))]
     let _ = pid;
+}
+
+/// `SIGKILL` to process group `pgid` with `killpg`, never a `kill` program
+/// found on `PATH`. A group with no member left is not an error.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn kill_group(pgid: u32) {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return;
+    };
+    if pgid > 1 {
+        // SAFETY: killpg takes plain integers and only sends a signal.
+        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    }
 }
 
 #[cfg(test)]
@@ -363,5 +388,64 @@ mod tests {
         )
         .await;
         assert!(matches!(missing, Err(SimError::Spawn { .. })));
+    }
+
+    /// Whether process `pid` is gone (or a zombie waiting to be reaped).
+    #[cfg(target_os = "linux")]
+    fn gone(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+        }
+    }
+
+    /// A confined child's background process does not outlive the run: its
+    /// process group is killed when the child exits, and the run does not
+    /// wait out the pipe grace for it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_confined_run_leaves_nothing_behind() {
+        let dir = std::env::temp_dir();
+        let mut spec = ProcessSpec::new("sh", &dir)
+            .arg("-c")
+            .arg("sleep 30 & echo $!");
+        spec.confine = Some(Confinement::default());
+        let start = Instant::now();
+        let out = run(&spec, Duration::from_secs(10), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(start.elapsed() < PIPE_GRACE, "{:?}", start.elapsed());
+        let pid: u32 = out.stdout.trim().parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !gone(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(gone(pid), "background process {pid} outlived the run");
+    }
+
+    /// A confined child sees a process limit set relative to what its user
+    /// runs, not unlimited.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_confined_run_has_a_process_limit() {
+        let dir = std::env::temp_dir();
+        let mut spec = ProcessSpec::new("cat", &dir).arg("/proc/self/limits");
+        spec.confine = Some(Confinement {
+            nproc_headroom: Some(64),
+            ..Confinement::default()
+        });
+        let out = run(&spec, Duration::from_secs(10), &CancellationToken::new())
+            .await
+            .unwrap();
+        let line = out
+            .stdout
+            .lines()
+            .find(|l| l.starts_with("Max processes"))
+            .unwrap_or_else(|| panic!("{}", out.stdout));
+        let soft = line.split_whitespace().nth(2).unwrap();
+        let soft: u64 = soft.parse().unwrap_or_else(|_| panic!("{line}"));
+        assert!(soft >= 64, "{line}");
     }
 }
