@@ -18,6 +18,7 @@ pub mod pdk;
 pub mod plot;
 pub mod polezero;
 pub mod raw;
+pub mod sandbox;
 pub mod spec;
 pub mod stimulus;
 pub mod sweep;
