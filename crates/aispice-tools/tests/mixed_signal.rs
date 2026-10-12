@@ -385,3 +385,104 @@ async fn the_bandgap_trims_into_range_at_every_corner_and_mismatch_sample() {
     assert_eq!(r["nominal_code"], 16);
     assert!(r["nominal_pass"].as_u64().unwrap() < 8, "{text}");
 }
+
+/// Every limit holds on the request before any work: a 32-bit trim range,
+/// corners times samples over the cap (with the largest request that
+/// fits), and a sample count that would overflow.
+#[tokio::test]
+async fn trim_limits_hold_before_anything_runs() {
+    let (dir, ws) = project("mixed_signal", RunnerConfig::default());
+    std::fs::write(
+        dir.path().join("mixed_signal/divider.cir"),
+        "* trimmed divider\n.param trim=8\nV1 in 0 1\nR1 in out 1k\nR2 out 0 {900 + trim*12.5}\n.tran 1u 10u\n.end\n",
+    )
+    .unwrap();
+    let tool = TrimCheck { ws };
+    let base = json!({
+        "circuit": "divider.cir", "param": "trim", "first": 0, "last": 15,
+        "specs": "v = avg(V(out)) in 0.497..0.503",
+        "tolerances": [{"target": "R1", "tol_pct": 5}], "simulator": "ngspice"
+    });
+    let with = |k: &str, v: Value| {
+        let mut i = base.clone();
+        i[k] = v;
+        i
+    };
+    let started = std::time::Instant::now();
+    let out = call(&tool, with("last", json!(4294967295u64))).await;
+    assert!(
+        out.is_error && out.text_content().contains("more than the 64"),
+        "{}",
+        out.text_content()
+    );
+    let out = call(&tool, with("first", json!(i64::MIN))).await;
+    assert!(out.is_error, "{}", out.text_content());
+    let mut many = with("runs", json!(500));
+    many["corners"] = json!({"temperatures": [-40, 0, 27, 85, 125, 150, 175, 200, 225]});
+    let out = call(&tool, many).await;
+    let text = out.text_content();
+    assert!(
+        out.is_error && text.contains("ask for at most 13 sample(s) per corner"),
+        "{text}"
+    );
+    let out = call(&tool, with("runs", json!(usize::MAX))).await;
+    assert!(
+        out.is_error && out.text_content().contains("over the 2000"),
+        "{}",
+        out.text_content()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// A co-simulation asked to run for a very long time at a tiny step, or a
+/// counter clocked at every step, is refused before anything compiles.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_endless_cosimulation_is_refused_before_it_builds() {
+    let (dir, ws) = project("mixed_signal", RunnerConfig::default());
+    let root = dir.path().join("mixed_signal");
+    let deck = std::fs::read_to_string(root.join("ramp_counter.cir"))
+        .unwrap()
+        .replace(".tran 10n 10u", ".tran 1p 1");
+    std::fs::write(root.join("long.cir"), deck).unwrap();
+    std::fs::write(
+        root.join("rtl/toggle.v"),
+        "module toggle(input clk, output reg q);\n  initial q = 1'b0;\n  always @(clk) q <= ~q;\nendmodule\n",
+    )
+    .unwrap();
+    let mut toml = std::fs::read_to_string(root.join(PROJECT_FILE)).unwrap();
+    toml.push_str("\n[[cosim]]\nmodel = \"toggle\"\nsources = [\"rtl/toggle.v\"]\n");
+    std::fs::write(root.join(PROJECT_FILE), toml).unwrap();
+    std::fs::write(
+        root.join("toggle.cir"),
+        "* toggles at every step\nVclk c 0 PULSE(0 1 0 0.5p 0.5p 0.5p 2p)\nAb [c] [cd] tobit\n.model tobit adc_bridge(in_low=0.3 in_high=0.7)\nAt [cd] [q] null toggle\nAq [q] [vq] toana\n.model toana dac_bridge\n.tran 1p 10u\n.end\n",
+    )
+    .unwrap();
+    let p = ws.project().unwrap();
+    for (circuit, why) in [
+        ("long.cir", "the stop time can be at most 2u"),
+        ("toggle.cir", "at most 2e6"),
+    ] {
+        let started = std::time::Instant::now();
+        let err = ws
+            .runner
+            .run_circuit(
+                &p,
+                circuit,
+                Some("ngspice"),
+                &RunMods::default(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(why), "{circuit}: {err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "{circuit}"
+        );
+        assert!(
+            !root.join(".aispice/build").exists(),
+            "nothing was built for {circuit}"
+        );
+    }
+}

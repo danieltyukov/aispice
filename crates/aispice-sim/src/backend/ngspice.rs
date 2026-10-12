@@ -424,6 +424,9 @@ mod tests {
         assert!(!plain_path("/tmp/a\\b"));
     }
 
+    /// Unix only: a Windows temporary folder has backslashes, which a
+    /// `.spiceinit` path may not, so no library loads there at all.
+    #[cfg(unix)]
     #[test]
     fn a_library_that_does_not_match_its_hash_is_not_loaded() {
         let ws = Workspace::new().unwrap();

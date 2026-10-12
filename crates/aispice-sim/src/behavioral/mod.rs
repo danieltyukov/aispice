@@ -483,12 +483,17 @@ mod tests {
         assert_eq!(safe_name("my-model.v"), "my_model_v");
         assert_eq!(safe_name("4bit"), "m4bit");
         assert_eq!(safe_name(""), "model");
-        let dir = Path::new("/tmp/aispice-build-x");
-        let log = "\u{1b}[1m\u{1b}[31merror\u{1b}[0m: bad\n  --> /tmp/aispice-build-x/comparator.va:3:4\n\n /tmp/aispice-build-x/obj/x.h";
+        // The compiler names files as the system writes paths.
+        let dir = std::env::temp_dir().join("aispice-build-x");
+        let log = format!(
+            "\u{1b}[1m\u{1b}[31merror\u{1b}[0m: bad\n  --> {}:3:4\n\n {}/obj/x.h",
+            dir.join("comparator.va").display(),
+            dir.display()
+        );
         assert_eq!(
             clean_log(
-                log,
-                dir,
+                &log,
+                &dir,
                 &[("comparator.va".into(), "models/comparator.va".into())]
             ),
             "error: bad\n  --> models/comparator.va:3:4\n <build>/obj/x.h"

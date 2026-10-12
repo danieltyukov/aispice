@@ -296,6 +296,13 @@ impl Tool for BudgetTool {
                 t.push_str(&format!("  {s}\n"));
             }
         }
+        if input.save.len() > b.blocks.len() {
+            return ToolOutput::error(format!(
+                "this budget has {} block(s) to save, not {}",
+                b.blocks.len(),
+                input.save.len()
+            ));
+        }
         let mut writes = Vec::new();
         for (name, file) in &input.save {
             let Some(block) = b.blocks.iter().find(|bl| bl.block == *name) else {
@@ -416,10 +423,39 @@ async fn trim_check(
     if input.last < input.first {
         return Err("last must not be below first".into());
     }
-    let ncodes = (input.last - input.first + 1) as usize;
-    if ncodes > MAX_TRIM_CODES {
+    // Counted with checked arithmetic from the request alone, before
+    // anything is read or built: codes from any two i64s (a 32-bit DAC's
+    // included), then codes times corners times samples.
+    let ncodes = input
+        .last
+        .checked_sub(input.first)
+        .and_then(|d| d.checked_add(1))
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n <= MAX_TRIM_CODES)
+        .ok_or_else(|| {
+            format!(
+                "codes {} to {} are more than the {MAX_TRIM_CODES} a trim check tries (a 6-bit trim); check part of the range at a time",
+                input.first, input.last
+            )
+        })?;
+    let corners = match &input.corners {
+        Some(set) => set.count().map_err(|e| format!("corners: {e}"))?,
+        None => 1,
+    };
+    let per_corner = input.runs.max(1);
+    let fits = corners
+        .checked_mul(per_corner)
+        .and_then(|n| n.checked_mul(ncodes))
+        .is_some_and(|t| t <= MAX_TRIM_RUNS);
+    if !fits {
+        let fit = MAX_TRIM_RUNS / (corners * ncodes).max(1);
         return Err(format!(
-            "{ncodes} codes is more than the {MAX_TRIM_CODES} a trim check tries"
+            "{corners} corner(s) x {per_corner} sample(s) x {ncodes} codes is over the {MAX_TRIM_RUNS} simulations a trim check runs; {}",
+            if fit == 0 {
+                "ask for fewer corners or codes".to_string()
+            } else {
+                format!("with these corners and codes, ask for at most {fit} sample(s) per corner")
+            }
         ));
     }
     let (specs, _) = load_specs(ws, &input.circuit, input.specs.as_deref())?;
@@ -432,17 +468,6 @@ async fn trim_check(
     // give the same result for every code.
     let mut probe = netlist.clone();
     sweep::set_value(&mut probe, &input.param, input.first as f64).map_err(|e| e.to_string())?;
-    let corners = match &input.corners {
-        Some(set) => set.count().map_err(|e| format!("corners: {e}"))?,
-        None => 1,
-    };
-    let per_corner = input.runs.max(1);
-    let total = corners * per_corner * ncodes;
-    if total > MAX_TRIM_RUNS {
-        return Err(format!(
-            "{corners} corner(s) x {per_corner} sample(s) x {ncodes} codes is {total} simulations, over the {MAX_TRIM_RUNS} limit"
-        ));
-    }
     let sources = analysis::derived_sources(&netlist, specs.iter().map(|s| &s.measure))?;
     let netlist =
         analysis::as_simulator_reads_it(ws, &p, netlist, input.simulator.as_deref()).await;
