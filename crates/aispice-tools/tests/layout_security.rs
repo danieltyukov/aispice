@@ -88,6 +88,11 @@ fn every_tool_declares_what_it_does_to_files() {
         ("pdk", Edit),
         ("gm_id", ReadOnly),
         ("check_macro", ReadOnly),
+        // Builds write only aispice's record under `.aispice/build/`.
+        ("behavioral_models", ReadOnly),
+        // Saves block specs files when asked.
+        ("budget", Edit),
+        ("trim_check", ReadOnly),
     ]
     .into_iter()
     .map(|(n, a)| (n.to_string(), a))

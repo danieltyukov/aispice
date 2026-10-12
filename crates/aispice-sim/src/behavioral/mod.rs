@@ -232,7 +232,9 @@ pub(crate) async fn step(
     process::run(&spec, left, cancel)
         .await
         .map_err(|e| match e {
-            SimError::Timeout(_) => BuildError::Refused("the build took too long and was stopped".into()),
+            SimError::Timeout(_) => {
+                BuildError::Refused("the build took too long and was stopped".into())
+            }
             SimError::Cancelled => BuildError::Refused("the build was cancelled".into()),
             other => BuildError::Io(other.to_string()),
         })

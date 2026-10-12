@@ -8,8 +8,8 @@
 
 use super::scan::{self, Kind, Token};
 use super::{
-    BuildError, Direction, LibraryKind, Library, MAX_VERILOGA_BYTES, Module, OPENVAF_TIMEOUT,
-    Port, Source, build_dir, clean_log, read_library, safe_name, sha256_hex, step, write,
+    BuildError, Direction, Library, LibraryKind, MAX_VERILOGA_BYTES, Module, OPENVAF_TIMEOUT, Port,
+    Source, build_dir, clean_log, read_library, safe_name, sha256_hex, step, write,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -298,11 +298,23 @@ endmodule
     #[test]
     fn refuses_what_reaches_outside_the_model() {
         for (text, why) in [
-            ("`include \"/etc/passwd\"\nmodule a; endmodule", "only `include"),
-            ("`include \"other.va\"\nmodule a; endmodule", "only `include"),
+            (
+                "`include \"/etc/passwd\"\nmodule a; endmodule",
+                "only `include",
+            ),
+            (
+                "`include \"other.va\"\nmodule a; endmodule",
+                "only `include",
+            ),
             ("`include `FILE\nmodule a; endmodule", "only `include"),
-            ("module a; analog begin $fopen(\"x\"); end endmodule", "$fopen"),
-            ("module a; analog $Table_Model(1, \"t\", \"1L\"); endmodule", "$Table_Model"),
+            (
+                "module a; analog begin $fopen(\"x\"); end endmodule",
+                "$fopen",
+            ),
+            (
+                "module a; analog $Table_Model(1, \"t\", \"1L\"); endmodule",
+                "$Table_Model",
+            ),
             ("module a; analog $system(\"id\"); endmodule", "$system"),
             ("`define C(a,b) a``b\nmodule a; endmodule", "token pasting"),
             ("// nothing here", "no `module`"),
@@ -312,8 +324,16 @@ endmodule
             assert!(e.starts_with("models/m.va:"), "{e}");
         }
         // In a comment or a string, the same words are harmless.
-        assert!(check(&src("// $fopen\nmodule a; analog $strobe(\"$system\"); endmodule")).is_ok());
-        let big = src(&format!("module a; endmodule\n// {}", "x".repeat(MAX_VERILOGA_BYTES)));
+        assert!(
+            check(&src(
+                "// $fopen\nmodule a; analog $strobe(\"$system\"); endmodule"
+            ))
+            .is_ok()
+        );
+        let big = src(&format!(
+            "module a; endmodule\n// {}",
+            "x".repeat(MAX_VERILOGA_BYTES)
+        ));
         assert!(matches!(check(&big), Err(BuildError::Refused(_))));
     }
 }

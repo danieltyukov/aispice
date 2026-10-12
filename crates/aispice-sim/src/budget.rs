@@ -288,9 +288,8 @@ pub fn adc_frontend(p: &AdcFrontEnd) -> Result<Budget, BudgetError> {
     let gain_db = step("OTA DC gain in dB", "20 log10(A0)".into(), db(a0), "dB");
     let en = step(
         "OTA input noise density",
-        format!(
-            "sqrt((1 - a) P_th / ((pi / 2) beta GBW)): the rest of the budget over the loop's noise bandwidth"
-        ),
+        "sqrt((1 - a) P_th / ((pi / 2) beta GBW)): the rest of the budget over the loop's noise bandwidth"
+            .to_string(),
         ((1.0 - alpha) * p_th / (PI / 2.0 * beta * gbw)).sqrt(),
         "V/rtHz",
     );

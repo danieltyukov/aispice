@@ -1986,3 +1986,383 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 </details>
 
+## `behavioral_models`
+
+Behavioural models the project declares in aispice.toml: Verilog-A files (`veriloga = ["models/x.va"]`), compiled by OpenVAF, and Verilog to co-simulate (`[[cosim]]` with `model`, `sources` and optionally `top`), compiled by Verilator for ngspice's d_cosim. A deck uses a Verilog-A module as a model type (`.model cmp comparator_va(gain=1e3)` and `N1 inp inn out cmp`) and a co-simulated model by name on an XSPICE instance (`A1 [clk en] [q3 q2 q1 q0] null counter`), bridged to analog nodes with adc_bridge and dac_bridge models. A deck never names a compiled file, and d_cosim or d_process models in a deck are refused: aispice checks the sources, builds them itself and loads them on ngspice, the only simulator that runs them. `list` shows the declared models with their ports and the instance line to use; `build` compiles now and reports compiler errors, which a simulation would otherwise report on first use. Only the user declares models, by editing aispice.toml.
+
+Read-only: writes nothing of yours, only aispice's own folders.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "action": {
+      "anyOf": [
+        {
+          "description": "The declared models, their modules and ports, and what this session\nhas built.",
+          "enum": [
+            "list"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Compile the declared models (or the one named) now.",
+          "enum": [
+            "build"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "model": {
+      "description": "For `build`: a Verilog-A file path or a co-simulation model name.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `budget`
+
+Split a chip-level target into the specs each block must meet, with first-order equations shown step by step with their numbers. `adc_frontend`: an ADC's sample-and-hold or residue stage from bits, ENOB (or SNR), full scale, sample rate and feedback factor to the sampling capacitor (kT/C) and the OTA's DC gain, gain-bandwidth (settling to half an LSB), slew rate, phase margin and input noise density. `ldo`: a regulator from dropout, load regulation, PSRR, output noise and quiescent current to the divider, the pass device, the loop gain and bandwidth, and the error amplifier's gain and gain-bandwidth. Block specs come in check_specs' form; `save` writes them to `.specs` files (approved like an edit), ready for check_specs and optimize on a block such as the two_stage or ldo template.
+
+Edits your files: each write is approved in ask-before-applying mode and can be undone.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "adc_frontend": {
+      "additionalProperties": false,
+      "description": "For `adc_frontend`.",
+      "properties": {
+        "beta": {
+          "default": 0.5,
+          "description": "Closed-loop feedback factor of the stage (0.5 for a unity-gain\nsample and hold with equal capacitors).",
+          "type": "number"
+        },
+        "bits": {
+          "description": "Resolution in bits.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enob": {
+          "description": "Effective number of bits the stage must keep. Give this or `snr_db`.",
+          "type": "number"
+        },
+        "full_scale": {
+          "description": "Differential full scale, peak to peak, in volts.",
+          "type": "number"
+        },
+        "ktc_share": {
+          "default": 0.5,
+          "description": "Share of the thermal noise given to the sampling capacitors' kT/C;\nthe OTA gets the rest. Default 0.5.",
+          "type": "number"
+        },
+        "sample_rate": {
+          "description": "Sample rate in samples per second.",
+          "type": "number"
+        },
+        "settle_share": {
+          "default": 0.6,
+          "description": "Share of the half clock period left for linear settling. Default 0.6.",
+          "type": "number"
+        },
+        "slew_share": {
+          "default": 0.2,
+          "description": "Share of the half clock period for slewing. Default 0.2.",
+          "type": "number"
+        },
+        "snr_db": {
+          "description": "Signal-to-noise ratio in dB, instead of `enob`.",
+          "type": "number"
+        },
+        "step": {
+          "description": "The largest output step the OTA slews, in volts (default: the full\nscale).",
+          "type": "number"
+        },
+        "temperature": {
+          "default": 27.0,
+          "description": "Temperature in Celsius for kT (default 27).",
+          "type": "number"
+        }
+      },
+      "required": [
+        "bits",
+        "full_scale",
+        "sample_rate"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "enum": [
+        "adc_frontend",
+        "ldo"
+      ],
+      "type": "string"
+    },
+    "ldo": {
+      "additionalProperties": false,
+      "description": "For `ldo`.",
+      "properties": {
+        "divider_share": {
+          "default": 0.1,
+          "description": "Share of the quiescent current the divider takes (default 0.1).",
+          "type": "number"
+        },
+        "iload_max": {
+          "description": "Largest load current, amps.",
+          "type": "number"
+        },
+        "iq": {
+          "description": "Quiescent current budget, amps.",
+          "type": "number"
+        },
+        "load_regulation": {
+          "description": "Allowed output change from no load to full load, volts.",
+          "type": "number"
+        },
+        "noise_rms": {
+          "description": "Integrated output noise allowed, volts rms.",
+          "type": "number"
+        },
+        "overdrive": {
+          "default": 0.2,
+          "description": "Overdrive of the pass device at full load (default 0.2 V).",
+          "type": "number"
+        },
+        "psrr_db": {
+          "description": "Supply rejection at `psrr_freq`, dB.",
+          "type": "number"
+        },
+        "psrr_dc_db": {
+          "description": "Supply rejection at DC, dB.",
+          "type": "number"
+        },
+        "psrr_freq": {
+          "type": "number"
+        },
+        "vin_min": {
+          "description": "Lowest input voltage.",
+          "type": "number"
+        },
+        "vout": {
+          "description": "Output voltage.",
+          "type": "number"
+        },
+        "vref": {
+          "description": "Reference voltage the divider compares the output with.",
+          "type": "number"
+        }
+      },
+      "required": [
+        "vin_min",
+        "vout",
+        "vref",
+        "iload_max",
+        "load_regulation",
+        "psrr_dc_db",
+        "psrr_db",
+        "psrr_freq",
+        "noise_rms",
+        "iq"
+      ],
+      "type": "object"
+    },
+    "save": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Save block specs: block name (`ota` for the ADC front end;\n`error_amp` and `ldo` for the LDO) to a `.specs` file in the project,\nusually the block circuit's, so check_specs and optimize read it.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "kind"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+
+## `trim_check`
+
+Prove a trimmed block can always be trimmed into range: for every corner and every Monte Carlo sample (mismatch or part tolerances, as monte_carlo takes them), simulate every trim code (the `.param` the trim DAC reads, from `first` to `last`) and report whether some code brings every spec into range, the samples none does with how close they come, the code each sample needs as a histogram, how many codes are left unused at each end of the range, and the untrimmed yield at the nominal code. Every code is simulated, so the answer holds even where the spec does not move monotonically with the code. `corners` crosses process corners (presets tt, ss, ff, sf, fs, or maps such as `mos=ss res=wcs`, which rewrite the circuit's `.lib <file> <family>_<corner>` lines), temperatures in Celsius and supply values (a source or .param), and simulates every corner. Specs are one per line: `name = measurement op limit`, with op one of `>=`, `<=`, `in a..b` or `= target +- tol`, e.g. `bw = bandwidth_3db(V(out)) in 1Meg..2Meg`, `gain = gain_db_at(V(out)/V(in), 1k) >= 20`, `pm = phase_margin(V(out)) >= 45`, `q = q_lowpass(V(out)) = 0.707 +- 0.03`, `vn = input_noise_at(1k) <= 10n`, `psrr = psrr_db_at(V(out), VDD, 1k) >= 60`.
+
+Read-only: writes nothing of yours, only aispice's own folders.
+
+<details><summary>Input schema</summary>
+
+```json
+{
+  "properties": {
+    "circuit": {
+      "type": "string"
+    },
+    "corners": {
+      "description": "Process corners times temperatures times supply values. Every part is\noptional; an empty part leaves the netlist as it is in that respect.",
+      "properties": {
+        "process": {
+          "default": [],
+          "description": "Process corners: presets `tt`, `ss`, `ff`, `sf`, `fs`, or\nfamily=corner pairs such as `mos=ss res=wcs` (families mos, res, cap,\ndio, hbt). Needs `.lib <file> <family>_<corner>` lines in the circuit.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "supplies": {
+          "default": [],
+          "description": "Supply values, for example `[{\"target\": \"VDD\", \"values\": [1.62,\n1.8, 1.98]}]`. At most 200 corners in all.",
+          "items": {
+            "description": "Values for one supply: a voltage source or a `.param`.",
+            "properties": {
+              "target": {
+                "description": "A source (`VDD`) or `.param` name.",
+                "type": "string"
+              },
+              "values": {
+                "description": "Its values, as numbers or SPICE text (`\"1.8\"`), at most 64.",
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 64,
+                "type": "array"
+              }
+            },
+            "required": [
+              "target",
+              "values"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "temperatures": {
+          "default": [],
+          "description": "Temperatures in degrees Celsius.",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "first": {
+      "description": "The first and last trim codes (at most 64 codes).",
+      "type": "integer"
+    },
+    "last": {
+      "type": "integer"
+    },
+    "mismatch": {
+      "description": "Device mismatch from the circuit's corner libraries, as monte_carlo\ntakes it.",
+      "oneOf": [
+        {
+          "description": "`_mismatch` sections: device mismatch around the process corner.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`_stat` sections: global process spread plus mismatch, defined\naround the typical corner.",
+          "enum": [
+            "global"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "nominal": {
+      "description": "The code without trimming, for the untrimmed yield (default: the\nvalue the circuit sets, or the middle of the range).",
+      "type": "integer"
+    },
+    "param": {
+      "description": "The `.param` the trim DAC reads, such as `trim`.",
+      "type": "string"
+    },
+    "runs": {
+      "default": 0,
+      "description": "Monte Carlo samples per corner (default 0: corners only). Samples\ntimes corners times codes may be at most 2000 runs.",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "seed": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "simulator": {
+      "type": "string"
+    },
+    "specs": {
+      "description": "Specs to meet; default: the `<circuit>.specs` file.",
+      "type": "string"
+    },
+    "tolerances": {
+      "default": [],
+      "description": "Part tolerances, as monte_carlo takes them.",
+      "items": {
+        "properties": {
+          "distribution": {
+            "anyOf": [
+              {
+                "description": "Equally likely anywhere within plus or minus the tolerance.",
+                "enum": [
+                  "uniform"
+                ],
+                "type": "string"
+              },
+              {
+                "description": "Normal with three standard deviations equal to the tolerance, as\ncomponent tolerances are usually specified.",
+                "enum": [
+                  "gaussian"
+                ],
+                "type": "string"
+              }
+            ],
+            "default": "uniform"
+          },
+          "target": {
+            "description": "An element or `.param` name, or a glob over element names such as\n`R*`, `C?` or `*`. Exact names take precedence over globs, and\nearlier globs over later ones.",
+            "type": "string"
+          },
+          "tol_pct": {
+            "description": "Tolerance in percent of the nominal value.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "target",
+          "tol_pct"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "circuit",
+    "param",
+    "first",
+    "last"
+  ],
+  "type": "object"
+}
+```
+
+</details>
+

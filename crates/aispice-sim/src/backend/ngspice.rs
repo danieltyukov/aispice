@@ -409,7 +409,9 @@ mod tests {
             xyce_plugins: Vec::new(),
         };
         let ic = Ngspice::default().spiceinit_with(Some(&pdk), &va);
-        assert!(ic.contains("osdi '/pdk/psp103.osdi'\nosdi '/tmp/aispice-run-x/comparator.osdi'\n"));
+        assert!(
+            ic.contains("osdi '/pdk/psp103.osdi'\nosdi '/tmp/aispice-run-x/comparator.osdi'\n")
+        );
         assert!(!ic.contains("ngbehavior"));
         let deck = "t\nAcnt [clk] [q] null counter\n.tran 1u 1m\n.end\n";
         let cosim = vec![("counter".to_string(), "cosim_counter.so".to_string())];

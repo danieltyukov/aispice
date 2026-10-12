@@ -17,8 +17,8 @@
 use super::scan::{self, Kind};
 use super::{
     BuildError, Direction, Library, LibraryKind, MAX_VERILOG_BYTES, MAX_VERILOG_FILE_BYTES,
-    MAX_VERILOG_FILES, Module, Port, Source, VERILATOR_TIMEOUT, build_dir, clean_log,
-    read_library, safe_name, sha256_hex, step, write,
+    MAX_VERILOG_FILES, Module, Port, Source, VERILATOR_TIMEOUT, build_dir, clean_log, read_library,
+    safe_name, sha256_hex, step, write,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,7 +127,9 @@ fn problem(src: &Source, line: usize, message: impl Into<String>) -> BuildError 
 /// declare.
 pub fn check(sources: &[Source]) -> Result<Vec<String>, BuildError> {
     if sources.is_empty() {
-        return Err(BuildError::Refused("a co-simulated model needs at least one Verilog source".into()));
+        return Err(BuildError::Refused(
+            "a co-simulated model needs at least one Verilog source".into(),
+        ));
     }
     if sources.len() > MAX_VERILOG_FILES {
         return Err(BuildError::Refused(format!(
@@ -193,7 +195,9 @@ pub fn check(sources: &[Source]) -> Result<Vec<String>, BuildError> {
                         return Err(problem(
                             src,
                             t.line,
-                            format!("`{w}` is allowed only for packages (`import pkg::*;`); DPI calls C functions"),
+                            format!(
+                                "`{w}` is allowed only for packages (`import pkg::*;`); DPI calls C functions"
+                            ),
                         ));
                     }
                 }
@@ -203,7 +207,9 @@ pub fn check(sources: &[Source]) -> Result<Vec<String>, BuildError> {
         modules.extend(scan::modules(&tokens).into_iter().map(|(m, _)| m));
     }
     if modules.is_empty() {
-        return Err(BuildError::Refused("the Verilog sources declare no module".into()));
+        return Err(BuildError::Refused(
+            "the Verilog sources declare no module".into(),
+        ));
     }
     Ok(modules)
 }
@@ -311,7 +317,10 @@ fn port_headers(ports: &[Port], header: &str) -> [String; 3] {
             s => s,
         };
         let inner = rest[open + 2..].split(')').next().unwrap_or("");
-        if ports.iter().any(|p| inner.starts_with(&format!("{},", p.name))) {
+        if ports
+            .iter()
+            .any(|p| inner.starts_with(&format!("{},", p.name)))
+        {
             files[k].push_str(&format!("VL_DATA({size},{inner})\n"));
         }
     }
@@ -348,7 +357,10 @@ pub async fn build(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let file = format!("{}.v", safe_name(base.trim_end_matches(".sv").trim_end_matches(".v")));
+        let file = format!(
+            "{}.v",
+            safe_name(base.trim_end_matches(".sv").trim_end_matches(".v"))
+        );
         if names.iter().any(|(f, _)| *f == file) {
             return Err(BuildError::Refused(format!(
                 "two sources are named {base}; rename one"
@@ -361,8 +373,16 @@ pub async fn build(
         std::fs::read_to_string(shim.join(name))
             .map_err(|e| BuildError::Missing(format!("ngspice's {name} cannot be read: {e}")))
     };
-    write(d, "verilator_shim.cpp", fix_shim(&read("verilator_shim.cpp")?).as_bytes())?;
-    write(d, "verilator_main.cpp", read("verilator_main.cpp")?.as_bytes())?;
+    write(
+        d,
+        "verilator_shim.cpp",
+        fix_shim(&read("verilator_shim.cpp")?).as_bytes(),
+    )?;
+    write(
+        d,
+        "verilator_main.cpp",
+        read("verilator_main.cpp")?.as_bytes(),
+    )?;
     std::fs::create_dir(d.join("ngspice"))
         .map_err(|e| BuildError::Io(format!("cannot prepare the build: {e}")))?;
     for h in ["cosim.h", "cmtypes.h", "miftypes.h"] {
@@ -419,12 +439,22 @@ pub async fn build(
     // 3. Link the shim, Verilator's runtime and the model into a library.
     let obj = d.join("obj");
     let mut args: Vec<String> = vec!["--shared".into()];
-    for o in ["verilator_shim.o", "verilated.o", "verilated_threads.o", "Vlng__ALL.a"] {
+    for o in [
+        "verilator_shim.o",
+        "verilated.o",
+        "verilated_threads.o",
+        "Vlng__ALL.a",
+    ] {
         if obj.join(o).is_file() {
             args.push(format!("obj/{o}"));
         }
     }
-    args.extend(["-pthread".into(), "-lpthread".into(), "-o".into(), "model.so".into()]);
+    args.extend([
+        "-pthread".into(),
+        "-lpthread".into(),
+        "-o".into(),
+        "model.so".into(),
+    ]);
     let out = step(cxx, &args, d, deadline, cancel).await?;
     if !out.success() {
         return Err(BuildError::Failed {
@@ -461,7 +491,10 @@ mod tests {
 
     #[test]
     fn a_plain_module_passes() {
-        assert_eq!(check(&[src("rtl/counter.v", COUNTER)]).unwrap(), ["counter"]);
+        assert_eq!(
+            check(&[src("rtl/counter.v", COUNTER)]).unwrap(),
+            ["counter"]
+        );
         let pkg = "package p; endpackage\nmodule m; import p::*; endmodule\n";
         assert_eq!(check(&[src("m.sv", pkg)]).unwrap(), ["m"]);
     }
@@ -471,15 +504,36 @@ mod tests {
         for (text, why) in [
             ("module m; initial $system(\"id\"); endmodule", "$system"),
             ("module m; initial $c(\"system(0);\"); endmodule", "$c"),
-            ("module m; initial begin integer f; f = $fopen(\"x\"); end endmodule", "$fopen"),
-            ("module m; initial $readmemh(\"x\", mem); endmodule", "$readmemh"),
-            ("module m; import \"DPI-C\" function int system(input string c); endmodule", "DPI"),
+            (
+                "module m; initial begin integer f; f = $fopen(\"x\"); end endmodule",
+                "$fopen",
+            ),
+            (
+                "module m; initial $readmemh(\"x\", mem); endmodule",
+                "$readmemh",
+            ),
+            (
+                "module m; import \"DPI-C\" function int system(input string c); endmodule",
+                "DPI",
+            ),
             ("module m; export \"DPI-C\" function f; endmodule", "DPI"),
-            ("`define D \"DPI-C\"\nmodule m; import `D function int f(); endmodule", "DPI"),
+            (
+                "`define D \"DPI-C\"\nmodule m; import `D function int f(); endmodule",
+                "DPI",
+            ),
             ("`include \"other.v\"\nmodule m; endmodule", "`include"),
-            ("`systemc_header\n#include <cstdlib>\n`verilog\nmodule m; endmodule", "`systemc_header"),
-            ("`verilator_config\nlint_off\nmodule m; endmodule", "`verilator_config"),
-            ("`define S(a,b) a``b\nmodule m; initial `S($sys,tem)(\"id\"); endmodule", "token pasting"),
+            (
+                "`systemc_header\n#include <cstdlib>\n`verilog\nmodule m; endmodule",
+                "`systemc_header",
+            ),
+            (
+                "`verilator_config\nlint_off\nmodule m; endmodule",
+                "`verilator_config",
+            ),
+            (
+                "`define S(a,b) a``b\nmodule m; initial `S($sys,tem)(\"id\"); endmodule",
+                "token pasting",
+            ),
         ] {
             let e = check(&[src("rtl/m.v", text)]).unwrap_err().to_string();
             assert!(e.contains(why), "{text}: {e}");
@@ -509,7 +563,10 @@ mod tests {
             ]
         );
         let [i, o, io] = port_headers(&ports, header);
-        assert!(i.ends_with("VL_DATA(8,clk,0,0)\nVL_DATA(8,rst_n,0,0)\n"), "{i}");
+        assert!(
+            i.ends_with("VL_DATA(8,clk,0,0)\nVL_DATA(8,rst_n,0,0)\n"),
+            "{i}"
+        );
         assert!(o.ends_with("VL_DATA(8,q,3,0)\nVL_DATA(32,w,31,0)\n"), "{o}");
         assert!(io.ends_with("VL_DATA(16,bus,9,0)\n"), "{io}");
         assert!(header_ports("VL_IN64(&x,63,0);").is_err());
