@@ -247,6 +247,17 @@ impl Runner {
             .await
     }
 
+    /// The compilers and sources behavioural models need, for `doctor`.
+    pub async fn behavioral_toolchain(&self) -> aispice_sim::behavioral::Toolchain {
+        let c = self.config();
+        aispice_sim::behavioral::Toolchain::detect(
+            c.openvaf_exe.as_deref(),
+            c.verilator_exe.as_deref(),
+            c.ngspice_exe.as_deref(),
+        )
+        .await
+    }
+
     /// The behavioural libraries this process has built.
     pub async fn behavioral_built(&self) -> Vec<Arc<aispice_sim::behavioral::Library>> {
         self.behavioral.built().await
