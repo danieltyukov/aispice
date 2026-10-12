@@ -227,13 +227,12 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// An MCP client cannot make aispice run xschem on a schematic it did not
-/// write: the tool has no switch for it (an extra input field changes
-/// nothing), so only the environment the user starts the server with can
-/// allow it, and even then xschem runs only inside the sandbox, so a
-/// stand-in in its place never escapes to leave its mark.
+/// write: an import never runs it. Neither an extra input field nor the
+/// environment variable an earlier version honoured changes that, and the
+/// stand-in in xschem's place never leaves its mark.
 #[cfg(unix)]
 #[test]
-fn mcp_import_never_runs_xschem_without_the_user() {
+fn mcp_import_never_runs_xschem() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let project = dir.join("project");
@@ -241,7 +240,7 @@ fn mcp_import_never_runs_xschem_without_the_user() {
     std::fs::write(project.join("rc.sch"), common::RC).unwrap();
     let sentinel = dir.join("xschem-ran");
     let (program, fakebin) = common::fake_xschem(&dir, &sentinel);
-    let env = |ask: bool| {
+    let env = |old_switch: bool| {
         let mut e = vec![
             ("AISPICE_XSCHEM", program.clone().into_os_string()),
             ("PATH", common::path_with(&fakebin)),
@@ -250,17 +249,13 @@ fn mcp_import_never_runs_xschem_without_the_user() {
                 dir.join("pdks.toml").into_os_string(),
             ),
         ];
-        if ask {
+        if old_switch {
             e.push(("AISPICE_XSCHEM_CHECK_IMPORTS", "1".into()));
         }
         e
     };
-    // Without the opt-in the import says xschem did not check it; with the
-    // opt-in it may run xschem, but only sandboxed. Either way the import is
-    // written and the stand-in xschem never leaves its mark outside the
-    // sandbox (it is blocked, or no sandbox starts and it is not run).
-    for (ask, circuit) in [(false, "a.asc"), (true, "b.asc")] {
-        let mut c = Client::start_with(&project, &env(ask));
+    for (old_switch, circuit) in [(false, "a.asc"), (true, "b.asc")] {
+        let mut c = Client::start_with(&project, &env(old_switch));
         c.request(
             "initialize",
             json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "1"}}),
@@ -272,12 +267,8 @@ fn mcp_import_never_runs_xschem_without_the_user() {
         );
         assert_ne!(out["isError"], json!(true), "{out}");
         let text = text(&out);
-        assert_eq!(
-            text.contains("not checked against xschem"),
-            !ask,
-            "ask={ask}: {text}"
-        );
+        assert!(text.contains("not checked against xschem"), "{text}");
         assert!(project.join(circuit).exists());
-        assert!(!sentinel.exists(), "ask={ask}: {text}");
+        assert!(!sentinel.exists(), "{text}");
     }
 }

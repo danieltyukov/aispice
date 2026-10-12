@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+// Only the Unix helpers take paths.
+#[cfg(unix)]
 use std::path::Path;
 
 /// A small RC low-pass in xschem's format.

@@ -14,12 +14,15 @@
 //! The built-in symbol definitions are checked against the installed files
 //! in `aispice_core::xschem::symbol` (same gate).
 //!
-//! xschem runs only inside aispice's sandbox (bubblewrap where it can start,
-//! else Landlock), through the same `aispice_sim::xschem::netlist` the
-//! product uses, and the product's own checks (`check_import` with the
-//! user's opt-in, `check_export`) must agree too. On a machine with neither
-//! sandbox, the xschem comparisons are skipped with a note and only
-//! aispice's own proofs run; xschem is never run outside the sandbox.
+//! The product runs xschem only on exports. These tests, and only these,
+//! also hand xschem IHP's own benches, which are trusted files from the
+//! registered PDK, to check that aispice's netlister matches xschem's. Both
+//! go through the same `aispice_sim::xschem::netlist` the product uses (the
+//! text is handed over and written into a private folder), inside the
+//! sandbox (bubblewrap where it can start, else Landlock with seccomp). The
+//! product's own export check must agree too, and its import must say it was
+//! not checked against xschem. On a machine with neither sandbox, the xschem
+//! comparisons are skipped with a note and only aispice's own proofs run.
 
 use aispice_core::netlist::{CompareOptions, compare_with, parse};
 use aispice_core::symbol::SymbolLibrary;
@@ -29,8 +32,7 @@ use aispice_sim::pdk::Pdk;
 use aispice_sim::xschem::{Run, Sandbox};
 use aispice_tools::templates;
 use aispice_tools::xschem::{
-    Effort, ImportCheck, Setup, XschemCheck, check_export, check_import, export_schematic,
-    import_file,
+    Effort, Setup, XschemCheck, check_export, export_schematic, import_file, import_xschem_check,
 };
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
@@ -86,30 +88,30 @@ async fn sandbox() -> Option<Sandbox> {
     }
 }
 
-/// xschem's own netlist of a trusted file, inside the sandbox.
+/// xschem's own netlist of a trusted file (one of IHP's benches, or an
+/// export aispice wrote), inside the sandbox. The text is handed over as the
+/// product hands an export over; the file's own folder goes last on the
+/// library path, where xschem would otherwise look for its sibling symbols
+/// and schematics.
 async fn xschem_netlist(
     setup: &Setup,
     sandbox: &Sandbox,
     sch: &Path,
-    run: &Run,
+    pdk: &Path,
     cancel: &CancellationToken,
 ) -> String {
     let x = setup.xschem.as_ref().unwrap();
-    aispice_sim::xschem::netlist(x, sandbox, sch, run, cancel)
-        .await
-        .unwrap()
-}
-
-fn run_for(setup: &Setup, pdk: &Path, files: Vec<PathBuf>) -> Run {
-    Run {
+    let mut run = Run {
         library: setup.library.clone(),
-        files,
-        // IHP's benches live under the PDK, a trusted root, so nothing is
-        // staged; the project roots are only used for files outside it.
-        project_roots: Vec::new(),
         models_ngspice: Some(pdk.join("libs.tech/ngspice/models")),
         models_xyce: Some(pdk.join("libs.tech/xyce/models")),
-    }
+    };
+    run.library.push(sch.parent().unwrap().to_path_buf());
+    let text = std::fs::read_to_string(sch).unwrap();
+    let name = sch.file_name().unwrap().to_str().unwrap();
+    aispice_sim::xschem::netlist(x, sandbox, name, &text, &run, cancel)
+        .await
+        .unwrap_or_else(|e| panic!("{}: {e}", sch.display()))
 }
 
 fn proven(what: &str, check: &XschemCheck, problems: &mut Vec<String>) {
@@ -149,27 +151,16 @@ async fn every_test_bench_imports_and_xschem_agrees() {
                 imported.proof.differences
             ));
         }
-        // The product never runs xschem on an import without the user's
-        // opt-in, whether or not a sandbox exists.
-        let check = check_import(
-            &setup,
-            sch,
-            roots.clone(),
-            &imported,
-            Some(out.path()),
-            ImportCheck::Off,
-            &cancel,
-        )
-        .await;
-        assert!(matches!(check, XschemCheck::Skipped { .. }), "{check:?}");
-        // With a sandbox: aispice's xschem netlist is xschem's own, xschem's
-        // netlist matches the .asc's, and the product's own opt-in check
-        // agrees.
+        // The product never runs xschem on an import.
+        assert!(
+            matches!(import_xschem_check(), XschemCheck::Skipped { reason } if reason.contains("not checked against xschem"))
+        );
+        // With a sandbox: aispice's xschem netlist is xschem's own, and
+        // xschem's netlist matches the .asc's.
         let Some(sandbox) = &sandbox else { continue };
         let verdict = safety::scan(sch, &setup.resolver(roots.clone()), &setup.trusted);
         assert!(verdict.allowed(), "{name}: {:?}", verdict.refused);
-        let run = run_for(&setup, &pdk, verdict.files.clone());
-        let theirs = xschem_netlist(&setup, sandbox, sch, &run, &cancel).await;
+        let theirs = xschem_netlist(&setup, sandbox, sch, &pdk, &cancel).await;
         if lines(&theirs) != lines(&imported.xschem.text) {
             problems.push(format!(
                 "{name}: aispice's xschem netlist differs from xschem's:\n{}",
@@ -191,17 +182,6 @@ async fn every_test_bench_imports_and_xschem_agrees() {
         if let Err(m) = compare_with(&mine, &imported.asc_netlist, &imported.compare) {
             problems.push(format!("{name}: xschem against the .asc: {m:?}"));
         }
-        let check = check_import(
-            &setup,
-            sch,
-            roots,
-            &imported,
-            Some(out.path()),
-            ImportCheck::On,
-            &cancel,
-        )
-        .await;
-        proven(&name, &check, &mut problems);
     }
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
 }
@@ -263,8 +243,7 @@ async fn templates_and_benches_export_and_xschem_agrees() {
         std::fs::write(&path, &exported.text).unwrap();
         let verdict = safety::scan(&path, &setup.resolver(vec![dir.clone()]), &setup.trusted);
         assert!(verdict.allowed(), "{name}: {:?}", verdict.refused);
-        let run = run_for(&setup, &pdk, verdict.files.clone());
-        let theirs = xschem_netlist(&setup, sandbox, &path, &run, &cancel).await;
+        let theirs = xschem_netlist(&setup, sandbox, &path, &pdk, &cancel).await;
         let theirs = parse(&clean(&theirs, None).text);
         if let Err(m) = compare_with(&exported.asc_netlist, &theirs, &exported.compare) {
             problems.push(format!("{name}: {m:?}"));

@@ -169,7 +169,7 @@ $ aispice check ota.asc --post-layout ota.gds
 
 Layouts come only from generators: when DRC or LVS fails, the agent changes the generator's parameters or role map and draws again, and never edits GDS. [docs/SETUP.md](docs/SETUP.md#layout) lists what layout needs.
 
-Circuits move to and from xschem with `aispice xschem import` and `aispice xschem export` (or the `xschem_import` and `xschem_export` tools). Both sides are netlisted and compared, by aispice and by xschem itself when it is installed. xschem evaluates Tcl from a schematic, so it runs sandboxed (bubblewrap, else Landlock), and on an imported file only when you ask (`--xschem-check` or `AISPICE_XSCHEM_CHECK_IMPORTS=1`); an export is aispice's own file, written so nothing in it is evaluated. [docs/XSCHEM.md](docs/XSCHEM.md) has the details.
+Circuits move to and from xschem with `aispice xschem import` and `aispice xschem export` (or the `xschem_import` and `xschem_export` tools). Both sides are netlisted and compared by aispice; an export is also checked with xschem itself when it is installed. xschem evaluates Tcl from a schematic, so aispice runs it only on files it wrote itself, in a sandbox, and never on an imported schematic. [docs/XSCHEM.md](docs/XSCHEM.md) has the details.
 
 ## Blocks for mixed-signal chips
 

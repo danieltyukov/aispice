@@ -6,8 +6,8 @@ use super::blocking;
 use super::schematic_tools::spec;
 use crate::workspace::Workspace;
 use crate::xschem::{
-    Effort, ExportOutcome, ImportCheck, ImportOutcome, MAX_LAYOUT_ELEMENTS, Setup, check_export,
-    check_import, export_schematic, import_file, pdk_for, report, report_json,
+    Effort, ExportOutcome, ImportOutcome, MAX_LAYOUT_ELEMENTS, Setup, check_export,
+    export_schematic, import_file, import_xschem_check, pdk_for, report, report_json,
 };
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
@@ -59,7 +59,7 @@ impl Tool for XschemImport {
     fn spec(&self) -> ToolSpec {
         spec::<XschemImportInput>(
             "xschem_import",
-            "Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. xschem itself checks an import only when the user started aispice with AISPICE_XSCHEM_CHECK_IMPORTS=1; this tool cannot turn that on. Refuses to overwrite.",
+            "Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. aispice never runs xschem on a schematic it did not write, so an import is not checked against xschem itself. Refuses to overwrite.",
         )
     }
 
@@ -67,7 +67,7 @@ impl Tool for XschemImport {
         aispice_agent::Access::Edit
     }
 
-    async fn call(&self, ctx: &ToolContext, input: Value) -> ToolOutput {
+    async fn call(&self, _ctx: &ToolContext, input: Value) -> ToolOutput {
         let input: XschemImportInput = match parse_input(input) {
             Ok(i) => i,
             Err(e) => return e,
@@ -81,7 +81,7 @@ impl Tool for XschemImport {
                 .clone()
                 .unwrap_or_else(|| with_extension(&input.schematic, "asc"));
             let effort = input.effort.unwrap_or(2).clamp(1, 3);
-            move || -> Result<(Setup, PathBuf, Vec<PathBuf>, Option<PathBuf>, String, aispice_core::xschem::import::Imported), String> {
+            move || -> Result<(String, aispice_core::xschem::import::Imported), String> {
                 let p = ws.project().map_err(|e| e.to_string())?;
                 if !input_schematic.to_ascii_lowercase().ends_with(".sch") {
                     return Err(format!("{input_schematic} must be an xschem .sch file"));
@@ -98,12 +98,11 @@ impl Tool for XschemImport {
                     return Err(format!("{circuit} already exists; name another circuit"));
                 }
                 let setup = setup(&ws, &p);
-                let roots = vec![p.root().to_path_buf()];
                 let out_dir = target.parent().map(Path::to_path_buf);
                 let imported = import_file(
                     &setup,
                     &sch,
-                    roots.clone(),
+                    vec![p.root().to_path_buf()],
                     out_dir.as_deref(),
                     p.library(),
                     Effort {
@@ -111,11 +110,11 @@ impl Tool for XschemImport {
                         max_elements: Some(MAX_LAYOUT_ELEMENTS),
                     },
                 )?;
-                Ok((setup, sch, roots, out_dir, circuit, imported))
+                Ok((circuit, imported))
             }
         })
         .await;
-        let (setup, sch, roots, out_dir, circuit, imported) = match planned {
+        let (circuit, imported) = match planned {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return ToolOutput::error(format!("No file created. {e}")),
             Err(e) => return ToolOutput::error(format!("internal error: {e}")),
@@ -127,17 +126,8 @@ impl Tool for XschemImport {
             ));
         }
         // xschem evaluates Tcl from the schematic, which aispice did not
-        // write: only the user's own environment can let it run here.
-        let xschem = check_import(
-            &setup,
-            &sch,
-            roots,
-            &imported,
-            out_dir.as_deref(),
-            ImportCheck::from_env(),
-            &ctx.cancel,
-        )
-        .await;
+        // write, so it is never run on an import.
+        let xschem = import_xschem_check();
         let outcome = ImportOutcome { imported, xschem };
         let p = match ws.project() {
             Ok(p) => p,

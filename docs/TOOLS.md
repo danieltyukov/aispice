@@ -1988,7 +1988,7 @@ Read-only: writes nothing of yours, only aispice's own folders.
 
 ## `xschem_import`
 
-Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. xschem itself checks an import only when the user started aispice with AISPICE_XSCHEM_CHECK_IMPORTS=1; this tool cannot turn that on. Refuses to overwrite.
+Import an xschem schematic (.sch, e.g. an IHP SG13G2 test bench) into the project as a readable LTspice .asc, drawn by aispice's layout engine. IHP devices become sg13g2 symbols; ngspice .control blocks and the PDK model header are dropped (aispice runs its own analyses and the project's PDK supplies the models). Returns what could not be carried over and a proof: both schematics are netlisted by aispice and compared. aispice never runs xschem on a schematic it did not write, so an import is not checked against xschem itself. Refuses to overwrite.
 
 Edits your files: each write is approved in ask-before-applying mode and can be undone.
 

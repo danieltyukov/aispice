@@ -13,8 +13,8 @@ use aispice_core::xschem::import::Proof;
 use aispice_core::xschem::netlist::Finding;
 use aispice_tools::pdk::Registry;
 use aispice_tools::xschem::{
-    Effort, ImportCheck, Setup, XschemCheck, check_export, check_import, export_schematic,
-    import_file, pdk_for, report, report_json,
+    Effort, Setup, XschemCheck, check_export, export_schematic, import_file, import_xschem_check,
+    pdk_for, report, report_json,
 };
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
@@ -87,15 +87,14 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-/// `xschem_check`: the user's `--xschem-check`, which lets xschem itself
-/// (in its sandbox) check the import.
+/// Import an xschem schematic. xschem itself is never run on it: it
+/// evaluates Tcl from the schematic, which aispice did not write.
 pub fn import(
     ctx: &Ctx,
     file: &Path,
     output: Option<&Path>,
     force: bool,
     effort: u8,
-    xschem_check: bool,
 ) -> Result<ExitCode> {
     let sch = file
         .canonicalize()
@@ -135,15 +134,7 @@ pub fn import(
         )?;
         return Ok(ExitCode::from(1));
     }
-    let xschem = runtime()?.block_on(check_import(
-        &setup,
-        &sch,
-        roots(&sch),
-        &imported,
-        Some(&out_dir),
-        ImportCheck::from_cli(xschem_check),
-        &CancellationToken::new(),
-    ));
+    let xschem = import_xschem_check();
     std::fs::write(&out, schematic::write_bytes(&imported.schematic))
         .with_context(|| format!("writing {}", out.display()))?;
     print_report(
