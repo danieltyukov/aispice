@@ -172,40 +172,47 @@ impl Runner {
         }
     }
 
-    /// The project's declared behavioural models that this netlist uses,
-    /// built (or taken from what this process built) and ready to load.
-    /// `on_ngspice` is checked before anything compiles: whether the run
-    /// will be on ngspice, the only simulator that loads them.
-    pub async fn behavioral_libraries(
+    /// The project's declared behavioural models, read and checked but not
+    /// built, with whether this netlist uses any. Nothing compiles before
+    /// the deck has passed the netlist policy.
+    fn behavioral_plan(
         &self,
         project: &Project,
         netlist: &Netlist,
-        on_ngspice: impl AsyncFnOnce() -> Result<(), RunError>,
-        cancel: &CancellationToken,
-    ) -> Result<(Vec<Arc<aispice_sim::behavioral::Library>>, Vec<String>), RunError> {
+    ) -> Result<(crate::behavioral::Declared, bool), RunError> {
         let cfg = ProjectConfig::load(project.root()).map_err(RunError::Pdk)?;
         if cfg.veriloga.is_empty() && cfg.cosim.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Default::default(), false));
         }
         let declared = crate::behavioral::declared(project).map_err(RunError::Netlist)?;
-        let names = declared.cosim_names();
         let (va, cosim) = crate::behavioral::used(netlist, &declared);
-        if va.is_empty() && cosim.is_empty() {
-            return Ok((Vec::new(), names));
+        let uses = !(va.is_empty() && cosim.is_empty());
+        if uses {
+            aispice_sim::behavioral::check_run_size(netlist).map_err(RunError::Netlist)?;
         }
-        on_ngspice().await?;
+        Ok((declared, uses))
+    }
+
+    /// Build what a netlist uses of the declared models (or take what this
+    /// process built before).
+    async fn behavioral_build(
+        &self,
+        project: &Project,
+        netlist: &Netlist,
+        declared: &crate::behavioral::Declared,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Arc<aispice_sim::behavioral::Library>>, RunError> {
+        let (va, cosim) = crate::behavioral::used(netlist, declared);
         let c = self.config();
         let tools = crate::behavioral::Tools {
             openvaf: c.openvaf_exe,
             verilator: c.verilator_exe,
             ngspice: c.ngspice_exe,
         };
-        let libs = self
-            .behavioral
+        self.behavioral
             .build(project, &tools, &va, &cosim, cancel)
             .await
-            .map_err(RunError::Netlist)?;
-        Ok((libs, names))
+            .map_err(RunError::Netlist)
     }
 
     /// Build the project's declared behavioural models (or the one named,
@@ -526,31 +533,18 @@ impl Runner {
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         // Verilog-A and co-simulated Verilog run on ngspice only: the other
         // simulators cannot load what aispice builds for them.
-        let mut switch_to_ngspice = false;
-        let (libraries, cosim) = self
-            .behavioral_libraries(
-                project,
-                netlist,
-                async || {
-                    if id == SimId::Ngspice {
-                        return Ok(());
-                    }
-                    let asked = simulator.is_some() || self.config().simulator != "auto";
-                    if asked || !self.available(SimId::Ngspice).await {
-                        return Err(RunError::Netlist(format!(
-                            "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
-                            id.name()
-                        )));
-                    }
-                    switch_to_ngspice = true;
-                    Ok(())
-                },
-                cancel,
-            )
-            .await?;
-        if switch_to_ngspice {
+        let (declared, uses_behavioral) = self.behavioral_plan(project, netlist)?;
+        if uses_behavioral && id != SimId::Ngspice {
+            let asked = simulator.is_some() || self.config().simulator != "auto";
+            if asked || !self.available(SimId::Ngspice).await {
+                return Err(RunError::Netlist(format!(
+                    "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
+                    id.name()
+                )));
+            }
             id = SimId::Ngspice;
         }
+        let cosim = declared.cosim_names();
         let lib_dirs = self.model_lib_dirs();
         let base = Self::base_dir(project, circuit)?;
         let policy = self.policy_for(project, &base);
@@ -684,6 +678,13 @@ impl Runner {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "deck".into());
+        // Compiled only now, for a deck the policy accepted.
+        let libraries = if uses_behavioral {
+            self.behavioral_build(project, netlist, &declared, cancel)
+                .await?
+        } else {
+            Vec::new()
+        };
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
         for lib in &libraries {

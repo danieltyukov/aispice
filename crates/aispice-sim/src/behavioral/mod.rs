@@ -39,6 +39,93 @@ pub const OPENVAF_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a Verilator build may take, all its steps together.
 pub const VERILATOR_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Output points a run with behavioural libraries may ask for: the stop
+/// time over the print step of its `.tran`. A co-simulated model runs at
+/// every step, and the raw file grows with every point.
+pub const MAX_RUN_POINTS: f64 = 2e6;
+/// XSPICE instances (digital models, bridges, co-simulated models) one deck
+/// may have.
+pub const MAX_XSPICE_INSTANCES: usize = 4096;
+
+/// Refuse a deck whose run would be too long to co-simulate, before
+/// anything is built: a `.tran` over [`MAX_RUN_POINTS`] points (saying the
+/// longest stop time its step allows) or more than
+/// [`MAX_XSPICE_INSTANCES`] XSPICE instances.
+pub fn check_run_size(netlist: &aispice_core::netlist::Netlist) -> Result<(), String> {
+    use aispice_core::netlist::Line;
+    fn walk(items: &[Line], a: &mut usize, tran: &mut Vec<String>) {
+        for item in items {
+            match item {
+                Line::Element(e) if e.letter() == 'A' => *a += 1,
+                Line::Directive { text }
+                    if text.trim_start().to_ascii_lowercase().starts_with(".tran") =>
+                {
+                    tran.push(text.clone())
+                }
+                Line::Subckt(s) => walk(&s.body, a, tran),
+                _ => {}
+            }
+        }
+    }
+    let mut instances = 0usize;
+    let mut trans = Vec::new();
+    walk(&netlist.items, &mut instances, &mut trans);
+    if instances > MAX_XSPICE_INSTANCES {
+        return Err(format!(
+            "the deck has {instances} XSPICE instances; a run with behavioural models may have at most {MAX_XSPICE_INSTANCES}"
+        ));
+    }
+    for t in trans {
+        // Times only as plain numbers: an expression (`{st}`) could hide a
+        // step this check cannot weigh.
+        let raw: Vec<&str> = t
+            .split_whitespace()
+            .skip(1)
+            .filter(|w| !w.eq_ignore_ascii_case("uic"))
+            .collect();
+        let words: Vec<f64> = raw
+            .iter()
+            .map_while(|w| aispice_core::units::parse(w))
+            .collect();
+        if words.len() < raw.len().min(4) {
+            return Err(format!(
+                "`{}`: in a run with behavioural models, write the .tran times as plain numbers",
+                t.trim()
+            ));
+        }
+        let (step, stop) = match words[..] {
+            [stop] => (0.0, stop),
+            [step, stop, ..] => (step, stop),
+            _ => continue,
+        };
+        if !stop.is_finite() {
+            return Err(format!("`{}` has no finite stop time", t.trim()));
+        }
+        // ngspice prints at least every `step`, whatever its internal steps.
+        // A zero step is LTspice's "choose one", which the translation
+        // turns into the maximum step when one is given, else a thousandth
+        // of the run: the same here.
+        let step = if step > 0.0 {
+            step
+        } else {
+            match words.get(3).copied().filter(|m| *m > 0.0) {
+                Some(tmax) => tmax,
+                None => continue,
+            }
+        };
+        let points = stop / step;
+        if points > MAX_RUN_POINTS {
+            return Err(format!(
+                "`{}` asks for {points:.3e} output points; a run with behavioural models may have at most {MAX_RUN_POINTS:.0e}: with a step of {} the stop time can be at most {}",
+                t.trim(),
+                aispice_core::units::format(step),
+                aispice_core::units::format(step * MAX_RUN_POINTS)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A source file read from the project, checked for size by the caller.
 #[derive(Debug, Clone)]
 pub struct Source {
@@ -367,6 +454,28 @@ impl Toolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_or_wide_runs_are_refused_before_anything_builds() {
+        use aispice_core::netlist::parse;
+        assert!(check_run_size(&parse("t\nV1 a 0 1\n.tran 1n 1m\n.end\n")).is_ok());
+        let e = check_run_size(&parse("t\nV1 a 0 1\n.tran 1p 1\n.end\n")).unwrap_err();
+        assert!(
+            e.contains("at most 2e6") && e.contains("the stop time can be at most 2u"),
+            "{e}"
+        );
+        assert!(check_run_size(&parse("t\n.tran 0 1m\n.end\n")).is_ok());
+        // A zero step with a maximum step prints at the maximum step.
+        assert!(check_run_size(&parse("t\n.tran 0 1 0 1p\n.end\n")).is_err());
+        let e = check_run_size(&parse("t\n.param st=1p\n.tran {st} 1\n.end\n")).unwrap_err();
+        assert!(e.contains("plain numbers"), "{e}");
+        assert!(check_run_size(&parse("t\n.tran 1n 1u uic\n.end\n")).is_ok());
+        let many: String = (0..=MAX_XSPICE_INSTANCES)
+            .map(|i| format!("A{i} [a] [b] buf\n"))
+            .collect();
+        let e = check_run_size(&parse(&format!("t\n{many}.tran 1n 1u\n.end\n"))).unwrap_err();
+        assert!(e.contains("4097 XSPICE instances"), "{e}");
+    }
 
     #[test]
     fn names_and_logs() {

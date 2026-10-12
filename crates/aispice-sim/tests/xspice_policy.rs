@@ -112,6 +112,12 @@ async fn ngspice_would_load_or_run_what_the_policy_refuses() {
             Ngspice42::Starts,
         ),
     ];
+    let version = std::process::Command::new(&exe)
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let v42 = version.contains("ngspice-42");
     let policy = Policy {
         base_dir: dir.path().to_path_buf(),
         allowed_dirs: vec![dir.path().to_path_buf()],
@@ -128,19 +134,26 @@ async fn ngspice_would_load_or_run_what_the_policy_refuses() {
         );
         for (mode, ltpsa) in [("ltpsa", true), ("native", false)] {
             let log = ngspice_says(&exe, &text, ltpsa);
-            // ngspice lowercases the card, the path in quotes included.
-            let loaded = log.to_lowercase().contains(&lib.to_lowercase())
-                && log.contains("cannot open shared object file");
+            // d_cosim says so before the loader's own message, which
+            // differs between systems.
+            let loaded = log
+                .to_ascii_lowercase()
+                .contains("failed to load simulation binary");
             let started = log.contains("failed to fork or start process");
             let no_model = log.contains("unable to find definition of model");
             let seen = match (loaded, started, no_model) {
                 (true, _, _) => Ngspice42::Loads,
                 (_, true, _) => Ngspice42::Starts,
                 (_, _, true) => Ngspice42::NoModel,
+                _ if *expected == Ngspice42::NoModel && !v42 => continue,
                 _ => panic!("{mode} {card:?}: ngspice said neither\n{log}"),
             };
             eprintln!("{mode}: {card:?} -> {seen:?}");
-            assert_eq!(seen, *expected, "{mode} {card:?}\n{log}");
+            // What another release does with the spellings ngspice 42 does
+            // not read is recorded, not asserted: they are refused anyway.
+            if v42 || *expected != Ngspice42::NoModel {
+                assert_eq!(seen, *expected, "{mode} {card:?}\n{log}");
+            }
         }
     }
 }
