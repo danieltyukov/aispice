@@ -57,6 +57,7 @@ fn copy_package(from: &Path, to: &Path) {
 
 struct Setup {
     _pdk: tempfile::TempDir,
+    pdk_root: PathBuf,
     project: tempfile::TempDir,
     ws: Arc<Workspace>,
 }
@@ -82,6 +83,7 @@ fn setup() -> Setup {
     ws.set_project(Project::open(project.path(), Default::default()).unwrap());
     Setup {
         _pdk: pdk_dir,
+        pdk_root: root,
         project,
         ws: Arc::new(ws),
     }
@@ -146,6 +148,150 @@ async fn a_chip_of_a_checked_package_is_planned_and_nothing_is_written() {
         assert!(text.contains(&format!("net {net}:")), "{net}: {text}");
     }
     assert_eq!(files(s.project.path()), before, "plan writes nothing");
+}
+
+/// The counter's package claiming another size, in its LEF and its
+/// manifest alike, as a package made to mislead would.
+fn with_size(s: &Setup, w: &str, h: &str) {
+    let pkg = s.project.path().join("macros/tiny_counter.macro");
+    let from = fixtures().join("tiny_counter.macro");
+    let lef = std::fs::read_to_string(from.join("tiny_counter.lef")).unwrap();
+    assert!(lef.contains("SIZE 20 BY 10"));
+    std::fs::write(
+        pkg.join("tiny_counter.lef"),
+        lef.replace("SIZE 20 BY 10", &format!("SIZE {w} BY {h}")),
+    )
+    .unwrap();
+    let manifest = std::fs::read_to_string(from.join("macro.toml")).unwrap();
+    assert!(manifest.contains("width_um = 20.0\nheight_um = 10.0"));
+    std::fs::write(
+        pkg.join("macro.toml"),
+        manifest.replace(
+            "width_um = 20.0\nheight_um = 10.0",
+            &format!("width_um = {w}\nheight_um = {h}"),
+        ),
+    )
+    .unwrap();
+}
+
+/// A package's LEF can claim any size. Past the die limit it is refused
+/// before anything is sized from it: a ring around 1e10 um would be 2e8
+/// filler cells.
+#[tokio::test]
+async fn a_block_larger_than_any_die_is_refused_at_once() {
+    let s = setup();
+    std::fs::write(
+        s.project.path().join("t.chip.toml"),
+        chip("macros/tiny_counter.macro"),
+    )
+    .unwrap();
+    for (w, h) in [("1e10", "10.0"), ("20.0", "1e300"), ("20000.001", "10.0")] {
+        with_size(&s, w, h);
+        let started = std::time::Instant::now();
+        let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
+        assert!(
+            out.is_error && out.text_content().contains("at most 20 mm"),
+            "{w} x {h}: {}",
+            out.text_content()
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+}
+
+/// The counter's GDS with a `$$$CONTEXT_INFO$$$` cell added before ENDLIB,
+/// and its evidence brought up to date so the package still checks.
+fn add_context_info(pkg: &Path) {
+    let gds = pkg.join("tiny_counter.gds");
+    let old = aispice_core::macropkg::sha256_file(&gds).unwrap();
+    let bytes = std::fs::read(&gds).unwrap();
+    let end = bytes
+        .windows(4)
+        .rposition(|w| w == [0, 4, 4, 0])
+        .expect("ENDLIB");
+    let mut out = bytes[..end].to_vec();
+    let mut record = |kind: u8, dt: u8, data: &[u8]| {
+        out.extend(((data.len() + 4) as u16).to_be_bytes());
+        out.extend([kind, dt]);
+        out.extend(data);
+    };
+    record(0x05, 0x02, &[0; 24]);
+    record(0x06, 0x06, b"$$$CONTEXT_INFO$$$");
+    record(0x07, 0x00, &[]);
+    out.extend(&bytes[end..]);
+    std::fs::write(&gds, out).unwrap();
+    let new = aispice_core::macropkg::sha256_file(&gds).unwrap();
+    for e in ["drc.json", "lvs.json"] {
+        let path = pkg.join("evidence").join(e);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(&old, &new)).unwrap();
+    }
+}
+
+/// KLayout rebuilds pcells from a GDS's context information with the
+/// parameters stored there, after IHP's pcell library is loaded, so a block
+/// carrying it could put geometry into the chip that no check saw.
+#[tokio::test]
+async fn a_block_gds_with_klayout_context_information_is_refused() {
+    let s = setup();
+    add_context_info(&s.project.path().join("macros/tiny_counter.macro"));
+    std::fs::write(
+        s.project.path().join("t.chip.toml"),
+        chip("macros/tiny_counter.macro"),
+    )
+    .unwrap();
+    let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
+    assert!(
+        out.is_error && out.text_content().contains("context information"),
+        "{}",
+        out.text_content()
+    );
+}
+
+/// SPICE ignores case, so `TINY_COUNTER` and `tiny_counter` are one
+/// subcircuit; a block or chip named like a cell of the PDK is refused
+/// whatever its case.
+#[tokio::test]
+async fn block_and_chip_names_of_pdk_cells_are_refused_in_any_case() {
+    let s = setup();
+    let lef = s
+        .pdk_root
+        .join("libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef");
+    std::fs::create_dir_all(lef.parent().unwrap()).unwrap();
+    std::fs::write(
+        &lef,
+        "MACRO TINY_COUNTER\n  CLASS CORE ;\nEND TINY_COUNTER\n",
+    )
+    .unwrap();
+    let text = chip("macros/tiny_counter.macro");
+    std::fs::write(s.project.path().join("t.chip.toml"), &text).unwrap();
+    let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
+    assert!(
+        out.is_error && out.text_content().contains("cell of the PDK's libraries"),
+        "{}",
+        out.text_content()
+    );
+    std::fs::remove_file(&lef).unwrap();
+    for (name, why) in [
+        ("SG13G2_top", "sg13g2_"),
+        ("sg13g2_inv_1", "sg13g2_"),
+        ("TINY_COUNTER", "is the chip's"),
+    ] {
+        std::fs::write(
+            s.project.path().join("t.chip.toml"),
+            text.replace("name = \"t\"", &format!("name = \"{name}\"")),
+        )
+        .unwrap();
+        let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
+        assert!(
+            out.is_error && out.text_content().contains(why),
+            "{name}: {}",
+            out.text_content()
+        );
+    }
+    // The fixture as it is plans.
+    std::fs::write(s.project.path().join("t.chip.toml"), &text).unwrap();
+    let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
+    assert!(!out.is_error, "{}", out.text_content());
 }
 
 #[tokio::test]
@@ -306,6 +452,18 @@ async fn bad_chip_descriptions_and_outputs_are_refused() {
             out.text_content()
         );
     }
+    // An `out` with leading space names the same folder as without: the
+    // guard looks at the folder that would be written.
+    let out = call(
+        &s.ws,
+        json!({"action": "assemble", "spec": "t.chip.toml", "out": "  t.chip"}),
+    )
+    .await;
+    assert!(
+        out.is_error && out.text_content().contains("was not made by the chip tool"),
+        "{}",
+        out.text_content()
+    );
     // Names Windows opens as another file: `.aispice.` is `.aispice`.
     for bad in [".aispice./out", "AISPIC~1/out", "out:stream"] {
         let out = call(

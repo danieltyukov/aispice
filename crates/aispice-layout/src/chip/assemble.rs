@@ -153,8 +153,13 @@ pub fn draw_plan(
     let fp = &plan.floorplan;
     let io_cells: BTreeSet<&str> = fp.ring.iter().map(|c| c.cell.as_str()).collect();
     let mut libraries = vec![json!({"file": io.gds, "cells": io_cells})];
+    // Each block's file once, however many instances of it the chip has: a
+    // second read would add renamed copies of its cells.
+    let mut read = BTreeSet::new();
     for b in blocks {
-        libraries.push(json!({"file": b.gds, "cells": [b.geom.cell]}));
+        if read.insert(&b.gds) {
+            libraries.push(json!({"file": b.gds, "cells": [b.geom.cell]}));
+        }
     }
     let place = |cell: &str, t: &super::geom::Trans| json!({"cell": cell, "rot": t.rot, "mirror": t.mirror, "x": t.dx, "y": t.dy});
     let mut instances: Vec<Value> = fp.ring.iter().map(|c| place(&c.cell, &c.trans)).collect();
@@ -214,6 +219,37 @@ pub struct Assembled {
     pub lvs_view: PathBuf,
 }
 
+/// Run `chip.py` on a plan ([`draw_plan`]), written to `dir/plan.json`:
+/// the chip without fill and its LVS view, at the paths the plan names.
+pub async fn draw(
+    programs: &Programs,
+    files: &PdkLayoutFiles,
+    plan: &Value,
+    dir: &Path,
+    cancel: &CancellationToken,
+) -> Result<(), LayoutError> {
+    tools::check_path(dir)?;
+    let json = dir.join("plan.json");
+    std::fs::write(&json, plan.to_string()).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let run = RunDir::new()?;
+    let script = run.script("chip.py", CHIP_SCRIPT)?;
+    let out = tools::klayout(
+        programs,
+        run.path(),
+        &script,
+        &[
+            ("pdk_python", files.python.display().to_string()),
+            ("plan", json.display().to_string()),
+        ],
+        cancel,
+    )
+    .await?;
+    if !out.success() {
+        return Err(failed("KLayout (assembling the chip)", &out));
+    }
+    Ok(())
+}
+
 fn failed(what: &str, out: &aispice_sim::backend::process::ProcessOutput) -> LayoutError {
     LayoutError::Failed {
         program: what.into(),
@@ -242,26 +278,16 @@ pub async fn assemble(
     std::fs::create_dir_all(dir).map_err(|e| LayoutError::Io(e.to_string()))?;
     let nofill = dir.join("chip_nofill.gds");
     let lvs_view = dir.join("lvs_view.gds");
-    let json = dir.join("plan.json");
     let data = draw_plan(spec, plan, io, blocks, &nofill, &lvs_view);
-    std::fs::write(&json, data.to_string()).map_err(|e| LayoutError::Io(e.to_string()))?;
+    draw(programs, files, &data, dir, cancel).await?;
+    if !nofill.is_file() || !lvs_view.is_file() {
+        return Err(LayoutError::Failed {
+            program: "KLayout (assembling the chip)".into(),
+            message: "it wrote no chip".into(),
+        });
+    }
 
     let run = RunDir::new()?;
-    let script = run.script("chip.py", CHIP_SCRIPT)?;
-    let out = tools::klayout(
-        programs,
-        run.path(),
-        &script,
-        &[
-            ("pdk_python", files.python.display().to_string()),
-            ("plan", json.display().to_string()),
-        ],
-        cancel,
-    )
-    .await?;
-    if !out.success() || !nofill.is_file() || !lvs_view.is_file() {
-        return Err(failed("KLayout (assembling the chip)", &out));
-    }
 
     // Fill comes from aispice's own KLayout script: IHP's filler keep-outs,
     // with the metals filled only as far as the chip's density needs.

@@ -19,13 +19,15 @@ use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
 use aispice_core::macropkg::lef::parse_lef;
 use aispice_core::macropkg::{CheckOptions, Evidence, Manifest, Pdk, Status, check_package};
 use aispice_layout::chip::assemble::{self, Assembled, Block, ChipPlan};
-use aispice_layout::chip::floorplan::MacroGeom;
+use aispice_layout::chip::floorplan::{MAX_DIE, MacroGeom};
 use aispice_layout::chip::geom::LayerRect;
 use aispice_layout::chip::io::IoLibrary;
 use aispice_layout::chip::netlist::{self, BlockNetlist};
 use aispice_layout::chip::spec::{ChipSpec, MAX_BYTES};
 use aispice_layout::drc::DrcReport;
+use aispice_layout::gds;
 use aispice_layout::lvs::LvsReport;
+use aispice_layout::macro_export as mx;
 use aispice_layout::tools as ltools;
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -40,6 +42,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_VIEW_BYTES: u64 = 64 << 20;
 /// Nor its GDS past this (the macro package limit).
 const MAX_GDS_BYTES: u64 = 256 << 20;
+/// The cell in which KLayout stores pcell and library context in a GDS.
+const CONTEXT_INFO: &str = "$$$CONTEXT_INFO$$$";
 
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -198,6 +202,11 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
     let mut geoms = Vec::new();
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
+    // Names compare without case, as SPICE compares them.
+    let pdk_cells = mx::pdk_cell_names(&env.files.root)?;
+    if let Some(why) = mx::pdk_name_clash(&spec.name, &pdk_cells) {
+        return Err(format!("the chip's name: {why}"));
+    }
     let mut cells: BTreeMap<String, String> = BTreeMap::new();
     for m in &spec.macros {
         let dir = package_dir(&p, &m.package)?;
@@ -221,17 +230,20 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
         }
         let manifest = Manifest::load(&dir).map_err(|e| e.to_string())?;
         let name = manifest.name.clone();
-        if name == spec.name || name.starts_with("sg13g2_") {
+        if name.eq_ignore_ascii_case(&spec.name) {
             return Err(format!(
-                "{}: the block's name {name} clashes with the chip or the PDK's cells",
+                "{}: the block's name {name} is the chip's (names compare without case, as in SPICE)",
                 m.package
             ));
         }
-        if let Some(other) = cells.insert(name.clone(), m.package.clone())
+        if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
+            return Err(format!("{}: {why}", m.package));
+        }
+        if let Some(other) = cells.insert(name.to_ascii_lowercase(), m.package.clone())
             && other != m.package
         {
             return Err(format!(
-                "{other} and {} are both called {name}; a chip cannot hold two different cells of one name",
+                "{other} and {} are both called {name} (names compare without case, as in SPICE); a chip cannot hold two different cells of one name",
                 m.package
             ));
         }
@@ -247,6 +259,29 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
         let (w, h) = lef
             .size
             .ok_or_else(|| format!("{}: the LEF has no SIZE", m.package))?;
+        // Numbers no block on a die aispice lays out has are refused before
+        // anything is sized from them (or they saturate on the way to nm).
+        let limit = MAX_DIE as f64 / 1000.0;
+        let within = |v: f64| v.is_finite() && v.abs() <= limit;
+        if !(within(w) && within(h) && w > 0.0 && h > 0.0) {
+            return Err(format!(
+                "{}: the LEF's SIZE {w} BY {h} um is not a block's (at most {} mm a side)",
+                m.package,
+                MAX_DIE / 1_000_000
+            ));
+        }
+        let pins_within = lef
+            .pins
+            .values()
+            .flat_map(|p| &p.rects)
+            .all(|r| r.rect.iter().all(|v| within(*v)));
+        if !(within(lef.origin.0) && within(lef.origin.1) && pins_within) {
+            return Err(format!(
+                "{}: the LEF's ORIGIN or pins lie more than {} mm away",
+                m.package,
+                MAX_DIE / 1_000_000
+            ));
+        }
         let nm = |v: f64| (v * 1000.0).round() as i64;
         let mut pins = BTreeMap::new();
         for (pin, lp) in &lef.pins {
@@ -271,12 +306,24 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
         let gds = blocks_dir.join(format!("{name}.gds"));
         if !gds.exists() {
             let bytes = read_capped(&dir.join(manifest.file("gds")), MAX_GDS_BYTES)?;
+            // KLayout rebuilds pcells and library cells from a GDS's context
+            // information, with parameters the file chooses, after the PDK's
+            // pcell library is loaded: the chip would hold geometry the
+            // package checks never saw.
+            let lib = gds::parse(&bytes).map_err(|e| format!("{}: {e}", m.package))?;
+            if lib.cells.keys().any(|c| c.starts_with(CONTEXT_INFO)) {
+                return Err(format!(
+                    "{}: the GDS holds KLayout context information ({CONTEXT_INFO}), from which KLayout would rebuild pcells; write it without (KLayout's write_context_info = false)",
+                    m.package
+                ));
+            }
             std::fs::write(&gds, bytes).map_err(|e| e.to_string())?;
         }
         let spice_name = manifest.file("spice");
         let spice = String::from_utf8(read_capped(&dir.join(&spice_name), MAX_VIEW_BYTES)?)
             .map_err(|_| format!("{}: the SPICE netlist is not text", m.package))?;
         let block_netlist: BlockNetlist = netlist::block_netlist(&name, &spice, &spice_name)?;
+        geom.check().map_err(|e| format!("{}: {e}", m.package))?;
         geoms.push(geom.clone());
         blocks.push(Block {
             geom,
@@ -346,27 +393,23 @@ fn plan_text(l: &Loaded, plan: &ChipPlan) -> String {
     t
 }
 
-/// Refuse to write over something the chip tool did not make.
-fn may_replace(root: &Path, folder: &str, name: &str) -> Result<(), String> {
-    let dir = root.join(folder);
-    match std::fs::symlink_metadata(&dir) {
-        Err(_) => Ok(()),
-        Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
-            Err(format!("{folder} exists and is not a plain folder"))
-        }
-        Ok(_) => {
-            let ours = dir.join(format!("{name}.chip.json"));
-            let empty = std::fs::read_dir(&dir)
-                .map(|mut d| d.next().is_none())
-                .unwrap_or(false);
-            if empty || std::fs::symlink_metadata(&ours).is_ok_and(|m| m.is_file()) {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{folder} exists and was not made by the chip tool; choose another folder with `out`"
-                ))
-            }
-        }
+/// Refuse to write over something the chip tool did not make. The folder
+/// inspected is the one the output checks resolve, which the files are then
+/// written into, not the path as given.
+fn may_replace(p: &Project, folder: &str, name: &str) -> Result<(), String> {
+    let Some(dir) = p.existing_output_dir(folder).map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    let ours = dir.join(format!("{name}.chip.json"));
+    let empty = std::fs::read_dir(&dir)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(false);
+    if empty || std::fs::symlink_metadata(&ours).is_ok_and(|m| m.is_file()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{folder} exists and was not made by the chip tool; choose another folder with `out`"
+        ))
     }
 }
 
@@ -380,20 +423,26 @@ impl ChipTool {
     ) -> Result<(String, Value), String> {
         let env = layout::env(&self.ws)?;
         let p = env.project.clone();
-        let folder = input.out.clone().unwrap_or_else(|| {
-            let dir = Path::new(&l.spec_rel)
-                .parent()
-                .map(|d| d.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if dir.is_empty() {
-                format!("{}.chip", l.spec.name)
-            } else {
-                format!("{dir}/{}.chip", l.spec.name)
-            }
-        });
+        // Trimmed once, so every later use names the same folder.
+        let folder = input
+            .out
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let dir = Path::new(&l.spec_rel)
+                    .parent()
+                    .map(|d| d.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                if dir.is_empty() {
+                    format!("{}.chip", l.spec.name)
+                } else {
+                    format!("{dir}/{}.chip", l.spec.name)
+                }
+            });
         p.missing_dirs(&format!("{folder}/x"))
             .map_err(|e| e.to_string())?;
-        may_replace(p.root(), &folder, &l.spec.name)?;
+        may_replace(&p, &folder, &l.spec.name)?;
         let out = l.run.join("chip");
         let started = std::time::Instant::now();
         let chip: Assembled = assemble::assemble(

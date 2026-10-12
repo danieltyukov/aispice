@@ -61,11 +61,36 @@ options = pya.LoadLayoutOptions()
 # A cell of a later file never merges into an earlier one of the same name;
 # it is renamed, so two blocks cannot overwrite each other's cells.
 options.cell_conflict_resolution = pya.LoadLayoutOptions.RenameCell
+# The cells the plan names, each looked up only among the cells its own
+# file added: the renamed cell is the later file's, so by name alone a
+# block's top could resolve to an earlier file's cell of that name.
+cells = {}
 for lib in data["libraries"]:
+    before = set(c.cell_index() for c in ly.each_cell())
     ly.read(path(lib["file"]), options)
+    added = {}
+    for c in ly.each_cell():
+        if c.cell_index() in before:
+            continue
+        # A pcell variant or library cell is rebuilt from the file's
+        # context information, with parameters the file chose, into
+        # geometry no check of the file saw.
+        if c.is_proxy():
+            raise RuntimeError(
+                "%s holds a pcell or library cell (%s); write it without KLayout context information"
+                % (lib["file"], c.name)
+            )
+        added[c.name] = c.cell_index()
     for c in lib["cells"]:
-        if ly.cell(name(c)) is None:
-            raise RuntimeError("%s has no cell %s" % (lib["file"], c))
+        c = name(c)
+        if c not in added:
+            raise RuntimeError(
+                "%s has no cell %s of its own (missing, or the name of a cell read before)"
+                % (lib["file"], c)
+            )
+        if c in cells:
+            raise RuntimeError("two files hold a cell %s" % c)
+        cells[c] = added[c]
 
 top_name = name(data["top"])
 if ly.cell(top_name) is not None:
@@ -73,14 +98,14 @@ if ly.cell(top_name) is not None:
 top = ly.create_cell(top_name)
 
 for inst in data["instances"]:
-    cell = ly.cell(name(inst["cell"]))
-    if cell is None:
-        raise RuntimeError("no cell %s" % inst["cell"])
+    ci = cells.get(name(inst["cell"]))
+    if ci is None:
+        raise RuntimeError("no cell %s in the plan's files" % inst["cell"])
     rot = integer(inst["rot"])
     if rot not in (0, 1, 2, 3) or not isinstance(inst["mirror"], bool):
         raise ValueError("bad placement")
     trans = pya.Trans(rot, inst["mirror"], integer(inst["x"]), integer(inst["y"]))
-    top.insert(pya.CellInstArray(cell.cell_index(), trans))
+    top.insert(pya.CellInstArray(ci, trans))
 
 pcell_cells = set()
 for pc in data["pcells"]:
@@ -136,10 +161,14 @@ save = pya.SaveLayoutOptions()
 save.write_context_info = False
 ly.write(path(data["out"]), save)
 
-drop = set(name(c) for c in data["lvs_drop"])
+drop = set()
+for c in data["lvs_drop"]:
+    if name(c) not in cells:
+        raise RuntimeError("no cell %s to leave out of the LVS view" % c)
+    drop.add(cells[c])
 for inst in list(top.each_inst()):
     ci = inst.cell_index
-    if ci in pcell_cells or ly.cell(ci).name in drop:
+    if ci in pcell_cells or ci in drop:
         inst.delete()
 prune_others()
 ly.write(path(data["lvs_out"]), save)

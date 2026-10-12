@@ -11,6 +11,7 @@
 use super::schematic_tools::spec;
 use super::sim_tools::{corner_report, load_specs};
 use crate::layout::{self, GdsFile};
+use crate::project::Project;
 use crate::workspace::{FileWrite, Workspace};
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
@@ -332,15 +333,12 @@ fn package_files(dir: &Path, folder: &str) -> Result<Vec<FileWrite>, String> {
 /// Refuse to write over something that is not an earlier aispice export of
 /// the same files: another tool's package, or files this export would not
 /// replace (their evidence would no longer describe the package).
-fn may_replace(root: &Path, folder: &str, files: &[FileWrite]) -> Result<(), String> {
-    let dir = root.join(folder);
-    let meta = match std::fs::symlink_metadata(&dir) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
+/// The folder inspected is the one the output checks resolve, which the
+/// files are then written into, not the path as given.
+fn may_replace(p: &Project, folder: &str, files: &[FileWrite]) -> Result<(), String> {
+    let Some(dir) = p.existing_output_dir(folder).map_err(|e| e.to_string())? else {
+        return Ok(());
     };
-    if !meta.is_dir() || meta.file_type().is_symlink() {
-        return Err(format!("{folder} exists and is not a plain folder"));
-    }
     match Manifest::load(&dir.join(MANIFEST)) {
         Ok(m) if m.producer.tool == "aispice" => {}
         Ok(m) => {
@@ -408,9 +406,12 @@ async fn build(
     if !mx::is_identifier(&ground) {
         return Err(format!("`{ground}` cannot name the ground pin"));
     }
+    // Trimmed once, so every later use names the same folder.
     let folder = input
         .out
-        .clone()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_string)
         .unwrap_or_else(|| format!("macros/{name}.macro"));
     if let Some(v) = input.voltage
         && !(v.is_finite() && v > 0.0 && v < 100.0)
@@ -418,6 +419,12 @@ async fn build(
         return Err(format!("voltage {v} V is not a supply voltage"));
     }
     let env = layout::env(ws)?;
+    // A macro named like a cell of the PDK would clash with it in a chip and
+    // in SPICE, which ignores case.
+    let pdk_cells = mx::pdk_cell_names(&env.files.root)?;
+    if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
+        return Err(format!("{why}; choose another name with `name`"));
+    }
     let p = env.project.clone();
     p.missing_dirs(&format!("{folder}/{MANIFEST}"))
         .map_err(|e| e.to_string())?;
@@ -850,7 +857,7 @@ async fn build(
         ));
     }
     let files = package_files(&pkg, &folder)?;
-    may_replace(p.root(), &folder, &files)?;
+    may_replace(&p, &folder, &files)?;
 
     let mut text = format!(
         "{name}: {} pins ({}), {:.2} x {:.2} um, PDK {} at {}.\n",

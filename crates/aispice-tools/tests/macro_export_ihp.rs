@@ -217,6 +217,51 @@ async fn the_ota_and_the_comparator_export_as_packages_both_tools_accept() {
     assert!(!out.is_error, "{}", out.text_content());
     check(&pkg, &pdk);
 
+    // A macro named like a cell of the PDK would clash with it in a chip
+    // and in SPICE, which ignores case.
+    let mut names = vec![("SG13G2_INV_1", "sg13g2_"), ("sg13g2_mine", "sg13g2_")];
+    let sram = std::env::var_os("AISPICE_PDK_IHP")
+        .map(PathBuf::from)
+        .unwrap()
+        .join("libs.ref/sg13g2_sram/lef");
+    if sram.is_dir() {
+        names.push((
+            "rm_ihpsg13_1p_1024x16_c2_bm_bist",
+            "cell of the PDK's libraries",
+        ));
+    }
+    for (name, why) in names {
+        let out = call(
+            &ws,
+            "macro_export",
+            json!({"circuit": "comparator.cir", "layout": "comparator.gds", "name": name}),
+        )
+        .await;
+        assert!(
+            out.is_error && out.text_content().contains(why),
+            "{name}: {}",
+            out.text_content()
+        );
+    }
+
+    // A folder of the user's is not replaced, however `out` is spaced.
+    let user = dir.path().join("macros/user.macro");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("notes.txt"), "mine").unwrap();
+    let out = call(
+        &ws,
+        "macro_export",
+        json!({"circuit": "comparator.cir", "layout": "comparator.gds", "name": "strongarm",
+               "out": "  macros/user.macro", "specs": COMPARATOR_SPECS}),
+    )
+    .await;
+    assert!(
+        out.is_error && out.text_content().contains("not an aispice macro package"),
+        "{}",
+        out.text_content()
+    );
+    assert_eq!(std::fs::read_dir(&user).unwrap().count(), 1);
+
     // A spec the block cannot meet stops the export before anything is
     // written.
     let out = call(

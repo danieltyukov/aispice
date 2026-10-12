@@ -491,6 +491,15 @@ impl Project {
         Ok(out)
     }
 
+    /// The real folder an output folder names, after the output checks,
+    /// when it exists; `None` when it is still to be made. A tool that
+    /// guards what it replaces inspects this folder, the one its files are
+    /// then written into, not the path as given.
+    pub fn existing_output_dir(&self, rel: &str) -> Result<Option<PathBuf>, ProjectError> {
+        let walk = self.output_walk(&format!("{}/x", rel.trim()))?;
+        Ok((walk.rest.len() == 1).then_some(walk.folder))
+    }
+
     /// Make the folders [`Project::missing_dirs`] lists, one level at a
     /// time. Each is checked again as the file system made it, symlinks
     /// resolved: one that turns out outside the project or to be
@@ -659,8 +668,14 @@ impl Project {
     /// (a first sight, or a change made outside aispice).
     fn capture_external(&self, rel: &str, idx: &mut HistoryIndex) -> Result<(), ProjectError> {
         let path = self.resolve(rel)?;
-        let Ok(on_disk) = std::fs::read(&path) else {
-            return Ok(());
+        let on_disk = match read_plain(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(ProjectError::Other(format!(
+                    "{e}; aispice keeps a copy of a file before replacing it, so it leaves this one alone"
+                )));
+            }
         };
         let last = idx
             .snapshots
@@ -839,11 +854,15 @@ impl Project {
     }
 }
 
-/// Read a file aispice wrote under its state folder, refusing anything that
-/// is not a regular file. A project can ship a `.aispice` folder whose
-/// snapshot or index files are symlinks; following one would let undo copy a
-/// file from outside the project into a circuit the model then reads.
+/// Read a file aispice wrote under its state folder, or one it snapshots
+/// before replacing it, refusing anything that is not a regular file or is
+/// larger than [`MAX_TRACKED_BYTES`]. A project can ship a `.aispice` folder
+/// whose snapshot or index files are symlinks; following one would let undo
+/// copy a file from outside the project into a circuit the model then reads.
+/// A FIFO would block the read, a device would never end, and a sparse file
+/// can claim any size.
 fn read_plain(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
     let meta = std::fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() {
         return Err(std::io::Error::other(format!(
@@ -851,8 +870,29 @@ fn read_plain(path: &Path) -> std::io::Result<Vec<u8>> {
             path.display()
         )));
     }
-    std::fs::read(path)
+    let too_large = || {
+        std::io::Error::other(format!(
+            "{} is larger than {} MiB",
+            path.display(),
+            MAX_TRACKED_BYTES >> 20
+        ))
+    };
+    if meta.len() > MAX_TRACKED_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_TRACKED_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TRACKED_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
 }
+
+/// The largest file aispice snapshots, and so the largest it replaces or
+/// restores: as large as the layout tools read a GDS.
+pub const MAX_TRACKED_BYTES: u64 = 256 << 20;
 
 /// The history folder name for a circuit path: one safe path segment.
 fn history_key(rel: &str) -> String {
@@ -1208,6 +1248,80 @@ mod tests {
             p.resolve_output(&ok).unwrap(),
             canonical.join("macros/a/b.gds")
         );
+    }
+
+    #[test]
+    fn the_existing_output_folder_is_the_real_one_written_into() {
+        let (d, p) = project();
+        assert_eq!(p.existing_output_dir("macros/x.macro").unwrap(), None);
+        std::fs::create_dir_all(d.path().join("macros/x.macro")).unwrap();
+        let real = p.root().join("macros/x.macro");
+        // Leading and trailing space name the folder the files go to.
+        for given in ["macros/x.macro", "  macros/x.macro", "macros/x.macro \t"] {
+            assert_eq!(
+                p.existing_output_dir(given).unwrap(),
+                Some(real.clone()),
+                "{given:?}"
+            );
+        }
+        std::fs::write(d.path().join("file"), "x").unwrap();
+        assert!(p.existing_output_dir("file").is_err());
+        assert!(p.existing_output_dir("../x").is_err());
+        assert!(p.existing_output_dir(".aispice").is_err());
+    }
+
+    /// A file aispice replaces is snapshotted first, so it is read: a FIFO
+    /// there would block the read, and a sparse file can claim any size.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_huge_file_is_never_read_to_be_replaced() {
+        let (d, p) = project();
+        let fifo = d.path().join("x.gds");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if made {
+            let root = d.path().to_path_buf();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let p = Project::open(&root, ProjectOptions::default()).unwrap();
+                let _ = tx.send(
+                    p.save_file_tracked("x.gds", b"new", "test")
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                );
+            });
+            let result = rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("replacing a FIFO blocked");
+            let e = result.unwrap_err();
+            assert!(e.contains("not a regular file"), "{e}");
+            std::fs::remove_file(&fifo).unwrap();
+        } else {
+            eprintln!("FIFO case skipped: no mkfifo");
+        }
+        let big = d.path().join("big.gds");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_TRACKED_BYTES + 1)
+            .unwrap();
+        let e = p
+            .save_file_tracked("big.gds", b"new", "test")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("larger than"), "{e}");
+        assert_eq!(
+            std::fs::metadata(&big).unwrap().len(),
+            MAX_TRACKED_BYTES + 1,
+            "left alone"
+        );
+        // A regular file is snapshotted and replaced as before.
+        std::fs::write(d.path().join("ok.gds"), b"old").unwrap();
+        p.save_file_tracked("ok.gds", b"new", "test").unwrap();
+        assert_eq!(std::fs::read(d.path().join("ok.gds")).unwrap(), b"new");
+        p.undo("ok.gds").unwrap();
+        assert_eq!(std::fs::read(d.path().join("ok.gds")).unwrap(), b"old");
     }
 
     #[test]

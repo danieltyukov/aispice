@@ -27,6 +27,11 @@ pub const GRID: i64 = 600;
 pub const MACRO_GAP: i64 = 40_000;
 /// Room above and below the block row for routes.
 const ROUTE_ROOM: i64 = 120_000;
+/// The largest die aispice lays out, nm: 20 mm a side. A block, placement
+/// or pin past it is refused before anything is sized from it, so a
+/// package's numbers cannot make the ring (a filler cell per 50 um) or the
+/// sums below run away.
+pub const MAX_DIE: i64 = 20_000_000;
 /// Supply straps into the IO ring rails, in a supply pad's frame: Metal3
 /// onto the `vdd` rail (160 to 178 um), Metal4 onto the `vss` rail (162.2 to
 /// 178 um); neither reaches the other rail of its layer.
@@ -57,6 +62,38 @@ pub struct MacroGeom {
     pub pins: BTreeMap<String, Vec<LayerRect>>,
     /// The lower left asked for in the core, nm.
     pub at: Option<(i64, i64)>,
+}
+
+impl MacroGeom {
+    /// Refuse numbers no block on a die of [`MAX_DIE`] has: a size that is
+    /// not positive or larger than the die, an origin, placement or pin
+    /// beyond it.
+    pub fn check(&self) -> Result<(), String> {
+        let within = |v: i64| (-MAX_DIE..=MAX_DIE).contains(&v);
+        let mm = MAX_DIE / 1_000_000;
+        let (w, h) = self.size;
+        if !(w > 0 && h > 0 && w <= MAX_DIE && h <= MAX_DIE) {
+            return Err(format!(
+                "block {} is {} x {} um; a block is at most {mm} mm a side",
+                self.instance,
+                w as f64 / 1000.0,
+                h as f64 / 1000.0
+            ));
+        }
+        let at_ok = self
+            .at
+            .is_none_or(|(x, y)| (0..=MAX_DIE).contains(&x) && (0..=MAX_DIE).contains(&y));
+        let pins_ok = self.pins.values().flatten().all(|r| {
+            within(r.rect.x1) && within(r.rect.y1) && within(r.rect.x2) && within(r.rect.y2)
+        });
+        if !(within(self.origin.0) && within(self.origin.1) && at_ok && pins_ok) {
+            return Err(format!(
+                "block {}: its origin, placement or pins lie more than {mm} mm away",
+                self.instance
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An IO cell placed in the ring.
@@ -159,10 +196,25 @@ pub fn plan(spec: &ChipSpec, io: &IoLibrary, macros: &[MacroGeom]) -> Result<Flo
     }
     let row_len = |n: i64| if n == 0 { 0 } else { (n - 1) * pitch + pad_w };
 
-    // The core must hold the blocks with room to route around them.
+    // The core must hold the blocks with room to route around them. Every
+    // block is checked first, and the sums are checked too, so no number of
+    // a package can overflow them.
+    for m in macros {
+        m.check()?;
+    }
+    let too_large = || {
+        format!(
+            "the chip would be larger than {} mm a side",
+            MAX_DIE / 1_000_000
+        )
+    };
     let auto: Vec<&MacroGeom> = macros.iter().filter(|m| m.at.is_none()).collect();
-    let row_w: i64 =
-        auto.iter().map(|m| m.size.0).sum::<i64>() + MACRO_GAP * (auto.len() as i64 + 1);
+    let row_w = auto
+        .iter()
+        .try_fold(MACRO_GAP, |acc, m| {
+            acc.checked_add(m.size.0)?.checked_add(MACRO_GAP)
+        })
+        .ok_or_else(too_large)?;
     let row_h = auto.iter().map(|m| m.size.1).max().unwrap_or(0) + 2 * ROUTE_ROOM;
     let mut need_w = row_w.max(200_000);
     let mut need_h = row_h.max(200_000);
@@ -182,6 +234,15 @@ pub fn plan(spec: &ChipSpec, io: &IoLibrary, macros: &[MacroGeom]) -> Result<Flo
     );
     let w = 2 * (IO_OFFSET + CORNER) + side_x;
     let h = 2 * (IO_OFFSET + CORNER) + side_y;
+    // Before the ring is laid out, which places a filler per 50 um of it.
+    if w > MAX_DIE || h > MAX_DIE {
+        return Err(format!(
+            "the chip would be {:.2} x {:.2} mm; aispice lays out dies of at most {} mm a side",
+            w as f64 / 1e6,
+            h as f64 / 1e6,
+            MAX_DIE / 1_000_000
+        ));
+    }
     let die = Rect::new(0, 0, w, h);
     let core = Rect::new(
         IO_OFFSET + IO_HEIGHT,
@@ -528,5 +589,58 @@ mod tests {
         a.at = Some((0, 0));
         let e = plan(&spec(), &io, &[a]).unwrap_err();
         assert!(e.contains("does not fit"), "{e}");
+    }
+
+    /// A package can claim any size; one past the die limit is refused
+    /// before the ring (a filler per 50 um) is laid out or any sum made.
+    #[test]
+    fn blocks_and_dies_past_20_mm_are_refused_before_the_ring() {
+        let io = IoLibrary::from_lef(&test_lef()).unwrap();
+        let started = std::time::Instant::now();
+        let mut huge = block("ota");
+        huge.size = (10_000_000_000_000_000, 1_000);
+        let e = plan(&spec(), &io, &[huge]).unwrap_err();
+        assert!(e.contains("at most 20 mm"), "{e}");
+        let mut saturated = block("ota");
+        saturated.size = (i64::MAX, i64::MAX);
+        assert!(plan(&spec(), &io, &[saturated]).is_err());
+        let mut far = block("ota");
+        far.at = Some((MAX_DIE + 1, 0));
+        assert!(plan(&spec(), &io, &[far]).unwrap_err().contains("20 mm"));
+        let mut pin = block("ota");
+        pin.pins.get_mut("inp").unwrap()[0].rect.x2 = i64::MAX;
+        assert!(plan(&spec(), &io, &[pin]).unwrap_err().contains("20 mm"));
+        // Every block within the limit, the die past it: 64 blocks of 1 mm
+        // in a row.
+        let row: Vec<MacroGeom> = (0..64)
+            .map(|i| {
+                let mut b = block(&format!("b{i}"));
+                b.size = (1_000_000, 10_000);
+                b
+            })
+            .collect();
+        let e = plan(&spec(), &io, &row).unwrap_err();
+        assert!(e.contains("at most 20 mm a side"), "{e}");
+        // And a ring that long: eleven pads at a 2 mm pitch on one side.
+        let mut text = String::from("name = \"t\"\npad_pitch_um = 2000\n");
+        for i in 0..11 {
+            text.push_str(&format!(
+                "[[pads]]\nnet = \"a{i}\"\nside = \"west\"\nkind = \"analog\"\n"
+            ));
+        }
+        for (net, kind) in [
+            ("vdd", "vdd"),
+            ("vss", "vss"),
+            ("iovdd", "iovdd"),
+            ("iovss", "iovss"),
+        ] {
+            text.push_str(&format!(
+                "[[pads]]\nnet = \"{net}\"\nside = \"north\"\nkind = \"{kind}\"\n"
+            ));
+        }
+        let long = ChipSpec::parse(&text).unwrap();
+        let e = plan(&long, &io, &[]).unwrap_err();
+        assert!(e.contains("at most 20 mm a side"), "{e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

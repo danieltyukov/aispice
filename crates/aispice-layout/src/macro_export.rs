@@ -31,6 +31,85 @@ pub fn is_identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// The PDK's cell libraries under `libs.ref` whose cells a chip, or its
+/// netlist, may hold beside a block.
+const PDK_CELL_LIBS: [&str; 3] = ["sg13g2_stdcell", "sg13g2_io", "sg13g2_sram"];
+/// At most this many LEF files are read per library.
+const MAX_PDK_LEFS: usize = 256;
+
+/// The cells of the PDK's standard-cell, IO and SRAM libraries, lowercased,
+/// as their LEF files name them (`MACRO name`). A library the PDK checkout
+/// lacks is skipped: none of its cells can then meet a block.
+pub fn pdk_cell_names(root: &Path) -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    for lib in PDK_CELL_LIBS {
+        let dir = root.join("libs.ref").join(lib).join("lef");
+        let Ok(list) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut lefs: Vec<_> = list
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lef")))
+            .collect();
+        if lefs.len() > MAX_PDK_LEFS {
+            return Err(format!(
+                "{} holds more than {MAX_PDK_LEFS} LEF files",
+                dir.display()
+            ));
+        }
+        lefs.sort();
+        for lef in lefs {
+            let text = read_lef(&lef)?;
+            for line in text.lines() {
+                let mut words = line.split_whitespace();
+                if words.next() == Some("MACRO")
+                    && let Some(name) = words.next()
+                {
+                    out.insert(name.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A LEF file of the PDK as text: a regular file (links followed, as in a
+/// PDK checkout), at most [`MAX_LEF_BYTES`].
+fn read_lef(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let bad = |why: &str| format!("{}: {why}", path.display());
+    let meta = std::fs::metadata(path).map_err(|e| bad(&e.to_string()))?;
+    if !meta.is_file() {
+        return Err(bad("not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_LEF_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| bad(&e.to_string()))?;
+    if bytes.len() as u64 > MAX_LEF_BYTES {
+        return Err(bad("larger than a LEF file aispice reads"));
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Why a block may not take this name, if it may not: names compare without
+/// case, as SPICE compares them, so `SG13G2_INV_1` is IHP's `sg13g2_inv_1`.
+/// The PDK's `sg13g2_` prefix is refused whether or not the checkout holds
+/// the library, and so is any name of a cell in `pdk_cells`
+/// ([`pdk_cell_names`]).
+pub fn pdk_name_clash(name: &str, pdk_cells: &BTreeSet<String>) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("sg13g2_") {
+        return Some(format!(
+            "`{name}` starts with the PDK's prefix sg13g2_, which names IHP's own cells"
+        ));
+    }
+    pdk_cells
+        .contains(&lower)
+        .then(|| format!("`{name}` is the name of a cell of the PDK's libraries (names compare without case, as in SPICE)"))
+}
+
 /// Net names that mean a supply: `vdd`, `avdd`, `vcc`, `vpwr` and their
 /// suffixed forms (`vdd_core`).
 pub fn power_like(name: &str) -> bool {
@@ -689,6 +768,52 @@ mod tests {
             .map(String::from)
             .to_vec();
         infer_pins(&n, &devices(), &ports, "vss")
+    }
+
+    #[test]
+    fn block_names_that_are_or_look_like_pdk_cells_are_refused() {
+        let pdk = tempfile::tempdir().unwrap();
+        for (lib, file, text) in [
+            (
+                "sg13g2_stdcell",
+                "sg13g2_stdcell.lef",
+                "MACRO sg13g2_inv_1\n  CLASS CORE ;\nEND sg13g2_inv_1\n",
+            ),
+            (
+                "sg13g2_io",
+                "sg13g2_io.lef",
+                "MACRO sg13g2_Corner\nEND sg13g2_Corner\n",
+            ),
+            (
+                "sg13g2_sram",
+                "RM_IHPSG13_1P_256x8_c3_bm_bist.lef",
+                "MACRO RM_IHPSG13_1P_256x8_c3_bm_bist\nEND RM_IHPSG13_1P_256x8_c3_bm_bist\n",
+            ),
+        ] {
+            let dir = pdk.path().join("libs.ref").join(lib).join("lef");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(file), text).unwrap();
+        }
+        let cells = pdk_cell_names(pdk.path()).unwrap();
+        assert!(cells.contains("sg13g2_inv_1") && cells.contains("sg13g2_corner"));
+        for bad in [
+            "sg13g2_inv_1",
+            "SG13G2_INV_1",
+            "Sg13G2_mine",
+            "sg13g2_",
+            "rm_ihpsg13_1p_256x8_c3_bm_bist",
+            "RM_IHPSG13_1P_256X8_C3_BM_BIST",
+        ] {
+            assert!(pdk_name_clash(bad, &cells).is_some(), "{bad}");
+        }
+        for good in ["ota5t", "sg13_ota", "my_sg13g2_block", "rm_ihpsg13_mine"] {
+            assert!(pdk_name_clash(good, &cells).is_none(), "{good}");
+        }
+        // A checkout without the libraries still refuses the prefix.
+        let empty = tempfile::tempdir().unwrap();
+        let none = pdk_cell_names(empty.path()).unwrap();
+        assert!(none.is_empty());
+        assert!(pdk_name_clash("SG13G2_INV_1", &none).is_some());
     }
 
     #[test]
