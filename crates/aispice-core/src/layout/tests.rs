@@ -121,6 +121,35 @@ fn pdk_devices_without_parameters_or_with_other_pins_stay_lines() {
     );
 }
 
+/// A StrongARM latch hangs tails under tails: the tail source under the
+/// input pair, each input device under its latch device and precharge
+/// switch, and each latch device under its PMOS and reset switch.
+#[test]
+fn tails_under_tails_lay_out() {
+    for (n, p, x) in [
+        ("nmos", "pmos", "M"),
+        ("sg13_lv_nmos", "sg13_lv_pmos", "XM"),
+    ] {
+        let r = lay(&format!(
+            "strongarm\n\
+             VDD vdd 0 1.2\nVCLK clk 0 1.2\nVINP inp 0 0.61\nVINM inm 0 0.59\n\
+             {x}0 s clk 0 0 {n} w=4u l=0.13u\n\
+             {x}1 xp inp s 0 {n} w=2u l=0.13u\n\
+             {x}2 xn inm s 0 {n} w=2u l=0.13u\n\
+             {x}3 outn outp xp 0 {n} w=1u l=0.13u\n\
+             {x}4 outp outn xn 0 {n} w=1u l=0.13u\n\
+             {x}5 outn outp vdd vdd {p} w=2u l=0.13u\n\
+             {x}6 outp outn vdd vdd {p} w=2u l=0.13u\n\
+             {x}7 outn clk vdd vdd {p} w=1u l=0.13u\n\
+             {x}8 xp clk vdd vdd {p} w=1u l=0.13u\n\
+             {x}9 outp clk vdd vdd {p} w=1u l=0.13u\n\
+             {x}10 xn clk vdd vdd {p} w=1u l=0.13u\n\
+             .op\n"
+        ));
+        assert_eq!(r.quality.overlapping_parts, 0, "{x}: {:?}", r.quality);
+    }
+}
+
 #[test]
 fn rails_with_numbered_names_get_labels_of_their_own() {
     // The drain is held at ground by a 0 V ammeter source and feeds a

@@ -1277,20 +1277,15 @@ impl Placer<'_> {
         });
         let Some((_, order)) = best else { return };
         let rank_of = |c: usize| order.iter().position(|&o| o == c).expect("in order");
+        // Tails can hang under tails (a StrongARM's tail source under its
+        // input pair, each input under its latch); one that never reaches a
+        // column leaves the columns unplaced.
+        let Some(ranks) = across(&tail, &col_of, |c| rank_of(c) as f64) else {
+            return;
+        };
 
         // Which way each device's control pin faces.
-        let col_x = |i: usize| -> f64 {
-            match &tail[i] {
-                Some(parents) => {
-                    parents
-                        .iter()
-                        .map(|&p| rank_of(col_of[p]) as f64)
-                        .sum::<f64>()
-                        / parents.len() as f64
-                }
-                None => rank_of(col_of[i]) as f64,
-            }
-        };
+        let col_x = |i: usize| -> f64 { ranks[i] };
         let mut facing_left = vec![true; k];
         for i in 0..k {
             let dev = &self.c.devices[stacks[i].dev];
@@ -1412,15 +1407,16 @@ impl Placer<'_> {
             row_y[r] = row_y[r - 1] + tallest + 4 * GRID;
         }
         // Commit columns first, then the tails between them.
+        let Some(axes) = across(&tail, &col_of, |c| f64::from(col_axis[c])) else {
+            return;
+        };
         let mut todo: Vec<usize> = (0..k).filter(|&i| tail[i].is_none()).collect();
         todo.extend((0..k).filter(|&i| tail[i].is_some()));
         for i in todo {
             let st = stacks[i];
             let ax = match &tail[i] {
-                Some(parents) => snap(
-                    parents.iter().map(|&p| col_axis[col_of[p]]).sum::<i32>()
-                        / parents.len() as i32,
-                ),
+                // Truncated, as the integer mean of a single level was.
+                Some(_) => snap(axes[i] as i32),
                 None => col_axis[col_of[i]],
             };
             let base = Point::new(ax - axis[i], row_y[st.row] - top_pin[i]);
@@ -1432,6 +1428,38 @@ impl Placer<'_> {
                 self.commit(st.dev, shape_of[i], at);
                 self.fixed[st.dev] = true;
             }
+        }
+    }
+}
+
+/// Where each stacked device sits across the columns, from where each column
+/// sits: in its column, or for a tail midway between the devices it hangs
+/// under, which may be tails themselves. None when a tail never reaches a
+/// column.
+fn across(
+    tail: &[Option<Vec<usize>>],
+    col_of: &[usize],
+    at: impl Fn(usize) -> f64,
+) -> Option<Vec<f64>> {
+    let mut x: Vec<Option<f64>> = tail
+        .iter()
+        .zip(col_of)
+        .map(|(t, &c)| t.is_none().then(|| at(c)))
+        .collect();
+    loop {
+        let mut progress = false;
+        for i in 0..x.len() {
+            let (None, Some(parents)) = (x[i], &tail[i]) else {
+                continue;
+            };
+            let xs: Option<Vec<f64>> = parents.iter().map(|&p| x[p]).collect();
+            if let Some(xs) = xs {
+                x[i] = Some(xs.iter().sum::<f64>() / xs.len() as f64);
+                progress = true;
+            }
+        }
+        if !progress {
+            return x.into_iter().collect();
         }
     }
 }
