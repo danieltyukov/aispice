@@ -530,10 +530,12 @@ impl Runner {
         {
             return Err(RunError::Pdk(msg));
         }
+        // The behavioural models' checks and run limits come first: a
+        // refusal must not depend on which simulators are installed.
+        let (declared, uses_behavioral) = self.behavioral_plan(project, netlist)?;
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         // Verilog-A and co-simulated Verilog run on ngspice only: the other
         // simulators cannot load what aispice builds for them.
-        let (declared, uses_behavioral) = self.behavioral_plan(project, netlist)?;
         if uses_behavioral && id != SimId::Ngspice {
             let asked = simulator.is_some() || self.config().simulator != "auto";
             if asked || !self.available(SimId::Ngspice).await {
