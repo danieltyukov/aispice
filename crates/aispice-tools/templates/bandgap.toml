@@ -1,0 +1,37 @@
+id = "bandgap"
+title = "Bandgap voltage reference, 0.6 V (IHP SG13G2)"
+category = "ic"
+pdk = "ihp-sg13g2"
+description = "Current-mode (Banba) bandgap reference for a 1.2 V supply on IHP SG13G2: SiGe HBT diodes Q1 and Q2 (8 times the area), high-resistance poly resistors, three equal PMOS sources driven by an NMOS-input error amplifier, and a start-up circuit (Q3, M11, M12). Each branch carries Vbe / R2 + VT ln(8) / R1, the two parts cancelling over temperature, and R3 turns that current into vref = 0.60 V. The run sweeps the temperature from -40 C to 125 C; vref moves less than 6 mV over it at every process corner and with the supply 10% high or low. Xyce cannot load the PDK's HBT model, so the reference is verified on ngspice."
+analysis = ".dc temp -40 125 5"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], supplies = [{ target = "VDD", values = [1.08, 1.2, 1.32] }] }
+simulators = ["ngspice"]
+specs = """
+vref = value_at(V(vref), 27) in 0.58..0.62
+drift = pp(V(vref)) <= 6m
+"""
+
+[[parameters]]
+part = "R2A"
+controls = "The slope over temperature (with R2B kept equal): a smaller R2 adds more of the falling Vbe part"
+equation = "I = Vbe / R2 + VT ln(8) / R1; flat when R2 / R1 is about (dVbe/dT) / ((k/q) ln 8), about 7"
+
+[[parameters]]
+part = "R1"
+controls = "The rising (PTAT) part of the current, VT ln(8) / R1"
+equation = "I_ptat = VT ln(N) / R1 with N = 8, the area ratio of Q2 to Q1"
+
+[[parameters]]
+part = "R3"
+controls = "The output level, without changing the slope"
+equation = "vref = R3 (Vbe / R2 + VT ln(8) / R1)"
+
+[[parameters]]
+part = "Q2"
+controls = "The area ratio N (Nx) that sets the PTAT voltage"
+equation = "dVbe = VT ln(N), 54 mV at 27 C for N = 8"
+
+[[parameters]]
+part = "M11"
+controls = "The start-up pull-up: weak (long), so it is always overcome by Q3 once the core runs"
+equation = "Q3 must sink more than M11 sources at the normal Vbe; M12 then stays off"

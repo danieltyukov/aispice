@@ -174,6 +174,8 @@ jobs:
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-sim --lib pdk::
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
+          cargo test -p aispice-tools --test templates_ihp -- --nocapture
+          cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
 
       # One DRC deck on a synthetic layout, then a generated current mirror
       # through DRC and LVS, the broken-layout checks, blocks with their pins

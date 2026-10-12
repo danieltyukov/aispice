@@ -203,7 +203,8 @@ async fn judge_specs(
 
 /// Judge the project at `root` after a run. `before` is the state of the
 /// files when the run started. Specs are measured on `simulator` (ngspice
-/// for the suite), with the task's analysis when it names one.
+/// for the suite), with the task's analysis when it names one, and the
+/// registered PDKs for a project that uses one.
 pub async fn judge(
     task: &Task,
     root: &Path,
@@ -211,6 +212,7 @@ pub async fn judge(
     transcript: &Transcript,
     simulator: &str,
     symbols: &[PathBuf],
+    pdks: &crate::pdk::Registry,
 ) -> Verdict {
     let mut v = Verdict::default();
     let options = ProjectOptions {
@@ -241,6 +243,7 @@ pub async fn judge(
                 // aispice's own models only, so results compare across
                 // machines whatever LTspice library is installed.
                 embedded_models_only: true,
+                pdks: pdks.clone(),
                 ..RunnerConfig::default()
             });
             ws.set_project(project);

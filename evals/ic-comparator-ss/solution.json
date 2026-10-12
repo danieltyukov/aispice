@@ -1,0 +1,11 @@
+[
+  {"tools": [{"name": "read_schematic", "input": {"circuit": "comparator.asc"}}]},
+  {"tools": [{"name": "check_specs", "input": {"circuit": "comparator.asc", "specs": "first = value_at(V(outp,outn), 0.95n) >= 1\nsecond = value_at(V(outp,outn), 2.95n) <= -1\nreset = value_at(V(outp), 1.95n) >= 1.1\ntdec = crossing(V(outn), 0.6, fall) <= 250p", "corners": {"process": ["tt", "ss", "ff", "sf", "fs"], "temperatures": [-40, 27, 125]}}}]},
+  {"tools": [{"name": "edit_schematic", "input": {"circuit": "comparator.asc", "reason": "More tail current and input transconductance so the latch starts regenerating sooner at the slow corner", "edits": [
+    {"op": "set_attr", "name": "M0", "key": "SpiceLine", "value": "w=8u l=0.13u ng=1 m=1"},
+    {"op": "set_attr", "name": "M1", "key": "SpiceLine", "value": "w=8u l=0.13u ng=1 m=1"},
+    {"op": "set_attr", "name": "M2", "key": "SpiceLine", "value": "w=8u l=0.13u ng=1 m=1"}
+  ]}}]},
+  {"tools": [{"name": "check_specs", "input": {"circuit": "comparator.asc", "corners": {"process": ["tt", "ss", "ff", "sf", "fs"], "temperatures": [-40, 27, 125]}}}]},
+  {"answer": "The comparator took 318 ps at ss/-40C: the 2 um tail M0 and the 4 um input pair discharge xp and xn slowly, so the latch starts late. With M0, M1 and M2 at 8/0.13 um the evaluation current and gm of the pair are about four and two times larger, and check_specs passes at all 15 corners: both decisions are full swing, the reset holds 1.2 V, and the slowest decision is 194 ps at ss/-40C."}
+]

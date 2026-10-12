@@ -1466,7 +1466,7 @@ Edits your files: each write is approved in ask-before-applying mode and can be 
 
 ## `templates`
 
-Verified reference circuits to start a design from: passive and active filters, op-amp and transistor gain stages, voltage references, regulators and power switching, an oscillator, a logic level shifter and a photodiode front end. Every template is simulated in aispice's test suite and meets its own spec table. `list` shows the library (filter by category or by words), `show` gives a template's design equations, the parts usually changed, its spec table and the parts and nets of the schematic, and `use` copies it into the project as a new circuit with its specs saved beside it, ready for check_specs and then optimize. `use` refuses to overwrite existing files.
+Verified reference circuits to start a design from: passive and active filters, op-amp and transistor gain stages, voltage references, regulators and power switching, an oscillator, a logic level shifter and a photodiode front end, plus transistor-level IC blocks (category ic) on a PDK: current mirror bias, 5-transistor OTA, two-stage Miller op-amp, StrongARM comparator, bandgap reference and LDO on IHP SG13G2. Every template is simulated in aispice's test suite and meets its own spec table; an IC template meets it at every corner of the set it names, which you pass to check_specs as `corners`. `list` shows the library (filter by category or by words), `show` gives a template's design equations, the parts usually changed, its spec table, corners and layout generator, and the parts and nets of the schematic, and `use` copies it into the project as a new circuit with its specs saved beside it, ready for check_specs and then optimize. An IC template needs a project that uses its PDK (pdk tool, action use). `use` refuses to overwrite existing files.
 
 Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
@@ -1501,7 +1501,7 @@ Edits your files: each write is approved in ask-before-applying mode and can be 
       ]
     },
     "category": {
-      "description": "For `list`: only this category (filters, amplifiers, references,\npower, oscillators, digital, sensors).",
+      "description": "For `list`: only this category (filters, amplifiers, references,\npower, oscillators, digital, sensors, ic).",
       "type": "string"
     },
     "circuit": {

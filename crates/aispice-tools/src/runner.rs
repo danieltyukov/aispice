@@ -10,11 +10,11 @@ use crate::project::{Project, ProjectError, now_ms};
 use aispice_core::netlist::{self, Line, Netlist, Policy};
 use aispice_sim::backend::ltspice::Ltspice;
 use aispice_sim::backend::ngspice::Ngspice;
-use aispice_sim::backend::spectre::{Spectre, SpectreConfig};
+use aispice_sim::backend::spectre::{self, Spectre, SpectreConfig};
 use aispice_sim::backend::xyce::Xyce;
 use aispice_sim::backend::{Detection, SimId, SimJob, SimOutput, Simulator};
 use aispice_sim::dialect::{self, Target};
-use aispice_sim::library::{LibraryFiles, expand_lib_sections};
+use aispice_sim::library::{LibraryFiles, expand_lib_sections, inline_includes};
 use aispice_sim::models;
 use aispice_sim::pdk::{Pdk, PdkRun};
 use serde::{Deserialize, Serialize};
@@ -474,7 +474,31 @@ impl Runner {
         // of a library file, so aispice inlines it, reading only files the
         // policy approves; the check below sees the result. A PDK run puts
         // ngspice in its native mode, which selects sections itself.
-        let deck = if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
+        // Spectre runs on another machine, which has none of the project's
+        // files, so the ones the deck includes go in the deck, with their
+        // expressions in the quotes Spectre reads. Files outside the
+        // project are only named; see below.
+        let deck = if id == SimId::Spectre {
+            let files = LibraryFiles::new(policy.clone(), project.root());
+            let inlined = inline_includes(&deck, &files).map_err(RunError::Netlist)?;
+            if !inlined.sent.is_empty() {
+                let names: Vec<String> = inlined
+                    .sent
+                    .iter()
+                    .map(|p| {
+                        p.strip_prefix(project.root())
+                            .unwrap_or(p)
+                            .display()
+                            .to_string()
+                    })
+                    .collect();
+                notes.push(format!(
+                    "sent to the Spectre server inside the deck: {}",
+                    names.join(", ")
+                ));
+            }
+            aispice_sim::dialect::spectre_expressions(&inlined.text)
+        } else if matches!(id, SimId::Ngspice | SimId::Ltspice) && pdk.is_none() {
             let files = LibraryFiles::new(policy.clone(), project.root());
             expand_lib_sections(&deck, &files).map_err(RunError::Netlist)?
         } else {
@@ -492,6 +516,25 @@ impl Runner {
                 .join("\n");
             return Err(RunError::Policy(msg));
         }
+        // What is left to include on Spectre is outside the project: a PDK
+        // or a model library, possibly licensed, which never leaves this
+        // machine. An include of one names the server's own copy when the
+        // user configured where that is, and is refused otherwise.
+        let deck = if id == SimId::Spectre {
+            let folders = self
+                .config()
+                .spectre
+                .map(|c| c.remote_folders)
+                .unwrap_or_default();
+            let (deck, mapped) =
+                spectre::remote_deck(&deck, &folders).map_err(RunError::Netlist)?;
+            for (local, server) in mapped {
+                notes.push(format!("{local} is read on the Spectre server as {server}"));
+            }
+            deck
+        } else {
+            deck
+        };
 
         let run_id = format!(
             "{}-{}",
@@ -606,6 +649,26 @@ impl Runner {
             let resolved = models::resolve_with_defined(&netlist, std_libs, lib_dirs, &defined);
             for a in &resolved.added {
                 notes.push(format!("model {} from {:?}", a.name, a.source));
+            }
+            // A model from the LTspice library would go to the Spectre
+            // server inside the deck; the library is licensed with LTspice
+            // and stays on this machine.
+            if target == Target::Spectre {
+                let from_ltspice: Vec<&str> = resolved
+                    .added
+                    .iter()
+                    .filter(|a| matches!(a.source, models::ModelSource::Ltspice(_)))
+                    .map(|a| a.name.as_str())
+                    .collect();
+                if !from_ltspice.is_empty() {
+                    return (
+                        String::new(),
+                        Some(format!(
+                            "{} would come from your LTspice library, which aispice does not send to a Spectre server; put the definition in a file in the project and include it, or use aispice's own models",
+                            from_ltspice.join(", ")
+                        )),
+                    );
+                }
             }
             if !resolved.missing.is_empty() {
                 notes.push(format!(

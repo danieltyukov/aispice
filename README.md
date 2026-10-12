@@ -46,7 +46,7 @@ What the agent can do with your circuits:
 - check a spec table and report pass or fail with margins, at one operating point or across process, voltage and temperature corners, naming the worst corner of each spec
 - sweep parameters, run Monte Carlo analysis over part tolerances and device mismatch with yield, and optimise part values to meet several specs at once, at every corner if asked
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
-- design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, and size transistors by gm/Id from tables aispice builds and caches
+- design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, size transistors by gm/Id from tables aispice builds and caches, and start from templates (current mirror, OTA, two-stage op-amp, comparator, bandgap, LDO) that meet their specs at every process corner
 - lay those blocks out with generators that draw the PDK's own pcells (current mirror, differential pair, five-transistor OTA, two-stage Miller op-amp with its MIM capacitor, StrongARM comparator) with common-centroid or interdigitated units, dummies and guard rings; check them with the PDK's KLayout DRC and LVS decks; extract parasitics with Magic; and report every spec before and after layout
 - undo any edit; every change is saved as a snapshot
 
@@ -147,6 +147,8 @@ aispice gmid sg13_lv_nmos --gm-id 12 --l 0.5u --id 50u
 ```
 
 Every netlist in that project then carries the PDK's model header (`.lib .../cornerMOSlv.lib mos_tt` and the like), and simulations load the PDK's compiled device models on ngspice or Xyce. [docs/SETUP.md](docs/SETUP.md#pdks-for-ic-design) covers building the models and what aispice checks.
+
+Six IC templates start a block from a circuit known to work: an NMOS current mirror, a five-transistor OTA, a two-stage Miller op-amp, a StrongARM comparator, a bandgap reference and an LDO on IHP SG13G2. Each meets its spec table at every process corner (tt, ss, ff, sf, fs) and, where it matters, from -40 C to 125 C or across the supply, on ngspice and Xyce, and names the layout generator and role map for its block.
 
 With KLayout and Magic installed, the same project goes on to layout:
 

@@ -1,0 +1,35 @@
+id = "ldo"
+title = "Low-dropout regulator, 3.3 V to 1.2 V (IHP SG13G2)"
+category = "ic"
+pdk = "ihp-sg13g2"
+description = "Linear regulator on IHP SG13G2's 3.3 V thick-oxide devices: an NMOS-input error amplifier (M1-M6, IB = 10 uA) drives the gate of the PMOS pass device MP (400 um wide) so that out follows the 1.2 V reference ref (unity feedback; feed ref from a bandgap, or add a divider for a higher output). The load steps from 0.1 mA to 10 mA and back into 1 uF with 0.2 ohm of ESR, whose zero keeps the loop stable. At 27 C out is 1.201 V at light load and 1.194 V at 10 mA, and the step pulls it down by about 11 mV without ringing. The specs hold at every process corner from -40 C to 125 C with the input from 2.7 V to 3.6 V."
+analysis = ".tran 10n 60u"
+corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125], supplies = [{ target = "VIN", values = [2.7, 3.3, 3.6] }] }
+simulators = ["ngspice", "xyce"]
+specs = """
+light = avg(V(out), 15u, 20u) in 1.17..1.23
+heavy = avg(V(out), 35u, 40u) in 1.17..1.23
+droop = min(V(out), 20u, 40u) >= 1.12
+peak = max(V(out), 40u, 60u) <= 1.27
+ripple = pp(V(out), 30u, 40u) <= 2m
+"""
+
+[[parameters]]
+part = "MP"
+controls = "The pass device's width (m): the dropout, the load regulation and the gate capacitance the amplifier drives"
+equation = "dropout about VDS,sat of MP at full load; load regulation about 1 / (gm_MP A_ea)"
+
+[[parameters]]
+part = "M2"
+controls = "The error amplifier's input pair (with M1): its gain against the mirror M3-M4 sets the regulation"
+equation = "A_ea = gm1 / (gds2 + gds4); vout error about Iload / (gm_MP A_ea)"
+
+[[parameters]]
+part = "IB"
+controls = "The error amplifier's bias: more current moves the gate pole up, for a faster loop"
+equation = "gate pole about gm_ea_out / (2 pi C_gate,MP), with C_gate growing with MP's width"
+
+[[parameters]]
+part = "CL"
+controls = "The output capacitor, with RESR: the dominant pole and the ESR zero that stabilises the loop"
+equation = "ESR zero at 1 / (2 pi RESR CL); droop on a step about Iload t_loop / CL"

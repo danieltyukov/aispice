@@ -14,7 +14,9 @@ use super::{
     Detection, SimError, SimId, SimJob, SimOutput, Simulator, Workspace, finish, read_log_limited,
     read_raw_limited,
 };
+use aispice_core::netlist::{logical_lines, parse_include};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -24,6 +26,10 @@ use tokio_util::sync::CancellationToken;
 /// run folder, `{deck}` the netlist, `{raw}` the raw output, `{log}` the log.
 pub const DEFAULT_COMMAND: &str =
     "cd {dir} && spectre {deck} -format nutascii -raw {raw} =log {log}";
+
+/// The largest deck sent to a server. The project files inlined into it
+/// are capped by the library reader; this bounds the whole upload.
+pub const MAX_DECK_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpectreConfig {
@@ -45,6 +51,12 @@ pub struct SpectreConfig {
     pub ssh: Option<PathBuf>,
     #[serde(default)]
     pub scp: Option<PathBuf>,
+    /// Folders outside a project that the server has its own copy of, as
+    /// local folder to server folder: a deck that includes a file under one
+    /// names the server's copy. Files outside the project are never sent,
+    /// so without this an include of one is refused.
+    #[serde(default)]
+    pub remote_folders: BTreeMap<PathBuf, String>,
 }
 
 fn default_command() -> String {
@@ -60,6 +72,7 @@ impl SpectreConfig {
             ssh_options: vec!["-o".into(), "BatchMode=yes".into()],
             ssh: None,
             scp: None,
+            remote_folders: BTreeMap::new(),
         }
     }
 
@@ -89,8 +102,127 @@ impl SpectreConfig {
                 "the Spectre command template must contain {deck}".into(),
             ));
         }
+        for (local, remote) in &self.remote_folders {
+            if !local.is_absolute() {
+                return Err(SimError::Config(format!(
+                    "Spectre remote_folders: `{}` must be a full local path",
+                    local.display()
+                )));
+            }
+            if !remote.starts_with('/') || !is_plain_path(remote) {
+                return Err(SimError::Config(format!(
+                    "Spectre remote_folders: `{remote}` must be a full path on the server with only letters, digits and ._/-"
+                )));
+            }
+        }
         Ok(())
     }
+}
+
+/// A deck for the server: each include of a file outside the project (the
+/// runner inlines the project's own files and leaves these, by full local
+/// path) pointed at the server's copy of its folder from `remote_folders`,
+/// with the pairs it mapped. An include under no configured folder is
+/// refused, naming the file but never reading it: a PDK or a model library
+/// may be licensed, and does not leave this machine.
+pub fn remote_deck(
+    deck: &str,
+    folders: &BTreeMap<PathBuf, String>,
+) -> Result<(String, Vec<(String, String)>), String> {
+    // Compared by their real paths, as the runner names included files.
+    let folders: Vec<(PathBuf, &str)> = folders
+        .iter()
+        .map(|(l, r)| {
+            (
+                std::fs::canonicalize(l).unwrap_or_else(|_| l.clone()),
+                r.as_str(),
+            )
+        })
+        .collect();
+    let mut out = String::with_capacity(deck.len());
+    let mut mapped = Vec::new();
+    for line in logical_lines(deck, true) {
+        let inc = match parse_include(&line) {
+            Some(Ok(inc)) if !names_a_file(&inc) => None,
+            Some(Ok(inc)) => Some(inc),
+            Some(Err(e)) => return Err(e),
+            None => None,
+        };
+        let Some(inc) = inc else {
+            out.push_str(&line);
+            out.push('\n');
+            continue;
+        };
+        let local = Path::new(&inc.file);
+        let server = folders
+            .iter()
+            .filter(|(l, _)| local.starts_with(l))
+            .max_by_key(|(l, _)| l.components().count())
+            .and_then(|(l, r)| {
+                let rest: Vec<String> = local
+                    .strip_prefix(l)
+                    .ok()?
+                    .components()
+                    .map(|c| match c {
+                        std::path::Component::Normal(p) => p.to_str().map(str::to_string),
+                        _ => None,
+                    })
+                    .collect::<Option<_>>()?;
+                let path = format!("{}/{}", r.trim_end_matches('/'), rest.join("/"));
+                is_plain_path(&path).then_some(path)
+            });
+        let Some(server) = server else {
+            return Err(format!(
+                "`{}` is outside the project, so aispice does not send it to the Spectre server. If the server has its own copy, add its folder to remote_folders under [spectre] in config.toml (local folder = folder on the server)",
+                inc.file
+            ));
+        };
+        out.push_str(&inc.line_for(&server));
+        out.push('\n');
+        mapped.push((inc.file.clone(), server));
+    }
+    Ok((out, mapped))
+}
+
+/// Whether an include line names a file. The runner names every file a
+/// deck includes by its full path, so a one-word `.lib name` that is not
+/// one opens a section of a project library inlined whole.
+fn names_a_file(inc: &aispice_core::netlist::Include) -> bool {
+    inc.section.is_some()
+        || !inc.keyword.eq_ignore_ascii_case(".lib")
+        || Path::new(&inc.file).is_absolute()
+}
+
+/// Whether a deck is fit to send: within [`MAX_DECK_BYTES`], and every file
+/// it includes is on the server (under a folder of `remote_folders`), so no
+/// local path, and no local file, is assumed to be there.
+fn check_deck(deck: &str, folders: &BTreeMap<PathBuf, String>) -> Result<(), SimError> {
+    if deck.len() > MAX_DECK_BYTES {
+        return Err(SimError::Config(format!(
+            "the deck is {} MiB; aispice sends at most {} MiB to a Spectre server",
+            deck.len().div_ceil(1024 * 1024),
+            MAX_DECK_BYTES / (1024 * 1024)
+        )));
+    }
+    for line in logical_lines(deck, true) {
+        if let Some(inc) = parse_include(&line)
+            && inc.as_ref().map_or(true, names_a_file)
+        {
+            let on_server = inc.as_ref().is_ok_and(|inc| {
+                folders.values().any(|r| {
+                    let r = r.trim_end_matches('/');
+                    inc.file.starts_with(&format!("{r}/"))
+                })
+            });
+            if !on_server {
+                let file = inc.map(|i| i.file).unwrap_or_default();
+                return Err(SimError::Config(format!(
+                    "the deck includes `{file}`, which is not under a server folder of remote_folders; aispice sends no local file names or files to a Spectre server"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_plain_path(s: &str) -> bool {
@@ -147,6 +279,7 @@ impl Spectre {
         let deck = format!("{stem}.scs");
         let raw = format!("{stem}.raw");
         let log = format!("{stem}.log");
+        let measure = format!("{stem}.measure");
         let ssh = c.ssh.clone().unwrap_or_else(|| PathBuf::from("ssh"));
         let scp = c.scp.clone().unwrap_or_else(|| PathBuf::from("scp"));
         let ssh_cmd = |remote: String| -> Vec<OsString> {
@@ -192,11 +325,14 @@ impl Spectre {
                 ],
             ),
             run: ssh_cmd(remote_command),
+            // `.meas` results go to their own file, which only a deck with
+            // `.meas` lines makes: last, so a missing one stops nothing.
             download: scp_cmd(
                 true,
                 vec![
                     format!("{}:{dir}/{raw}", c.host).into(),
                     format!("{}:{dir}/{log}", c.host).into(),
+                    format!("{}:{dir}/{measure}", c.host).into(),
                     download_to,
                 ],
             ),
@@ -273,6 +409,7 @@ impl Simulator for Spectre {
     }
 
     async fn run(&self, job: &SimJob, cancel: &CancellationToken) -> Result<SimOutput, SimError> {
+        check_deck(&job.netlist_text, &self.config()?.remote_folders)?;
         let stem = job.stem();
         let ws = Workspace::new()?;
         let plan = self.plan(&stem, &nonce(), ws.path())?;
@@ -317,7 +454,14 @@ impl Simulator for Spectre {
             log.push('\n');
             log.push_str(&String::from_utf8_lossy(&bytes));
         }
-        let report = crate::log::parse_spectre_output(&log);
+        let mut report = crate::log::parse_spectre_output(&log);
+        if let Some(bytes) = read_log_limited(&ws.file(&format!("{stem}.measure"))) {
+            report
+                .measurements
+                .extend(crate::log::parse_spectre_measure(&String::from_utf8_lossy(
+                    &bytes,
+                )));
+        }
         let raw = ws.file(&format!("{stem}.raw"));
         let datasets = if raw.exists() {
             read_raw_limited(&raw)?
@@ -330,6 +474,7 @@ impl Simulator for Spectre {
                 format!("{stem}.scs"),
                 format!("{stem}.raw"),
                 format!("{stem}.log"),
+                format!("{stem}.measure"),
             ],
         )?;
         let raw_path = files
@@ -416,10 +561,79 @@ mod tests {
                 "--",
                 &format!("me@eda.example.edu:{dir}/rc_low-pass.raw"),
                 &format!("me@eda.example.edu:{dir}/rc_low-pass.log"),
+                &format!("me@eda.example.edu:{dir}/rc_low-pass.measure"),
                 "/tmp/run/",
             ]
         );
         assert_eq!(strs(&p.cleanup).last().unwrap(), &format!("rm -rf {dir}"));
+    }
+
+    /// An include outside the project names the server's copy of its
+    /// folder, the longest configured folder first, sections kept; one
+    /// under no configured folder is refused by name.
+    #[test]
+    fn includes_outside_the_project_name_the_servers_copy_or_are_refused() {
+        let folders = BTreeMap::from([
+            (PathBuf::from("/home/me/pdk"), "/cad/pdk".to_string()),
+            (PathBuf::from("/home/me/pdk/ihp"), "/cad/ihp/".to_string()),
+        ]);
+        let deck = "* t\nsimulator lang=spice\n.lib \"/home/me/pdk/ihp/models/corner.lib\" mos_tt\n.include \"/home/me/pdk/x.inc\"\nR1 a 0 1k\n";
+        let (out, mapped) = remote_deck(deck, &folders).unwrap();
+        assert!(
+            out.contains(".lib \"/cad/ihp/models/corner.lib\" mos_tt\n"),
+            "{out}"
+        );
+        assert!(out.contains(".include \"/cad/pdk/x.inc\"\n"), "{out}");
+        assert!(!out.contains("/home/me"), "{out}");
+        assert!(out.starts_with("* t\nsimulator lang=spice\n") && out.ends_with("R1 a 0 1k\n"));
+        assert_eq!(mapped.len(), 2);
+        check_deck(&out, &folders).unwrap();
+
+        let err =
+            remote_deck("* t\n.include \"/opt/vendor/licensed.lib\"\n", &folders).unwrap_err();
+        assert!(
+            err.contains("`/opt/vendor/licensed.lib` is outside the project"),
+            "{err}"
+        );
+        assert!(err.contains("remote_folders"), "{err}");
+        // A path that climbs out of a configured folder is not under it.
+        assert!(remote_deck("* t\n.include \"/home/me/pdk/../.ssh/id\"\n", &folders).is_err());
+    }
+
+    /// The last check before anything is uploaded: no local path, a file
+    /// on the server under a configured folder only, and a size limit.
+    #[test]
+    fn decks_are_checked_before_they_are_sent() {
+        let folders = BTreeMap::from([(PathBuf::from("/home/me/pdk"), "/cad/pdk".to_string())]);
+        assert!(check_deck("* t\nR1 a 0 1k\n.op\n", &BTreeMap::new()).is_ok());
+        let local = check_deck("* t\n.include \"/home/me/pdk/x.inc\"\n", &folders).unwrap_err();
+        assert!(
+            local.to_string().contains("`/home/me/pdk/x.inc`"),
+            "{local}"
+        );
+        assert!(check_deck("* t\n.include \"/cad/pdk/x.inc\"\n", &folders).is_ok());
+        assert!(check_deck("* t\n.include \"/cad/pdkx/x.inc\"\n", &folders).is_err());
+        // Section headers of a project library inlined whole are not files.
+        let sections = "* t\n.lib res_typ\n.param r=1k\n.endl res_typ\n";
+        assert!(check_deck(sections, &folders).is_ok());
+        assert_eq!(remote_deck(sections, &folders).unwrap().0, sections);
+        let big = format!("* t\n{}\n", "R1 a 0 1k\n".repeat(MAX_DECK_BYTES / 10 + 1));
+        let err = check_deck(&big, &BTreeMap::new()).unwrap_err();
+        assert!(err.to_string().contains("at most 16 MiB"), "{err}");
+    }
+
+    #[test]
+    fn remote_folders_must_be_plain_full_paths() {
+        for (local, server) in [
+            ("pdk", "/cad/pdk"),
+            ("/home/me/pdk", "cad/pdk"),
+            ("/home/me/pdk", "/cad/pdk; rm -rf ~"),
+        ] {
+            let mut cfg = SpectreConfig::new("host", "runs");
+            cfg.remote_folders
+                .insert(PathBuf::from(local), server.into());
+            assert!(cfg.validate().is_err(), "{local} {server}");
+        }
     }
 
     #[test]
