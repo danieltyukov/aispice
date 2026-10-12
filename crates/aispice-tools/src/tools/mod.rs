@@ -13,6 +13,7 @@ mod render_tools;
 mod schematic_tools;
 mod sim_tools;
 mod template_tools;
+mod xschem_tools;
 
 use crate::workspace::Workspace;
 use aispice_agent::{Registry, ToolOutput};
@@ -26,6 +27,7 @@ pub use render_tools::*;
 pub use schematic_tools::*;
 pub use sim_tools::*;
 pub use template_tools::*;
+pub use xschem_tools::*;
 
 /// All tools, bound to one workspace.
 pub fn registry(ws: Arc<Workspace>) -> Registry {
@@ -57,7 +59,9 @@ pub fn registry(ws: Arc<Workspace>) -> Registry {
     r.register(DrcTool { ws: ws.clone() });
     r.register(LvsTool { ws: ws.clone() });
     r.register(ExtractTool { ws: ws.clone() });
-    r.register(CheckMacro { ws });
+    r.register(CheckMacro { ws: ws.clone() });
+    r.register(XschemImport { ws: ws.clone() });
+    r.register(XschemExport { ws });
     r
 }
 

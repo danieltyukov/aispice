@@ -51,6 +51,8 @@ pub type Resolved = (Arc<SymbolDef>, SymbolSource);
 pub struct SymbolLibrary {
     dirs: Vec<Dir>,
     cache: RwLock<HashMap<String, Option<Resolved>>>,
+    /// A caller's own set: when present, the only symbols there are.
+    defs: Option<HashMap<String, Arc<SymbolDef>>>,
 }
 
 impl std::fmt::Debug for SymbolLibrary {
@@ -80,6 +82,22 @@ impl SymbolLibrary {
         Self {
             dirs: Vec::new(),
             cache: RwLock::new(HashMap::new()),
+            defs: None,
+        }
+    }
+
+    /// Exactly these symbols, by the names schematics write them under, and
+    /// nothing else: no folders, no built-ins. The layout uses this to draw
+    /// with another tool's symbol shapes.
+    pub fn from_defs(defs: impl IntoIterator<Item = (String, SymbolDef)>) -> Self {
+        Self {
+            dirs: Vec::new(),
+            cache: RwLock::new(HashMap::new()),
+            defs: Some(
+                defs.into_iter()
+                    .map(|(name, def)| (normalize_symbol_name(&name), Arc::new(def)))
+                    .collect(),
+            ),
         }
     }
 
@@ -156,6 +174,9 @@ impl SymbolLibrary {
     }
 
     fn lookup(&self, key: &str) -> Option<Resolved> {
+        if let Some(defs) = &self.defs {
+            return defs.get(key).map(|d| (d.clone(), SymbolSource::Builtin));
+        }
         let base = key.rsplit('/').next().unwrap_or(key);
         for dir in &self.dirs {
             let path = dir.index.get(key).or_else(|| {

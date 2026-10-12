@@ -252,7 +252,7 @@ fn built_rest(attrs: &[(String, String)], def: &SymbolDef) -> String {
             .filter(|v| !v.trim().is_empty())
             .or_else(|| def.attr(key))
             .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.is_empty() && *v != "\"\"")
     };
     ["Value", "Value2", "SpiceLine", "SpiceLine2"]
         .into_iter()
@@ -510,6 +510,9 @@ impl Mapping<'_> {
             return Mapped::Fallback("a subcircuit call needs a name after X".into());
         }
         let params: Vec<String> = tokens(rest).into_iter().skip(1).collect();
+        if let Some(mapped) = pdk_device(sub, &params, n, &inst) {
+            return mapped;
+        }
         let ports = self.subckts.get(&sub.to_ascii_uppercase());
         if n == 3 && sub.eq_ignore_ascii_case("opamp") {
             let mut attrs = vec![("Value".to_string(), sub.to_string())];
@@ -536,21 +539,6 @@ impl Mapping<'_> {
                 inst,
             };
         }
-        // A PDK device: its own symbol, the parameters in SpiceLine, as the
-        // netlister writes them back.
-        if let Some(device) = crate::pdk::device(sub)
-            && let Some(symbol) = device.symbol
-            && device.pins.len() == n
-        {
-            return Mapped::Device {
-                symbol: symbol.replace('/', "\\"),
-                kind: Kind::Sub,
-                attrs: vec![("SpiceLine".to_string(), params.join(" "))],
-                nodes: (0..n).collect(),
-                roles: vec![Pass; n],
-                inst,
-            };
-        }
         // An LTspice library part: a symbol named after the subcircuit.
         if let Ok((def, _)) = self.lib.resolve(sub)
             && def.prefix().to_ascii_uppercase().starts_with('X')
@@ -570,6 +558,55 @@ impl Mapping<'_> {
             "no symbol for subcircuit `{sub}` with {n} pins; the call is kept as a SPICE line"
         ))
     }
+}
+
+/// A call of a PDK device that has a built-in symbol, drawn with it: MOS
+/// transistors and HBTs as transistors, the MIM capacitor and the poly
+/// resistors (with their body pin) as passive parts. The device name goes in
+/// Value and its parameters in SpiceLine, which netlists back to the same
+/// line.
+fn pdk_device(sub: &str, params: &[String], n: usize, inst: &str) -> Option<Mapped> {
+    use crate::pdk::Family;
+    use PinRole::*;
+    let dev = crate::pdk::device(sub)?;
+    let symbol = dev.symbol?;
+    if dev.pins.len() != n {
+        return None;
+    }
+    let (kind, roles) = match dev.family {
+        Family::Mos => (
+            Kind::Fet { p: dev.is_pmos() },
+            vec![Output, Input, Common, Supply],
+        ),
+        Family::Hbt => (Kind::Bjt { p: false }, vec![Output, Input, Common, Supply]),
+        Family::Res | Family::Cap => {
+            let mut roles = vec![Pass, Pass];
+            roles.resize(n, Supply);
+            (Kind::Passive, roles)
+        }
+        Family::Dio => (Kind::Diode, vec![Pass; n]),
+    };
+    if roles.len() != n {
+        return None;
+    }
+    // An empty SpiceLine would read as the symbol's default parameters;
+    // `""` reads as deliberately empty.
+    let line = if params.is_empty() {
+        "\"\"".to_string()
+    } else {
+        params.join(" ")
+    };
+    Some(Mapped::Device {
+        symbol: symbol.replace('/', "\\"),
+        kind,
+        attrs: vec![
+            ("Value".to_string(), sub.to_string()),
+            ("SpiceLine".to_string(), line),
+        ],
+        nodes: (0..n).collect(),
+        roles,
+        inst: inst.to_string(),
+    })
 }
 
 /// LTspice's text encoding for a directive: line breaks as `\n`, backslashes

@@ -28,6 +28,10 @@ default = ["raster"]
 # PNG output for multimodal models, through resvg. Off for builds that only
 # need SVG.
 raster = ["dep:resvg"]
+# Exposes `xschem::export::SchText::trusted_for_tests`, so other crates' tests
+# can hand xschem text that is not an export (IHP's own test benches). Never
+# on in a product build.
+testing = []
 
 [dev-dependencies]
 insta.workspace = true

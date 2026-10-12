@@ -565,13 +565,20 @@ fn read_included(file: &Path) -> Option<Vec<u8>> {
 /// absolute paths, no `..`. Used when a directive is added, before any
 /// project folder is known; the full [`check`] still runs before simulation.
 pub fn check_lexical(text: &str) -> Vec<Violation> {
+    check_lexical_deck(&format!("* directive\n{text}"))
+}
+
+/// [`check_lexical`] for a whole deck, whose first line is its title. Lines
+/// are read as the simulators read them, so a `+` continuation or a comment
+/// that changes which line another joins is checked as they would see it.
+pub fn check_lexical_deck(text: &str) -> Vec<Violation> {
     let policy = Policy {
         base_dir: PathBuf::from("/nonexistent/aispice-lexical"),
         allowed_dirs: Vec::new(),
         allow_control_blocks: false,
         trusted_dirs: Vec::new(),
     };
-    check(&format!("* directive\n{text}"), &policy)
+    check(text, &policy)
 }
 
 /// The logical lines of a deck or library as ngspice reads them, which is
