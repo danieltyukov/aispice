@@ -216,6 +216,49 @@ Extraction runs Magic's `extract` and `ext2spice` with coupling capacitance (cap
 
 Reports, logs, KLayout's extracted netlist and Magic's netlists are kept in `.aispice/layout/<run>/`.
 
+## Behavioural models and co-simulation
+
+A project can describe blocks by behaviour and simulate them with transistors and logic on ngspice:
+
+- **Verilog-A** models, compiled by [OpenVAF](https://openvaf.semimod.de/) 23.5 into OSDI libraries.
+- **Verilog**, co-simulated through XSPICE's `d_cosim` code model, compiled by Verilator 5 with a C++ compiler and `make`. ngspice 42 and newer have `d_cosim` and install the sources it needs (`share/ngspice/scripts/src`); aispice uses them from the ngspice it runs. A newer ngspice can sit beside the system one with `ngspice_path`.
+- **XSPICE devices**: gates, flip-flops, latches, oscillators, analog function blocks and the `adc_bridge` and `dac_bridge` between analog and digital nodes, used as `A` instances with a `.model` card of that type.
+
+`aispice doctor` shows what is installed. Declare the models in the project's `aispice.toml`:
+
+```toml
+veriloga = ["models/comparator.va"]
+
+[[cosim]]
+model = "counter"              # the name decks use
+sources = ["rtl/counter.v"]
+top = "counter"                # default: the model name
+```
+
+A deck uses a Verilog-A module as a model type and a co-simulated model by name; it never names a compiled file:
+
+```spice
+N1 inp inn cmp comparator
+.model comparator comparator_va(vdd=1 gain=1e3)
+Aclk [clk_a cmp] [clk en] tobit
+.model tobit adc_bridge(in_low=0.3 in_high=0.7)
+Acnt [clk en] [q3 q2 q1 q0] null counter
+```
+
+The pins of a co-simulated model follow its Verilog ports in order, inputs, outputs, then inouts, each bus most significant bit first; the `behavioral_models` tool prints the instance line for each model. Such a circuit runs on ngspice only.
+
+Compiled code is aispice's to load, never a deck's:
+
+- Sources are checked before anything compiles: Verilog-A at most 1 MiB, Verilog at most 16 files of 1 MiB, no includes (Verilog-A may include `disciplines.vams` and `constants.vams`), no file input or output, no `$system`, no `$table_model`, no DPI, no `$c` or SystemC blocks, no token pasting, and in Verilog only system tasks from a list of pure ones.
+- OpenVAF and Verilator run from argument vectors in a private folder with a timeout. The libraries stay in memory, keyed by a hash of the sources and the compiler, and go into each run's private folder from there, checked against their SHA-256. The copy under `.aispice/build/` is a record and is never loaded: a library planted there is rebuilt.
+- A deck's own `d_cosim` and `d_process` models (which load a library or start a program) are refused in every spelling ngspice reads, and so are `simulation=` and `process_file=` parameters. XSPICE models that read files a deck names (`d_source`, `d_state`, `file_source`, `table2d`, `table3d`) are not passed to ngspice.
+
+### Spec budgets and trim checks
+
+The `budget` tool splits a chip-level target into block specs with first-order equations, each shown with its numbers: an ADC sample-and-hold or residue stage from resolution, ENOB, full scale and sample rate to the sampling capacitor and the OTA's DC gain, gain-bandwidth, slew rate, phase margin and input noise; an LDO from dropout, load regulation, PSRR, noise and quiescent current to its divider, pass device, loop gain and error amplifier. It saves the block specs as `.specs` files that `check_specs` and `optimize` read.
+
+The `trim_check` tool proves a trimmed block can be trimmed into range: for each corner and each mismatch or tolerance sample it simulates every code of the trim `.param` and reports the samples no code brings into range, the code each sample needs, the codes left unused at either end, and the untrimmed yield. Codes times samples times corners may be at most 2000 runs.
+
 ## Model providers
 
 aispice works with Anthropic, OpenAI, Google Gemini, OpenRouter, Ollama, and any OpenAI-compatible endpoint (LM Studio, vLLM, a company gateway).
@@ -260,6 +303,9 @@ edit_mode = "apply"             # apply (with undo) or ask (approve each edit)
 # xyce_path = "/home/me/.local/xyce/bin/Xyce"   # a Xyce other than the one on PATH
 # klayout_path = "/opt/klayout/klayout"         # a KLayout other than the one on PATH
 # magic_path = "/opt/magic/bin/magic"           # a Magic other than the one on PATH
+# ngspice_path = "/home/me/.local/opt/ngspice/bin/ngspice"  # an ngspice other than the one on PATH
+# openvaf_path = "/home/me/.local/bin/openvaf"  # for Verilog-A models
+# verilator_path = "/opt/verilator/bin/verilator"  # for co-simulated Verilog
 # embedded_models_only = true   # never use models or symbols from LTspice's library
 
 [agent]
@@ -303,7 +349,8 @@ Cursor, Claude Desktop, and other clients that take a JSON server list:
 | Path | Contents |
 |---|---|
 | `<circuit>.specs` | The spec table for a circuit, one spec per line. Commit it with the circuit. |
-| `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project. Written only when you (or the agent, with approval) choose a PDK. |
+| `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project, `veriloga` and `[[cosim]]` for behavioural models. aispice writes only `pdk`, when you (or the agent, with approval) choose a PDK. |
+| `.aispice/build/` | A record of the behavioural model libraries aispice built, with their SHA-256. Never read back. |
 | `.aispice/history/` | A snapshot before every edit, for undo |
 | `.aispice/runs/` | Recent simulation output |
 | `<cell>.gds`, `<cell>.layout.json` | A generated layout and how it was made (template, roles, parameters, devices, dummies). Commit both. |

@@ -2,6 +2,8 @@
 
 Design: [docs/superpowers/specs/2026-10-11-mixed-signal-design.md](../specs/2026-10-11-mixed-signal-design.md). Branch `feat/mixed-signal`, one pull request.
 
+Status 2026-10-12: steps 1 to 13 done; results under "As built" in the design.
+
 ## Security first
 
 1. Netlist policy: refuse `.model` cards of type `d_cosim` and `d_process` in decks and included files, under both readings. Tests beside the existing compiled-model refusals.

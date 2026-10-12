@@ -118,3 +118,14 @@ Codes times samples times corners are capped at 2000 runs, counted before anythi
 - **Build a newer ngspice.** Not needed: ngspice 42 has `d_cosim`. A configured `ngspice_path` covers a newer one when wanted.
 - **Icarus Verilog through `ivlng`.** ngspice 42 ships only the Verilator path; Verilator also refuses less Verilog at run time, since it compiles to C++.
 - **Xyce mixed signal.** Needs a host program embedding Xyce; out of scope.
+
+## As built
+
+Status 2026-10-12: implemented as designed, with these results and changes.
+
+- **ngspice 42 is enough.** Its release notes ("Ngspice-42, Dec 24th, 2023") add `d_cosim` and the `vlnggen` script, and Ubuntu's ngspice 42 installs the shim sources under `/usr/share/ngspice/scripts/src`; no newer ngspice was built. `ngspice_path` (new in `config.toml`) selects another ngspice when wanted, and `aispice doctor` shows where the `d_cosim` sources were found.
+- **ngspice lower-cases a card, quoted paths included**, so a `d_cosim` card naming the library by its full path fails when the private run folder's name has capitals. aispice names the library relative to the run folder (`simulation="./cosim_counter.so"`) with a lower-case file name.
+- **The policy reads lines as ngspice does.** The first version split a `.model` line on whitespace and cut its type at `(`, so `.model x d_cosim,simulation=...` and `.model x (d_cosim ...)` passed while ngspice loads the library they name. Every line is now split into words as ngspice's `INPgetTok` splits a card, and a line is refused when any word is `d_cosim` or `d_process` or when it sets `simulation=` or `process_file=`. The differential test runs every refused spelling through ngspice 42 unchecked, in LTspice mode and native mode: `d_cosim,`, `(d_cosim`, `d_cosim(`, tabs and a `+` continuation load the library; `.model,x` and `x=d_cosim` are not read as a model by ngspice 42 and are refused anyway; the three `d_process` spellings start the program.
+- **Demos.** The Verilog-A comparator drives the counter to 5 counts (OpenVAF and Verilator builds about 4 s on first use, then cached for the process). The IHP StrongARM comparator template, transistor level in ngspice's native mode with the PDK's OSDI models, drives the same counter through `adc_bridge`, two `d_inverter`s and `d_cosim`: eight decisions at 500 MHz, five above, and the counter reads 5.
+- **Trim on IHP.** The bandgap template's output resistor R3 with a 5-bit trim in 0.6% steps: local mismatch spreads vref by 23 mV (one sigma) around 0.6 V, so untrimmed none of 8 samples (tt and ff, 4 mismatch samples each) meets 597 to 603 mV, and every sample has a code that does (codes 7 to 23 needed of 0 to 31). 256 runs take about 30 s.
+- **Not done:** Xyce mixed signal (it needs a host program embedding Xyce), and Python system models: the budgets are the system models, in Rust.

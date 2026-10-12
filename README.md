@@ -48,6 +48,8 @@ What the agent can do with your circuits:
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
 - design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, size transistors by gm/Id from tables aispice builds and caches, and start from templates (current mirror, OTA, two-stage op-amp, comparator, bandgap, LDO) that meet their specs at every process corner
 - lay those blocks out with generators that draw the PDK's own pcells (current mirror, differential pair, five-transistor OTA, two-stage Miller op-amp with its MIM capacitor, StrongARM comparator) with common-centroid or interdigitated units, dummies and guard rings; check them with the PDK's KLayout DRC and LVS decks; extract parasitics with Magic; and report every spec before and after layout
+- describe blocks by behaviour and simulate them with the transistors and logic around them: Verilog-A models compiled with OpenVAF, Verilog co-simulated through ngspice's XSPICE (a comparator driving a counter, for one), and XSPICE gates and bridges between analog and digital nodes
+- split a chip-level target into block specs with the equations shown (an ADC front end from ENOB to the OTA's gain, bandwidth and noise; an LDO from regulation and PSRR to its error amplifier), and prove a trimmed block can be trimmed into range at every corner and mismatch sample
 - undo any edit; every change is saved as a snapshot
 
 Things you can ask:
@@ -178,6 +180,8 @@ aispice macro check tiny_counter.macro --pdk ihp-sg13g2
 ```
 
 The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-package.md](docs/macro-package.md) is the format, shared word for word with ChipLeap.
+
+Inside a project, analog blocks and the logic around them simulate together on ngspice. `aispice.toml` declares Verilog-A models and Verilog to co-simulate, and aispice compiles them itself (OpenVAF, Verilator), checks what they may do, and loads them only from what it built; a netlist can never name a compiled file. [examples/mixed_signal](examples/mixed_signal) has a Verilog-A comparator driving a co-simulated counter, and [examples/mixed_signal_ihp](examples/mixed_signal_ihp) the IHP StrongARM comparator template driving the same counter. [docs/SETUP.md](docs/SETUP.md#behavioural-models-and-co-simulation) lists what it needs.
 
 ## Simulators and models
 
