@@ -249,7 +249,8 @@ The pins of a co-simulated model follow its Verilog ports in order, inputs, outp
 
 Compiled code is aispice's to load, never a deck's:
 
-- Sources are checked before anything compiles: Verilog-A at most 1 MiB, Verilog at most 16 files of 1 MiB, no includes (Verilog-A may include `disciplines.vams` and `constants.vams`), no file input or output, no `$system`, no `$table_model`, no DPI, no `$c` or SystemC blocks, no token pasting, and in Verilog only system tasks from a list of pure ones.
+- Sources are checked before anything compiles: Verilog-A at most 1 MiB, Verilog at most 16 files of 1 MiB, no includes (Verilog-A may include `disciplines.vams` and `constants.vams`), no DPI, no `$c` or SystemC blocks, no token pasting, and system tasks and functions only from a list of pure ones (no file input or output, `$system` or `$table_model`). A Verilog-A model may not define, test or use macros other than the constants of `constants.vams` (`M_PI`, `P_K`, ...), so what it does is decided on what the compiler sees.
+- A run that uses them may have at most 2 million output points (its `.tran` stop time over its step, written as plain numbers) and 4096 XSPICE instances; a longer one is refused before anything compiles, with the longest stop time its step allows.
 - OpenVAF and Verilator run from argument vectors in a private folder with a timeout. The libraries stay in memory, keyed by a hash of the sources and the compiler, and go into each run's private folder from there, checked against their SHA-256. The copy under `.aispice/build/` is a record and is never loaded: a library planted there is rebuilt.
 - A deck's own `d_cosim` and `d_process` models (which load a library or start a program) are refused in every spelling ngspice reads, and so are `simulation=` and `process_file=` parameters. XSPICE models that read files a deck names (`d_source`, `d_state`, `file_source`, `table2d`, `table3d`) are not passed to ngspice.
 
@@ -257,7 +258,7 @@ Compiled code is aispice's to load, never a deck's:
 
 The `budget` tool splits a chip-level target into block specs with first-order equations, each shown with its numbers: an ADC sample-and-hold or residue stage from resolution, ENOB, full scale and sample rate to the sampling capacitor and the OTA's DC gain, gain-bandwidth, slew rate, phase margin and input noise; an LDO from dropout, load regulation, PSRR, noise and quiescent current to its divider, pass device, loop gain and error amplifier. It saves the block specs as `.specs` files that `check_specs` and `optimize` read.
 
-The `trim_check` tool proves a trimmed block can be trimmed into range: for each corner and each mismatch or tolerance sample it simulates every code of the trim `.param` and reports the samples no code brings into range, the code each sample needs, the codes left unused at either end, and the untrimmed yield. Codes times samples times corners may be at most 2000 runs.
+The `trim_check` tool proves a trimmed block can be trimmed into range: for each corner and each mismatch or tolerance sample it simulates every code of the trim `.param` and reports the samples no code brings into range, the code each sample needs, the codes left unused at either end, and the untrimmed yield. Codes (at most 64) times samples times corners may be at most 2000 runs, counted from the request before anything runs; a request over it is told the most samples per corner that fit.
 
 ## Model providers
 
