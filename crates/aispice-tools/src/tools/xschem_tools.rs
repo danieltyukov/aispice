@@ -192,7 +192,7 @@ impl Tool for XschemExport {
     fn spec(&self) -> ToolSpec {
         spec::<XschemExportInput>(
             "xschem_export",
-            "Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox when both are installed). Refuses to overwrite.",
+            "Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox, after the file is approved, when both are installed). Refuses to overwrite.",
         )
     }
 
@@ -252,20 +252,22 @@ impl Tool for XschemExport {
                 exported.proof.differences.join("; ")
             ));
         }
-        let xschem = check_export(&setup, &target_name, &exported, &ctx.cancel).await;
-        let outcome = ExportOutcome { exported, xschem };
+        // The user approves the file before anything runs on it: xschem
+        // checks the export only once it is wanted.
         if !ws
             .approve(
                 &target_name,
                 &format!("Create {target_name} from {}", input.circuit),
-                &outcome.exported.text,
+                &exported.text,
             )
             .await
         {
             return ToolOutput::text(
-                "The user declined creating this file; nothing was written. Ask what they would prefer.",
+                "The user declined creating this file; nothing was written and xschem was not run. Ask what they would prefer.",
             );
         }
+        let xschem = check_export(&setup, &target_name, &exported, &ctx.cancel).await;
+        let outcome = ExportOutcome { exported, xschem };
         let circuit = input.circuit.clone();
         blocking(move || {
             let e = &outcome.exported;

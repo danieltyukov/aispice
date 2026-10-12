@@ -2023,7 +2023,7 @@ Edits your files: each write is approved in ask-before-applying mode and can be 
 
 ## `xschem_export`
 
-Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox when both are installed). Refuses to overwrite.
+Write a project schematic (.asc) as an xschem schematic (.sch): redrawn with xschem's symbols (IHP's sg13g2_pr symbols for PDK devices, a MODEL block for the PDK header), directives as code blocks. Parts xschem has no symbol for, and values xschem would read as Tcl, stay SPICE lines in a code block; anything holding tcleval is left out. Returns findings and a proof: the .asc's netlist compared with the .sch's (netlisted by aispice, and by xschem in a sandbox, after the file is approved, when both are installed). Refuses to overwrite.
 
 Edits your files: each write is approved in ask-before-applying mode and can be undone.
 
