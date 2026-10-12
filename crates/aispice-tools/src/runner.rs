@@ -174,10 +174,13 @@ impl Runner {
 
     /// The project's declared behavioural models that this netlist uses,
     /// built (or taken from what this process built) and ready to load.
+    /// `on_ngspice` is checked before anything compiles: whether the run
+    /// will be on ngspice, the only simulator that loads them.
     pub async fn behavioral_libraries(
         &self,
         project: &Project,
         netlist: &Netlist,
+        on_ngspice: impl AsyncFnOnce() -> Result<(), RunError>,
         cancel: &CancellationToken,
     ) -> Result<(Vec<Arc<aispice_sim::behavioral::Library>>, Vec<String>), RunError> {
         let cfg = ProjectConfig::load(project.root()).map_err(RunError::Pdk)?;
@@ -190,6 +193,7 @@ impl Runner {
         if va.is_empty() && cosim.is_empty() {
             return Ok((Vec::new(), names));
         }
+        on_ngspice().await?;
         let c = self.config();
         let tools = crate::behavioral::Tools {
             openvaf: c.openvaf_exe,
@@ -202,6 +206,45 @@ impl Runner {
             .await
             .map_err(RunError::Netlist)?;
         Ok((libs, names))
+    }
+
+    /// Build the project's declared behavioural models (or the one named,
+    /// a Verilog-A file or a co-simulation model), whether or not a deck
+    /// uses them yet.
+    pub async fn build_behavioral(
+        &self,
+        project: &Project,
+        only: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Arc<aispice_sim::behavioral::Library>>, String> {
+        let declared = crate::behavioral::declared(project)?;
+        let pick = |name: &str| only.is_none_or(|o| o.eq_ignore_ascii_case(name));
+        let va: Vec<_> = declared
+            .veriloga
+            .iter()
+            .filter(|v| pick(&v.source.name))
+            .collect();
+        let cosim: Vec<_> = declared.cosim.iter().filter(|c| pick(&c.model)).collect();
+        if va.is_empty() && cosim.is_empty() {
+            return Err(match only {
+                Some(o) => {
+                    format!("aispice.toml declares no Verilog-A file or co-simulation model {o}")
+                }
+                None => {
+                    "aispice.toml declares no behavioural models (veriloga = [...] or [[cosim]])"
+                        .into()
+                }
+            });
+        }
+        let c = self.config();
+        let tools = crate::behavioral::Tools {
+            openvaf: c.openvaf_exe,
+            verilator: c.verilator_exe,
+            ngspice: c.ngspice_exe,
+        };
+        self.behavioral
+            .build(project, &tools, &va, &cosim, cancel)
+            .await
     }
 
     /// The behavioural libraries this process has built.
@@ -472,15 +515,29 @@ impl Runner {
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
         // Verilog-A and co-simulated Verilog run on ngspice only: the other
         // simulators cannot load what aispice builds for them.
-        let (libraries, cosim) = self.behavioral_libraries(project, netlist, cancel).await?;
-        if !libraries.is_empty() && id != SimId::Ngspice {
-            let asked = simulator.is_some() || self.config().simulator != "auto";
-            if asked || !self.available(SimId::Ngspice).await {
-                return Err(RunError::Netlist(format!(
-                    "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
-                    id.name()
-                )));
-            }
+        let mut switch_to_ngspice = false;
+        let (libraries, cosim) = self
+            .behavioral_libraries(
+                project,
+                netlist,
+                async || {
+                    if id == SimId::Ngspice {
+                        return Ok(());
+                    }
+                    let asked = simulator.is_some() || self.config().simulator != "auto";
+                    if asked || !self.available(SimId::Ngspice).await {
+                        return Err(RunError::Netlist(format!(
+                            "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
+                            id.name()
+                        )));
+                    }
+                    switch_to_ngspice = true;
+                    Ok(())
+                },
+                cancel,
+            )
+            .await?;
+        if switch_to_ngspice {
             id = SimId::Ngspice;
         }
         let lib_dirs = self.model_lib_dirs();

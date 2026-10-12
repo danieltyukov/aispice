@@ -8,6 +8,7 @@ pub(crate) mod analysis;
 mod gmid_tools;
 mod layout_tools;
 mod macro_tools;
+mod mixed_tools;
 mod pdk_tools;
 mod render_tools;
 mod schematic_tools;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub use gmid_tools::*;
 pub use layout_tools::*;
 pub use macro_tools::*;
+pub use mixed_tools::*;
 pub use pdk_tools::*;
 pub use render_tools::*;
 pub use schematic_tools::*;
@@ -57,7 +59,10 @@ pub fn registry(ws: Arc<Workspace>) -> Registry {
     r.register(DrcTool { ws: ws.clone() });
     r.register(LvsTool { ws: ws.clone() });
     r.register(ExtractTool { ws: ws.clone() });
-    r.register(CheckMacro { ws });
+    r.register(CheckMacro { ws: ws.clone() });
+    r.register(BehavioralModels { ws: ws.clone() });
+    r.register(BudgetTool { ws: ws.clone() });
+    r.register(TrimCheck { ws });
     r
 }
 
