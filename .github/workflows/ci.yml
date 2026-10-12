@@ -111,10 +111,12 @@ jobs:
           key: cargo-pdk-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-pdk-
 
-      - name: Install ngspice
+      # Verilator builds the co-simulated Verilog of the mixed-signal tests;
+      # g++ and make are on the runner already.
+      - name: Install ngspice and Verilator
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ngspice
+          sudo apt-get install --no-install-recommends -y ngspice verilator
 
       # Only the PDK's sources are cached. The OSDI models are compiled on every
       # run instead: OpenVAF builds for the runner's own CPU, a cache restored on
@@ -161,6 +163,8 @@ jobs:
           for m in psp103 psp103_nqs r3_cmc mosvar; do
             test -s "../ngspice/osdi/$m.osdi" || { echo "missing $m.osdi"; exit 1; }
           done
+          # The mixed-signal tests compile Verilog-A with the same OpenVAF.
+          echo "$RUNNER_TEMP/openvaf" >> "$GITHUB_PATH"
 
       - name: Install KLayout
         run: |
@@ -176,6 +180,8 @@ jobs:
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
           cargo test -p aispice-tools --test templates_ihp -- --nocapture
           cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
+          cargo test -p aispice-tools --test mixed_signal -- --nocapture
+          cargo test -p aispice-sim --test xspice_policy -- --nocapture
 
       # One DRC deck on a synthetic layout, then a generated current mirror
       # through DRC and LVS, the broken-layout checks, and the files each
