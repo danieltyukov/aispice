@@ -1,10 +1,15 @@
 //! Verilog-A behavioural models, compiled by OpenVAF into OSDI libraries.
 //!
-//! The source check refuses what could reach outside the model: file input
-//! and output, `$table_model` (which reads a data file), `$system`, includes
-//! other than the two standard headers OpenVAF provides, and token pasting.
-//! OpenVAF 23.5 refuses most of these itself; the check does not depend on
-//! the compiler's version.
+//! A model becomes native code inside ngspice, so what it may do is decided
+//! on exactly the tokens the compiler sees. That needs no preprocessor of
+//! aispice's own: a source may not define, undefine or test macros, may
+//! include only the two standard headers OpenVAF builds in, and may use
+//! only the constants `constants.vams` defines (`M_PI`, `P_K`, ...). With
+//! nothing else to expand, the source is its own preprocessed text, and
+//! every system task or function in it must be on [`ALLOWED`]: maths, the
+//! simulator's state, printing to the log and stopping. File input and
+//! output, `$table_model`, `$system` and anything else are refused,
+//! whatever the compiler would accept.
 
 use super::scan::{self, Kind, Token};
 use super::{
@@ -18,32 +23,103 @@ use tokio_util::sync::CancellationToken;
 /// The headers OpenVAF builds in; any other include is refused.
 const INCLUDES: &[&str] = &["disciplines.vams", "constants.vams"];
 
-/// System tasks and functions that read or write files or run programs.
-const REFUSED: &[&str] = &[
-    "$fopen",
-    "$fclose",
-    "$fdisplay",
-    "$fwrite",
-    "$fstrobe",
-    "$fmonitor",
-    "$fgets",
-    "$fgetc",
-    "$fscanf",
-    "$fread",
-    "$fseek",
-    "$ftell",
-    "$fflush",
-    "$feof",
-    "$ferror",
-    "$rewind",
-    "$readmemh",
-    "$readmemb",
-    "$writememh",
-    "$writememb",
-    "$dumpfile",
-    "$dumpvars",
-    "$table_model",
-    "$system",
+/// The macros `constants.vams` defines, each a number: the only macros a
+/// model may use.
+const CONSTANTS: &[&str] = &[
+    "M_E",
+    "M_LOG2E",
+    "M_LOG10E",
+    "M_LN2",
+    "M_LN10",
+    "M_PI",
+    "M_TWO_PI",
+    "M_PI_2",
+    "M_PI_4",
+    "M_1_PI",
+    "M_2_PI",
+    "M_2_SQRTPI",
+    "M_SQRT2",
+    "M_SQRT1_2",
+    "P_Q",
+    "P_C",
+    "P_K",
+    "P_H",
+    "P_EPS0",
+    "P_U0",
+    "P_CELSIUS0",
+];
+
+/// Directives that change nothing a model can do.
+const HARMLESS_DIRECTIVES: &[&str] = &[
+    "default_discipline",
+    "default_transition",
+    "resetall",
+    "celldefine",
+    "endcelldefine",
+];
+
+/// The system tasks and functions a model may use: maths, the simulator's
+/// state (temperature, time, parameters given, placement), printing to the
+/// simulator's log, analog operators' helpers, random numbers and stopping.
+pub const ALLOWED: &[&str] = &[
+    "$temperature",
+    "$vt",
+    "$abstime",
+    "$realtime",
+    "$param_given",
+    "$port_connected",
+    "$mfactor",
+    "$xposition",
+    "$yposition",
+    "$angle",
+    "$hflip",
+    "$vflip",
+    "$simparam",
+    "$bound_step",
+    "$discontinuity",
+    "$limit",
+    "$strobe",
+    "$display",
+    "$write",
+    "$debug",
+    "$error",
+    "$warning",
+    "$info",
+    "$fatal",
+    "$finish",
+    "$stop",
+    "$random",
+    "$arandom",
+    "$rdist_normal",
+    "$rdist_uniform",
+    "$rdist_exponential",
+    "$dist_normal",
+    "$dist_uniform",
+    "$dist_exponential",
+    "$ln",
+    "$log10",
+    "$exp",
+    "$sqrt",
+    "$pow",
+    "$floor",
+    "$ceil",
+    "$abs",
+    "$min",
+    "$max",
+    "$sin",
+    "$cos",
+    "$tan",
+    "$asin",
+    "$acos",
+    "$atan",
+    "$atan2",
+    "$hypot",
+    "$sinh",
+    "$cosh",
+    "$tanh",
+    "$asinh",
+    "$acosh",
+    "$atanh",
 ];
 
 fn problem(src: &Source, line: usize, message: impl Into<String>) -> BuildError {
@@ -83,12 +159,24 @@ pub fn check(src: &Source) -> Result<Vec<Module>, BuildError> {
                     ));
                 }
             },
-            Kind::System(name) if REFUSED.contains(&name.to_ascii_lowercase().as_str()) => {
+            Kind::Directive(d)
+                if CONSTANTS.contains(&d.as_str()) || HARMLESS_DIRECTIVES.contains(&d.as_str()) => {
+            }
+            Kind::Directive(d) => {
                 return Err(problem(
                     src,
                     t.line,
                     format!(
-                        "`{name}` reads or writes files or runs a program; a behavioural model only computes"
+                        "`{d} is not allowed: a model may not define, test or use macros other than the constants of constants.vams (M_PI, P_K, ...), so what it does is what it says"
+                    ),
+                ));
+            }
+            Kind::System(name) if !ALLOWED.contains(&name.to_ascii_lowercase().as_str()) => {
+                return Err(problem(
+                    src,
+                    t.line,
+                    format!(
+                        "`{name}` is not on the list of system functions a model may use (maths, temperature, time, parameters, printing to the log, random numbers, stopping); file access, data tables and programs are not allowed"
                     ),
                 ));
             }
@@ -303,6 +391,10 @@ endmodule
                 "only `include",
             ),
             (
+                "`include \"../../outside/x.va\"\nmodule a; endmodule",
+                "only `include",
+            ),
+            (
                 "`include \"other.va\"\nmodule a; endmodule",
                 "only `include",
             ),
@@ -312,17 +404,37 @@ endmodule
                 "$fopen",
             ),
             (
+                "module a; integer f; analog begin $fdisplay(f, \"x\"); $fwrite(f, \"y\"); end endmodule",
+                "$fdisplay",
+            ),
+            ("module a; analog $fstrobe(1, \"x\"); endmodule", "$fstrobe"),
+            (
                 "module a; analog $Table_Model(1, \"t\", \"1L\"); endmodule",
                 "$Table_Model",
             ),
             ("module a; analog $system(\"id\"); endmodule", "$system"),
-            ("`define C(a,b) a``b\nmodule a; endmodule", "token pasting"),
+            (
+                "module a; analog $readmemh(\"x\", m); endmodule",
+                "$readmemh",
+            ),
+            // A macro cannot hide a task: defining one is refused, so is
+            // using one that is not a constant.
+            (
+                "`define OPEN $fopen\nmodule a; analog `OPEN(\"x\"); endmodule",
+                "`define",
+            ),
+            ("`define D(x) x\nmodule a; endmodule", "`define"),
+            ("module a; analog `HIDDEN(\"x\"); endmodule", "`HIDDEN"),
+            ("`ifdef X\nmodule a; endmodule\n`endif", "`ifdef"),
+            ("module a; analog V(x) <+ a``b; endmodule", "token pasting"),
             ("// nothing here", "no `module`"),
         ] {
             let e = check(&src(text)).unwrap_err().to_string();
             assert!(e.contains(why), "{text}: {e}");
             assert!(e.starts_with("models/m.va:"), "{e}");
         }
+        // The standard constants, printing and maths are fine.
+        assert!(check(&src("`include \"constants.vams\"\nmodule a(x); inout x; electrical x; analog begin V(x) <+ `M_PI * $vt * $exp(1) * `P_K; $strobe(\"t %g\", $abstime); end endmodule")).is_ok());
         // In a comment or a string, the same words are harmless.
         assert!(
             check(&src(
