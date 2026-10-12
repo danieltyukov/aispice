@@ -48,6 +48,9 @@ similar = "3"
 keyring = "4"
 tempfile = "3"
 dirs = "7"
+libc = "0.2"
+landlock = "0.4"
+seccompiler = "0.5"
 base64 = "0.23"
 rand = "0.9"
 tracing = "0.1"
@@ -56,8 +59,12 @@ insta = { version = "1", features = ["yaml"] }
 assert_cmd = "2"
 predicates = "3"
 
+# Unsafe is denied, not forbidden: the Landlock sandbox that confines xschem
+# (aispice-sim::backend::confine) needs a pre_exec hook and a few raw syscalls,
+# behind a scoped `#[allow(unsafe_code)]` with its own safety notes. Nothing
+# else in the workspace may reach for unsafe without the same explicit opt-in.
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -48,6 +48,7 @@ What the agent can do with your circuits:
 - check the bias point of every transistor (region, gm, gds, gm/Id), find poles and zeros, start from 17 verified reference circuits, lint for wiring mistakes, and render the schematic to SVG or PNG
 - design transistor-level IC blocks on a process design kit you have installed (IHP SG13G2 first): draw with the PDK's MOSFETs, resistors, MIM capacitor and HBT, simulate on ngspice or Xyce with the PDK's own models, size transistors by gm/Id from tables aispice builds and caches, and start from templates (current mirror, OTA, two-stage op-amp, comparator, bandgap, LDO) that meet their specs at every process corner
 - lay those blocks out with generators that draw the PDK's own pcells (current mirror, differential pair, five-transistor OTA, two-stage Miller op-amp with its MIM capacitor, StrongARM comparator) with common-centroid or interdigitated units, dummies and guard rings; check them with the PDK's KLayout DRC and LVS decks; extract parasitics with Magic; and report every spec before and after layout
+- import xschem schematics (IHP's test benches among them) as readable `.asc` files and export `.asc` files to xschem with IHP's symbols, each conversion proven by netlisting both sides
 - undo any edit; every change is saved as a snapshot
 
 Things you can ask:
@@ -110,6 +111,7 @@ Measurements:
 | `aispice show <file>` | Describe a schematic: parts, the net on every pin, directives |
 | `aispice render <file> -o <out.svg\|png>` | Draw a schematic |
 | `aispice draw <netlist> -o <out.asc>` | Lay a SPICE netlist out as a readable LTspice schematic |
+| `aispice xschem import\|export <file>` | Convert an xschem `.sch` to an `.asc` or back, with the proof that the circuit did not change; exits 1 on a difference |
 | `aispice eval` | Run the design task suite in `evals/` against one or more models and report pass rates |
 | `aispice pdk add\|list\|show\|remove` | Register an installed PDK (IHP-Open-PDK's `ihp-sg13g2`), list and describe them |
 | `aispice gmid <device>` | Size a PDK transistor by gm/Id, for example `--gm-id 12 --l 0.5u --id 50u` |
@@ -170,6 +172,8 @@ $ aispice check ota.asc --post-layout ota.gds
 ```
 
 Layouts come only from generators: when DRC or LVS fails, the agent changes the generator's parameters or role map and draws again, and never edits GDS. [docs/SETUP.md](docs/SETUP.md#layout) lists what layout needs.
+
+Circuits move to and from xschem with `aispice xschem import` and `aispice xschem export` (or the `xschem_import` and `xschem_export` tools). Both sides are netlisted and compared by aispice; an export is also checked with xschem itself when it is installed. xschem evaluates Tcl from a schematic, so aispice runs it only on files it wrote itself, in a sandbox, and never on an imported schematic. [docs/XSCHEM.md](docs/XSCHEM.md) has the details.
 
 ## Blocks for mixed-signal chips
 

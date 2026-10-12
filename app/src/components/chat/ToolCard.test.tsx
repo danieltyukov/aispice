@@ -95,6 +95,33 @@ describe("toolTitle", () => {
     expect(toolTitle(used, false).title).toBe("Created lp.asc from RC low-pass filter");
   });
 
+  it("names xschem conversions", () => {
+    const summary = { components: [], nets: [], directives: [], comments: [], analysis: null, findings: [] };
+    const proofs = {
+      aispice: { compared: "x", equivalent: true, differences: [] },
+      xschem: { status: "skipped" as const, reason: "xschem is not installed" },
+    };
+    const imported: ChatToolCall = {
+      id: "x",
+      name: "xschem_import",
+      input: { schematic: "tb.sch" },
+      output: {
+        content: [],
+        is_error: false,
+        data: { kind: "schematic", circuit: "tb.asc", summary, xschem: { findings: [], notes: [], proofs, equivalent: true } },
+      },
+    };
+    expect(toolTitle(imported, false).title).toBe("Imported tb.asc from xschem: 0 parts");
+    const exported: ChatToolCall = {
+      id: "y",
+      name: "xschem_export",
+      input: { circuit: "amp.asc" },
+      output: { content: [], is_error: false, data: { kind: "generic", value: { schematic: "amp.sch", equivalent: true } } },
+    };
+    expect(toolTitle(exported, false).title).toBe("Exported amp.sch");
+    expect(toolTitle({ id: "z", name: "xschem_export", input: { circuit: "amp.asc" } }, true).title).toBe("Exporting amp.asc to xschem...");
+  });
+
   it("describes running, stopped and failed calls", () => {
     expect(toolTitle({ id: "c", name: "simulate", input: { circuit: "a/rc.asc" } }, true)).toEqual({ title: "Simulating rc.asc...", tone: "running" });
     expect(toolTitle({ id: "c", name: "simulate", input: {} }, false).tone).toBe("stopped");

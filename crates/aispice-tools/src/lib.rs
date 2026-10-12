@@ -11,6 +11,7 @@ pub mod setup;
 pub mod templates;
 pub mod tools;
 pub mod workspace;
+pub mod xschem;
 
 pub use project::{CircuitEntry, Project, ProjectError, ProjectOptions, Snapshot};
 pub use runner::{RunMods, Runner, RunnerConfig, StoredRun};
