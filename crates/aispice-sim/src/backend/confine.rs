@@ -1,32 +1,37 @@
 //! Confining a child process before it execs (Linux only): Landlock, a
 //! seccomp filter, and resource limits.
 //!
+//! aispice runs xschem only on schematics it wrote itself (export checks),
+//! so the Tcl xschem sees is known; this confinement is defense in depth.
 //! aispice runs xschem inside bubblewrap where that can start. Where it
 //! cannot (an unprivileged-user-namespace restriction without a bwrap
 //! AppArmor profile, the default on Ubuntu 24.04), it confines the process
-//! itself. xschem evaluates Tcl from the files it opens, so the confinement
-//! is strict:
+//! itself:
 //!
-//! - **Landlock** (Linux 6.2 and later, ABI 6 and later, so that abstract
-//!   UNIX sockets and signals to other domains can be scoped off) at a
-//!   hard requirement: if the kernel cannot provide every access handled
-//!   here, the run is refused rather than silently weakened. The process
-//!   may read the system, the library and the PDK; execute only xschem and
-//!   the few helpers it runs; write only its private output, home and tmp;
-//!   and it may make no TCP connection, no abstract-socket connection, and
-//!   send no signal outside its own domain. Every rule is built from a
-//!   descriptor opened `O_PATH|O_NOFOLLOW`, so a path cannot be swapped for
-//!   a symlink between the check and the rule.
-//! - **seccomp** denies the system calls a confined netlister never needs
-//!   but an escape would use: creating a socket, connecting or binding or
-//!   sending on one, tracing or reading another process, the keyring, BPF,
-//!   and joining or creating namespaces. Everything else, including
-//!   `socketpair` and `execve`, is allowed, and the filter is inherited
-//!   across exec so the helpers xschem runs are bound by it too.
+//! - **Landlock**, ABI 6 or later at a hard requirement: a kernel that
+//!   cannot enforce every access handled here is refused rather than used
+//!   with a weaker sandbox. The process may read the system, the library,
+//!   the PDK and its own input; write only its private output, home and
+//!   tmp, and there only plain files and folders (no symlink, socket, fifo
+//!   or device); make no TCP connection; reach no abstract UNIX socket; and
+//!   signal nothing outside its own domain. Every rule is built from a
+//!   descriptor opened `O_PATH|O_NOFOLLOW`. Execute is granted only on
+//!   xschem, its helpers and the loader; that keeps xschem from starting
+//!   other programs by path but is not a boundary on its own (the loader
+//!   can run any readable binary), so nothing below relies on it.
+//! - **seccomp** denies the system calls a netlister never needs but an
+//!   escape would use: sockets of every family and anything done on one,
+//!   io_uring (which can open and connect sockets without the socket
+//!   syscall), tracing or reading another process or taking its
+//!   descriptors, the keyring, BPF, perf, userfaultfd, mounts, and new
+//!   namespaces through `unshare`, `setns` or `clone`; `clone3`, whose flags
+//!   a filter cannot read, gets `ENOSYS` so the C library falls back to
+//!   `clone`. `socketpair`, `fork` and `execve` stay allowed, and the filters
+//!   are inherited across exec, so whatever runs in the process is bound.
 //! - **Resource limits** cap the output size and address space, and the
 //!   process is asked to die with its parent.
 //!
-//! The Landlock ruleset and the seccomp program are built here, in the
+//! The Landlock ruleset and the seccomp programs are built here, in the
 //! parent, where allocation is safe. The child's `pre_exec` hook does
 //! nothing but a few syscalls over already-built state, so it allocates
 //! nothing and is safe to run after a fork beside the async runtime's
@@ -39,16 +44,18 @@ use landlock::{
     ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr,
     RulesetCreatedAttr, Scope,
 };
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule,
+};
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-/// The lowest Landlock ABI aispice will use. ABI 6 (Linux 6.12 in the crate's
-/// table, 6.2 for the base feature; the scope rules used here need ABI 6) is
-/// the first that can scope abstract UNIX sockets and signals.
+/// The lowest Landlock ABI aispice will use. ABI 6 (Linux 6.12) is the
+/// first that can scope abstract UNIX sockets and signals.
 pub const MIN_ABI: i32 = 6;
 
 /// The ABI the ruleset is written against. At a hard requirement the kernel
@@ -154,7 +161,18 @@ fn build_landlock(ll: &Landlock) -> io::Result<OwnedFd> {
     // file, so one read set serves both files and directories.
     let read = AccessFs::ReadFile | AccessFs::ReadDir;
     let exec = AccessFs::Execute | AccessFs::ReadFile;
-    let write = AccessFs::from_write(ABI_TARGET) | AccessFs::ReadFile | AccessFs::ReadDir;
+    // Write: plain files and folders only. No symlink, socket, fifo or
+    // device may be made in the writable folders, so nothing there can
+    // point a later reader elsewhere, and nothing written can be executed.
+    let write = AccessFs::ReadFile
+        | AccessFs::ReadDir
+        | AccessFs::WriteFile
+        | AccessFs::Truncate
+        | AccessFs::MakeReg
+        | AccessFs::MakeDir
+        | AccessFs::RemoveFile
+        | AccessFs::RemoveDir
+        | AccessFs::Refer;
     let rw = AccessFs::ReadFile | AccessFs::WriteFile;
     for p in &ll.read {
         created = add(created, p, read)?;
@@ -172,42 +190,109 @@ fn build_landlock(ll: &Landlock) -> io::Result<OwnedFd> {
         .ok_or_else(|| io::Error::other("this kernel has no usable Landlock support"))
 }
 
-/// Build the seccomp program that denies the syscalls a netlister never
-/// needs but an escape would use. Everything else is allowed, so `socketpair`
-/// (a local pair that reaches nowhere) and `execve` still work.
-fn build_seccomp() -> io::Result<BpfProgram> {
-    let denied: &[libc::c_long] = &[
+/// The syscalls a confined netlister never needs but an escape would use:
+/// sockets of every family and anything done on one, the asynchronous
+/// interfaces that can open or connect a socket without the socket syscall
+/// (io_uring), tracing or reading another process, taking its descriptors,
+/// the keyring, BPF, perf, userfaultfd, and namespaces and mounts.
+fn denied_syscalls() -> Vec<libc::c_long> {
+    vec![
         libc::SYS_socket,
         libc::SYS_connect,
         libc::SYS_bind,
+        libc::SYS_listen,
+        libc::SYS_accept,
+        libc::SYS_accept4,
         libc::SYS_sendto,
         libc::SYS_sendmsg,
+        libc::SYS_sendmmsg,
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
         libc::SYS_ptrace,
         libc::SYS_process_vm_readv,
         libc::SYS_process_vm_writev,
+        libc::SYS_process_madvise,
+        libc::SYS_pidfd_getfd,
+        libc::SYS_kcmp,
         libc::SYS_keyctl,
         libc::SYS_add_key,
         libc::SYS_request_key,
         libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_userfaultfd,
         libc::SYS_unshare,
         libc::SYS_setns,
-    ];
-    // c_long is i64 on the 64-bit targets aispice builds for, but the
-    // conversion keeps this correct on a 32-bit libc where it is i32.
-    #[allow(clippy::useless_conversion)]
-    let rules: BTreeMap<i64, Vec<seccompiler::SeccompRule>> =
-        denied.iter().map(|n| (i64::from(*n), Vec::new())).collect();
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_pivot_root,
+        libc::SYS_chroot,
+        libc::SYS_open_tree,
+        libc::SYS_move_mount,
+        libc::SYS_fsopen,
+        libc::SYS_fsconfig,
+        libc::SYS_fsmount,
+        libc::SYS_fspick,
+        libc::SYS_mount_setattr,
+        libc::SYS_open_by_handle_at,
+    ]
+}
+
+/// The namespace flags `clone` must not carry.
+const CLONE_NEW: [libc::c_int; 8] = [
+    libc::CLONE_NEWNS,
+    libc::CLONE_NEWUTS,
+    libc::CLONE_NEWIPC,
+    libc::CLONE_NEWUSER,
+    libc::CLONE_NEWPID,
+    libc::CLONE_NEWNET,
+    libc::CLONE_NEWCGROUP,
+    libc::CLONE_NEWTIME,
+];
+
+fn compile(rules: BTreeMap<i64, Vec<SeccompRule>>, errno: libc::c_int) -> io::Result<BpfProgram> {
     let arch = std::env::consts::ARCH
         .try_into()
         .map_err(|_| io::Error::other("seccomp has no rules for this architecture"))?;
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
-        SeccompAction::Errno(libc::EACCES as u32),
+        SeccompAction::Errno(errno as u32),
         arch,
     )
     .map_err(|e| io::Error::other(e.to_string()))?;
     BpfProgram::try_from(filter).map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// The two seccomp programs. The first denies [`denied_syscalls`] and any
+/// `clone` that asks for a new namespace, with `EACCES`. The second answers
+/// `clone3` (whose flags sit in memory a filter cannot read) with `ENOSYS`,
+/// so the C library falls back to `clone`, which the first one checks.
+/// Everything else, including `socketpair`, `fork` and `execve`, is allowed.
+fn build_seccomp() -> io::Result<[BpfProgram; 2]> {
+    let to_io = |e: seccompiler::BackendError| io::Error::other(e.to_string());
+    // c_long is i64 on the 64-bit targets aispice builds for, but the
+    // conversion keeps this correct on a 32-bit libc where it is i32.
+    #[allow(clippy::useless_conversion)]
+    let mut deny: BTreeMap<i64, Vec<SeccompRule>> = denied_syscalls()
+        .into_iter()
+        .map(|n| (i64::from(n), Vec::new()))
+        .collect();
+    let mut clone_rules = Vec::new();
+    for flag in CLONE_NEW {
+        let bit = flag as u64;
+        let cond =
+            SeccompCondition::new(0, SeccompCmpArgLen::Qword, SeccompCmpOp::MaskedEq(bit), bit)
+                .map_err(to_io)?;
+        clone_rules.push(SeccompRule::new(vec![cond]).map_err(to_io)?);
+    }
+    #[allow(clippy::useless_conversion)]
+    deny.insert(i64::from(libc::SYS_clone), clone_rules);
+    #[allow(clippy::useless_conversion)]
+    let clone3: BTreeMap<i64, Vec<SeccompRule>> = [(i64::from(libc::SYS_clone3), Vec::new())]
+        .into_iter()
+        .collect();
+    Ok([compile(deny, libc::EACCES)?, compile(clone3, libc::ENOSYS)?])
 }
 
 /// Set one resource limit. A syscall only, safe in `pre_exec`.
@@ -256,9 +341,11 @@ pub fn apply(cmd: &mut tokio::process::Command, c: &Confinement) -> io::Result<(
             }
             // seccompiler sets no_new_privs (which Landlock also needs) and
             // installs the filter, over a borrowed slice, with no allocation.
-            if let Some(bpf) = &seccomp {
-                seccompiler::apply_filter(bpf)
-                    .map_err(|_| io::Error::from_raw_os_error(libc::EPERM))?;
+            if let Some(programs) = &seccomp {
+                for bpf in programs {
+                    seccompiler::apply_filter(bpf)
+                        .map_err(|_| io::Error::from_raw_os_error(libc::EPERM))?;
+                }
             }
             if let Some(fd) = &ruleset {
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -278,37 +365,90 @@ pub fn apply(cmd: &mut tokio::process::Command, c: &Confinement) -> io::Result<(
 mod tests {
     use super::*;
 
-    /// The seccomp program refuses creating any socket (so no TCP, UDP,
-    /// abstract-UNIX or pathname-UNIX connection is possible) while leaving a
-    /// local `socketpair` working. Checked in a forked child so the filter
-    /// does not bind the test runner; the child reports the outcome by exit
-    /// code, having allocated nothing after the fork.
+    /// The seccomp programs refuse creating any socket (so no TCP, UDP,
+    /// abstract-UNIX or pathname-UNIX connection), io_uring, a new namespace
+    /// through `unshare` or `clone`, and answer `clone3` with `ENOSYS`, while a
+    /// local `socketpair` and a plain `fork` still work. Checked in a forked
+    /// child so the filters do not bind the test runner; the child reports
+    /// by exit code, having allocated nothing after the fork.
     #[test]
-    fn seccomp_denies_sockets_but_allows_socketpair() {
-        let bpf = build_seccomp().expect("build the seccomp program");
+    fn seccomp_denies_sockets_namespaces_and_io_uring() {
+        let programs = build_seccomp().expect("build the seccomp programs");
         // SAFETY: the child only makes syscalls and _exit, no allocation.
         match unsafe { libc::fork() } {
             -1 => panic!("fork failed"),
             0 => {
-                let apply_ok = seccompiler::apply_filter(&bpf).is_ok();
-                let denied = |r: i32| {
-                    r < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+                let applied = programs
+                    .iter()
+                    .all(|bpf| seccompiler::apply_filter(bpf).is_ok());
+                let fails_with = |r: libc::c_long, errno: i32| {
+                    r < 0 && io::Error::last_os_error().raw_os_error() == Some(errno)
                 };
-                let inet = denied(unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) });
-                let unix = denied(unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) });
-                let udp = denied(unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) });
+                let sock = |domain, kind| unsafe { libc::socket(domain, kind, 0) } as libc::c_long;
+                let inet = fails_with(sock(libc::AF_INET, libc::SOCK_STREAM), libc::EACCES);
+                let unix = fails_with(sock(libc::AF_UNIX, libc::SOCK_STREAM), libc::EACCES);
+                let udp = fails_with(sock(libc::AF_INET, libc::SOCK_DGRAM), libc::EACCES);
+                let ring = fails_with(
+                    unsafe {
+                        libc::syscall(libc::SYS_io_uring_setup, 1u32, std::ptr::null_mut::<u8>())
+                    },
+                    libc::EACCES,
+                );
+                let userns = fails_with(
+                    unsafe { libc::unshare(libc::CLONE_NEWUSER) } as libc::c_long,
+                    libc::EACCES,
+                );
+                let clone_ns = fails_with(
+                    unsafe {
+                        libc::syscall(
+                            libc::SYS_clone,
+                            (libc::CLONE_NEWNET | libc::SIGCHLD) as libc::c_ulong,
+                            0usize,
+                            0usize,
+                            0usize,
+                            0usize,
+                        )
+                    },
+                    libc::EACCES,
+                );
+                let clone3 = fails_with(
+                    unsafe { libc::syscall(libc::SYS_clone3, std::ptr::null_mut::<u8>(), 0usize) },
+                    libc::ENOSYS,
+                );
                 let mut sv = [0i32; 2];
                 let pair_ok = unsafe {
                     libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr())
                 } == 0;
-                let good = apply_ok && inet && unix && udp && pair_ok;
+                let fork_ok = match unsafe { libc::fork() } {
+                    0 => unsafe { libc::_exit(0) },
+                    pid if pid > 0 => {
+                        let mut st = 0;
+                        unsafe { libc::waitpid(pid, &mut st, 0) };
+                        true
+                    }
+                    _ => false,
+                };
+                let good = applied
+                    && inet
+                    && unix
+                    && udp
+                    && ring
+                    && userns
+                    && clone_ns
+                    && clone3
+                    && pair_ok
+                    && fork_ok;
                 unsafe { libc::_exit(if good { 0 } else { 1 }) };
             }
             pid => {
                 let mut status = 0;
                 unsafe { libc::waitpid(pid, &mut status, 0) };
                 let code = libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
-                assert_eq!(code, Some(0), "seccomp did not deny sockets as expected");
+                assert_eq!(
+                    code,
+                    Some(0),
+                    "the seccomp programs did not hold as expected"
+                );
             }
         }
     }
