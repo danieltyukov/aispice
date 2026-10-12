@@ -111,6 +111,7 @@ pub fn job(text: &str, run_dir: &Path, name: &str) -> SimJob {
         timeout: Duration::from_secs(120),
         pdk: None,
         libraries: Vec::new(),
+        reads: Vec::new(),
     }
 }
 

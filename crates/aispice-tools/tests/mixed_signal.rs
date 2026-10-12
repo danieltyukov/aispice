@@ -39,8 +39,13 @@ fn toolchain() -> bool {
         eprintln!(
             "skipped: needs ngspice with its d_cosim sources, OpenVAF, Verilator and a C++ compiler"
         );
+        return false;
     }
-    ok
+    if let Err(e) = aispice_sim::backend::native_code::available() {
+        eprintln!("skipped: {e}");
+        return false;
+    }
+    true
 }
 
 fn copy_dir(from: &Path, to: &Path) {

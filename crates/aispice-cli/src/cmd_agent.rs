@@ -326,6 +326,12 @@ async fn behavioral_lines(runner: &aispice_tools::Runner) -> Vec<String> {
             None => "co-simulation can be built here".into(),
             Some(m) => format!("co-simulation needs {m}"),
         },
+        match runner.behavioral_sandbox() {
+            Ok(abi) => {
+                format!("compiled models run in a confined ngspice (Landlock ABI {abi}, seccomp)")
+            }
+            Err(e) => format!("compiled models are not loaded here: {e}"),
+        },
     ]
 }
 

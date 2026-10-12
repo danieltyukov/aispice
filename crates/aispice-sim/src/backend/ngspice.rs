@@ -20,13 +20,16 @@
 //! aispice holds, checked against their SHA-256, and loaded from there: OSDI
 //! files by `osdi` lines in the `.spiceinit`, co-simulation libraries by
 //! `d_cosim` model cards added to the deck after the netlist policy checked
-//! it. No path a deck or a project names is ever loaded.
+//! it. No path a deck or a project names is ever loaded. A run that loads
+//! any of them is confined, since their code runs inside ngspice: see
+//! [`super::native_code`].
 //!
 //! ngspice refuses to evaluate `.meas` in batch mode when it writes a raw
 //! file, so a deck with measurements runs twice: once for the raw file and
 //! once, without it, for the measurements. ngspice runs take milliseconds;
 //! the job's timeout covers both.
 
+use super::native_code;
 use super::process::{self, ProcessSpec};
 use super::{
     Detection, SimError, SimId, SimJob, SimOutput, Simulator, Workspace, finish, read_raw_limited,
@@ -47,6 +50,11 @@ pub struct Ngspice {
     /// The `ngbehavior` compatibility setting. `ltpsa` matches LTspice;
     /// `None` runs plain ngspice.
     pub compat: Option<String>,
+    /// The Landlock ABI to confine a run that loads compiled models with,
+    /// instead of the newest this kernel and aispice share. Tests set 4 to
+    /// check the oldest accepted ruleset on a newer kernel; below 4 the
+    /// run is refused.
+    pub landlock_abi: Option<u8>,
 }
 
 impl Default for Ngspice {
@@ -54,6 +62,7 @@ impl Default for Ngspice {
         Self {
             exe: None,
             compat: Some("ltpsa".into()),
+            landlock_abi: None,
         }
     }
 }
@@ -132,6 +141,23 @@ impl Ngspice {
     /// The second run that evaluates `.meas` lines.
     pub fn meas_args(stem: &str) -> Vec<String> {
         vec!["-b".into(), format!("{stem}_meas.cir")]
+    }
+}
+
+/// WIP: enforcement still takes #40's `process::Confinement` until it
+/// moves onto `sandbox::Confinement`; this drops the seccomp policy and
+/// ABI, which #40's enforcer fixes at its denylist and ABI 6.
+fn legacy(c: &crate::sandbox::Confinement) -> process::Confinement {
+    process::Confinement {
+        landlock: c.landlock().map(|l| process::Landlock {
+            read: l.read.clone(),
+            exec: l.exec.clone(),
+            write: l.write.clone(),
+            rw: l.rw.clone(),
+        }),
+        rlimit_fsize: c.limits().file_size,
+        rlimit_as: c.limits().address_space,
+        nproc_headroom: c.limits().nproc_headroom,
     }
 }
 
@@ -281,14 +307,42 @@ impl Simulator for Ngspice {
             ".spiceinit",
             self.spiceinit_with(job.pdk.as_ref(), &osdi).as_bytes(),
         )?;
-        let mut spec = ProcessSpec::new(&exe, ws.path())
-            .env("HOME", ws.path())
-            .env("USERPROFILE", ws.path());
-        for a in Self::args(&stem) {
-            spec = spec.arg(a);
-        }
+        let confine = if job.libraries.is_empty() {
+            None
+        } else {
+            let abi = match self.landlock_abi {
+                Some(abi) => abi,
+                None => native_code::available().map_err(|e| {
+                    SimError::Config(format!(
+                        "the project's compiled models were not loaded: {e}"
+                    ))
+                })?,
+            };
+            let pdk_osdi = job.pdk.as_ref().map(|p| p.osdi.clone()).unwrap_or_default();
+            let c = native_code::confinement(&exe, ws.path(), &job.reads, &pdk_osdi, abi)?;
+            let shim = native_code::tmpfile_library(cancel).await?;
+            let preload = native_code::place_tmpfile_library(ws.path(), &shim)?;
+            Some((c, preload))
+        };
+        let command = |args: Vec<String>| {
+            let mut spec = ProcessSpec::new(&exe, ws.path());
+            match &confine {
+                Some((c, preload)) => {
+                    spec.clear_env = true;
+                    spec.env = native_code::environment(ws.path(), preload);
+                    spec.confine = Some(legacy(c));
+                }
+                None => {
+                    spec = spec.env("HOME", ws.path()).env("USERPROFILE", ws.path());
+                }
+            }
+            for a in args {
+                spec = spec.arg(a);
+            }
+            spec
+        };
         let started = std::time::Instant::now();
-        let out = process::run(&spec, job.timeout, cancel).await?;
+        let out = process::run(&command(Self::args(&stem)), job.timeout, cancel).await?;
         let mut log = out.combined();
         let mut report = parse_ngspice_output(&log);
         if has_meas(&deck) && report.errors.is_empty() {
@@ -300,13 +354,7 @@ impl Simulator for Ngspice {
                 &format!("{stem}_meas.cir"),
                 measurement_deck(&deck).as_bytes(),
             )?;
-            let mut spec2 = ProcessSpec::new(&exe, ws.path())
-                .env("HOME", ws.path())
-                .env("USERPROFILE", ws.path());
-            for a in Self::meas_args(&stem) {
-                spec2 = spec2.arg(a);
-            }
-            let m = process::run(&spec2, left, cancel).await?;
+            let m = process::run(&command(Self::meas_args(&stem)), left, cancel).await?;
             let mlog = m.combined();
             let mreport = parse_ngspice_output(&mlog);
             report.measurements = mreport.measurements;
