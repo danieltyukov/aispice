@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 fn plan_in(dir: &Path, program: &Path, profile: Profile) -> Plan {
     Plan {
         program: program.to_path_buf(),
@@ -19,6 +20,7 @@ fn plan_in(dir: &Path, program: &Path, profile: Profile) -> Plan {
     }
 }
 
+#[cfg(unix)]
 fn strings(args: &[OsString]) -> Vec<String> {
     args.iter()
         .map(|a| a.to_string_lossy().into_owned())

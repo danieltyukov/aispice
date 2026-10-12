@@ -33,6 +33,8 @@ pub struct Confinement {
     /// Hand the seccomp profile's programs to the program as descriptors
     /// 3.. instead of applying them: bubblewrap installs them inside its
     /// sandbox (`--add-seccomp-fd`). Only [`crate::sandbox::Sandbox`] sets it.
+    /// Read only where confinement is enforced.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     seccomp_as_fds: bool,
 }
 
@@ -66,6 +68,7 @@ impl Confinement {
         }
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn seccomp_as_fds(&self) -> bool {
         self.seccomp_as_fds
     }

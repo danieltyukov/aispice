@@ -402,6 +402,7 @@ fn landlock_abi_here() -> Result<u8, String> {
 }
 
 /// [`landlock_abi_here`] for a given kernel ABI.
+#[cfg(any(target_os = "linux", test))]
 fn landlock_abi_from(abi: i32) -> Result<u8, String> {
     match abi {
         a if a >= i32::from(MIN_LANDLOCK_ABI) => Ok(a.min(i32::from(MAX_LANDLOCK_ABI)) as u8),
@@ -466,6 +467,7 @@ impl Sandbox {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn landlock_for_tests(abi: u8) -> Self {
         Sandbox {
             kind: Kind::Landlock { abi },

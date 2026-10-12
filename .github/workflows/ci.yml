@@ -78,6 +78,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --version
+          uname -r
           echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
 
       # The whole workspace, app shell included: formatting needs no compiling.
