@@ -37,6 +37,9 @@ const RUNNING: Record<string, (c: string | null) => string> = {
   pdk: () => "Reading the PDK",
   gm_id: () => "Sizing by gm/Id",
   check_macro: () => "Checking the macro package",
+  behavioral_models: () => "Building the behavioural models",
+  budget: () => "Working out the budget",
+  trim_check: () => "Checking the trim range",
 };
 
 function humanName(name: string): string {
