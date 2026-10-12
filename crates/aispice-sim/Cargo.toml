@@ -28,5 +28,18 @@ async-trait = "0.1"
 # it is loaded.
 sha2 = "0.10"
 
+# libc is used on every Unix to read xschem's netlist without following a
+# symlink and to kill a process group; Landlock and seccomp
+# (backend::confine) are Linux-only.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+seccompiler.workspace = true
+
+[dev-dependencies]
+aispice-core = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

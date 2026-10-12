@@ -11,6 +11,8 @@
 //! directory (ngspice runs `.spiceinit`, which can execute shell commands).
 //! Only the outputs are copied to the job's `run_dir` afterwards.
 
+#[cfg(target_os = "linux")]
+pub mod confine;
 pub mod ltspice;
 pub mod ngspice;
 pub mod process;

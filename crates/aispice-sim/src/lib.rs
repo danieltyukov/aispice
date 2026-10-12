@@ -24,5 +24,6 @@ pub mod spec;
 pub mod stimulus;
 pub mod sweep;
 pub mod trim;
+pub mod xschem;
 
 pub use dataset::{AnalysisKind, Complex, Dataset, Quantity, Step, Vector, VectorData};
