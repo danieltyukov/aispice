@@ -1,7 +1,8 @@
 //! What a confinement is made of, checked as a whole when it is built.
 //!
 //! A [`Confinement`] is only made by [`ConfinementBuilder::build`], which
-//! refuses a combination that leaves a gap: a Landlock ruleset older than
+//! refuses a combination that leaves a gap: no Landlock ruleset at all (the
+//! sandbox makes bubblewrap's confinement itself), a Landlock ruleset older than
 //! ABI 4, Landlock scopes the ABI cannot enforce, a ruleset below ABI 6
 //! (which cannot scope signals and abstract UNIX sockets) without a seccomp
 //! policy that does both instead, or untrusted native code
@@ -51,8 +52,9 @@ impl Confinement {
     }
 
     /// Resource limits only: no Landlock, no seccomp. For a process that is
-    /// already isolated otherwise (inside bubblewrap's namespaces).
-    pub fn limits_only(limits: Limits) -> Self {
+    /// already isolated otherwise, and for tests of the limits.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn limits_only(limits: Limits) -> Self {
         Self {
             landlock: None,
             seccomp: None,
@@ -247,27 +249,31 @@ impl ConfinementBuilder {
         {
             return Err(PolicyError::NativeCodeSignalsUnchecked);
         }
-        if let Some(ll) = &self.landlock {
-            let abi = ll.min_abi;
-            if abi < MIN_LANDLOCK_ABI {
-                return Err(PolicyError::AbiTooOld { abi });
-            }
-            if abi > MAX_LANDLOCK_ABI {
-                return Err(PolicyError::AbiUnknown { abi });
-            }
-            if abi < SCOPED_LANDLOCK_ABI && ll.scopes.any() {
-                return Err(PolicyError::ScopesNeedAbi6 { abi });
-            }
-            let signals_held =
-                ll.scopes.signal || self.seccomp.is_some_and(|s| s.signals == Signals::SelfOnly);
-            if !signals_held {
-                return Err(PolicyError::SignalsUnconfined { abi });
-            }
-            // Every seccomp profile refuses socket creation, which covers
-            // abstract UNIX sockets when the ruleset cannot scope them.
-            if !ll.scopes.abstract_unix_socket && self.seccomp.is_none() {
-                return Err(PolicyError::SocketsUnconfined { abi });
-            }
+        // Without Landlock, a program here would reach every file of the
+        // user; only bubblewrap's namespaces may stand in for it, and that
+        // confinement is made by the sandbox, not by this builder.
+        let Some(ll) = &self.landlock else {
+            return Err(PolicyError::NoLandlock);
+        };
+        let abi = ll.min_abi;
+        if abi < MIN_LANDLOCK_ABI {
+            return Err(PolicyError::AbiTooOld { abi });
+        }
+        if abi > MAX_LANDLOCK_ABI {
+            return Err(PolicyError::AbiUnknown { abi });
+        }
+        if abi < SCOPED_LANDLOCK_ABI && ll.scopes.any() {
+            return Err(PolicyError::ScopesNeedAbi6 { abi });
+        }
+        let signals_held =
+            ll.scopes.signal || self.seccomp.is_some_and(|s| s.signals == Signals::SelfOnly);
+        if !signals_held {
+            return Err(PolicyError::SignalsUnconfined { abi });
+        }
+        // Every seccomp profile refuses socket creation, which covers
+        // abstract UNIX sockets when the ruleset cannot scope them.
+        if !ll.scopes.abstract_unix_socket && self.seccomp.is_none() {
+            return Err(PolicyError::SocketsUnconfined { abi });
         }
         Ok(Confinement {
             landlock: self.landlock,
@@ -299,6 +305,10 @@ pub enum PolicyError {
     SocketsUnconfined { abi: u8 },
     #[error("untrusted native code (Profile::NativeCode) needs Signals::SelfOnly at every ABI")]
     NativeCodeSignalsUnchecked,
+    #[error(
+        "a confinement needs a Landlock ruleset; without one the program reaches every file of the user"
+    )]
+    NoLandlock,
 }
 
 #[cfg(test)]
@@ -440,10 +450,25 @@ mod tests {
         assert_eq!(bwrap.seccomp().unwrap().programs(), PROFILE_PROGRAMS);
     }
 
+    /// Without a Landlock ruleset nothing is built, whatever seccomp
+    /// policy comes with it: the program would reach every file of the
+    /// user. bubblewrap's confinement is made by the sandbox alone.
     #[test]
-    fn without_landlock_anything_goes() {
-        // The bubblewrap path: namespaces isolate, seccomp is optional.
-        assert!(Confinement::builder().build().is_ok());
-        assert!(Confinement::builder().seccomp(SELF_ONLY).build().is_ok());
+    fn without_landlock_nothing_is_built() {
+        assert_eq!(
+            Confinement::builder().build().unwrap_err(),
+            PolicyError::NoLandlock
+        );
+        assert_eq!(
+            Confinement::builder()
+                .seccomp(SELF_ONLY)
+                .limits(Limits {
+                    file_size: Some(1),
+                    ..Limits::default()
+                })
+                .build()
+                .unwrap_err(),
+            PolicyError::NoLandlock
+        );
     }
 }
