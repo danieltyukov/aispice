@@ -286,6 +286,23 @@ impl ProjectConfig {
             }
         };
         let veriloga = sources(table.get("veriloga"), "veriloga", &[".va", ".vams"])?;
+        // Each Verilog-A source compiles to a model library named after its
+        // file stem, so two sources with the same stem (in different folders,
+        // or differing only in case) would overwrite each other in a run
+        // folder; refuse that here, where the message can name the file.
+        let mut lib_names = std::collections::HashSet::new();
+        for path in &veriloga {
+            let stem = Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name = aispice_sim::behavioral::safe_name(&stem).to_ascii_lowercase();
+            if !lib_names.insert(name) {
+                return Err(format!(
+                    "{PROJECT_FILE}: two `veriloga` sources compile to the same model library (`{path}` has the same file name as an earlier one, ignoring case and folder); rename one"
+                ));
+            }
+        }
         let mut cosim = Vec::new();
         match table.get("cosim") {
             None => {}

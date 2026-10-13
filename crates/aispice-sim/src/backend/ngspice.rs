@@ -153,7 +153,19 @@ fn place_libraries(
 ) -> Result<Vec<(Arc<Library>, PathBuf)>, SimError> {
     let mut out = Vec::new();
     for lib in libraries {
-        let path = ws.write(&lib.file_name(), &lib.bytes)?;
+        // create_new, so two libraries that resolve to the same file name
+        // (which the project config refuses up front) cannot silently
+        // overwrite each other here.
+        let path = ws.file(&lib.file_name());
+        {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(&lib.bytes))
+                .map_err(|e| SimError::Io(format!("cannot write {}: {e}", lib.file_name())))?;
+        }
         let written = std::fs::read(&path)
             .map_err(|e| SimError::Io(format!("cannot read back {}: {e}", lib.file_name())))?;
         if sha256_hex(&written) != lib.sha256 || sha256_hex(&lib.bytes) != lib.sha256 {

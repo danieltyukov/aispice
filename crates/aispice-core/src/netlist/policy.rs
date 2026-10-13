@@ -136,10 +136,10 @@ const FOREIGN: &[&str] = &[
 /// How a deck that ngspice reads as a control script starts.
 const SCRIPT_MARK: &str = "*ng_script";
 
-/// Control commands that load compiled code (`osdi`, `pre_osdi`,
-/// `codemodel`) or run another file of commands (`source`), refused even in
-/// a control block the user's setting allows.
-const CONTROL_LOADERS: &[&str] = &["osdi", "pre_osdi", "codemodel", "source"];
+/// Control commands refused even in a control block the user's setting
+/// allows: `osdi`, `pre_osdi` and `codemodel` load compiled code, `source`
+/// runs another file of commands, and `shell` runs a program.
+const CONTROL_LOADERS: &[&str] = &["osdi", "pre_osdi", "codemodel", "source", "shell"];
 
 /// File types that hold compiled code a simulator would load and run.
 const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
@@ -670,8 +670,13 @@ fn control_loads_code(lower: &str) -> Option<String> {
         .find(|w| !w.is_empty())
         .unwrap_or("");
     if CONTROL_LOADERS.contains(&command) {
+        let does = match command {
+            "shell" => "runs a program",
+            "source" => "runs a file of commands the policy cannot check",
+            _ => "loads compiled code the policy cannot check",
+        };
         return Some(format!(
-            "`{command}` in a control block loads compiled code or runs a file of commands the policy cannot check; it is refused even with control blocks enabled"
+            "`{command}` in a control block {does}; it is refused even with control blocks enabled"
         ));
     }
     code_running_model(lower)
@@ -974,6 +979,7 @@ const FILE_KEYS: &[&str] = &[
     "rawfile",
     "input_file",
     "output_file",
+    "state_file",
     "filename",
     "path",
     "lib",
@@ -1450,8 +1456,11 @@ mod tests {
         .unwrap();
         assert!(check("t\n.include good.lib\n", &policy_at(&d)).is_empty());
         let v = check("t\n.include bad.lib\n", &policy_at(&d));
-        assert_eq!(v.len(), 1, "{v:?}");
-        assert!(v[0].reason.contains("bad.lib"));
+        // The `.control` block and the `shell` inside it are both refused.
+        assert!(
+            !v.is_empty() && v.iter().all(|v| v.reason.contains("bad.lib")),
+            "{v:?}"
+        );
     }
 
     /// The files a simulator reads for a deck: its includes, followed into
@@ -1861,9 +1870,8 @@ mod tests {
     }
 
     /// Even with control blocks enabled, a control block may not load
-    /// compiled code or `source` another file of commands; `osdi`,
-    /// `pre_osdi`, `codemodel` and `source` are refused there, and a plain
-    /// control command still runs.
+    /// compiled code, `source` another file of commands, or `shell` a
+    /// program; a plain control command still runs.
     #[test]
     fn a_control_block_cannot_load_code_even_when_enabled() {
         let d = temp("control-loaders");
@@ -1876,6 +1884,9 @@ mod tests {
             "source /tmp/x.cir",
             "SOURCE /tmp/x.cir",
             "source\t/tmp/x.cir",
+            "shell rm -rf x",
+            "shell",
+            "SHELL id",
         ] {
             let deck = format!("t\n.control\n{line}\n.endc\n.end\n");
             let v = check(&deck, &policy);

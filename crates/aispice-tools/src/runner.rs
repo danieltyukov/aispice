@@ -555,6 +555,12 @@ impl Runner {
             id = SimId::Ngspice;
         }
         let cosim = declared.cosim_names();
+        // A deck may not define a model under a declared co-simulation name,
+        // or one model name as two XSPICE types: either could make the
+        // translator keep an instance for code the policy did not approve.
+        if let Some(reason) = aispice_sim::dialect::behavioral_conflicts(netlist, &cosim) {
+            return Err(RunError::Policy(format!("  {reason}")));
+        }
         let lib_dirs = self.model_lib_dirs();
         let base = Self::base_dir(project, circuit)?;
         let policy = self.policy_for(project, &base);
