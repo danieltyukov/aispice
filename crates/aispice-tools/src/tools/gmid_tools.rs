@@ -183,6 +183,7 @@ impl GmIdTool {
             )
         };
         let (Some(gm_id), Some(l)) = (input.gm_id, input.l.as_ref()) else {
+            let source = with_sandbox_note(source, !cached).await;
             return Ok(ToolOutput::text(format!("{}{source}\n", coverage(&table)))
                 .with_data(json!({"kind": "generic", "value": {"device": device.name, "grid": table.grid, "cached": cached}})));
         };
@@ -203,7 +204,8 @@ impl GmIdTool {
             w: input.w.as_ref().map(|a| a.value("w")).transpose()?,
         };
         let mut sizing = gmid::size(&table, &query).map_err(|e| e.to_string())?;
-        if query.id.is_some() || query.w.is_some() {
+        let refined = query.id.is_some() || query.w.is_some();
+        if refined {
             ctx.progress(
                 format!("checking the sized {} on ngspice", device.name),
                 None,
@@ -220,11 +222,24 @@ impl GmIdTool {
             .await
             .map_err(|e| e.to_string())?;
         }
+        let source = with_sandbox_note(source, !cached || refined).await;
         let text = format!("{}{source}\n", gmid::describe(&table, &sizing));
         Ok(ToolOutput::text(text).with_data(json!({
             "kind": "generic",
             "value": {"device": device.name, "pdk": pdk.name, "sizing": sizing, "cached": cached},
         })))
+    }
+}
+
+/// `source`, and when ngspice `ran` here without a sandbox, a line that
+/// says so.
+async fn with_sandbox_note(source: String, ran: bool) -> String {
+    match aispice_sim::backend::native_code::plain_sandbox().await {
+        Err(why) if ran => format!(
+            "{source}\nNote: {}.",
+            aispice_sim::backend::native_code::unconfined_warning(&why)
+        ),
+        _ => source,
     }
 }
 
