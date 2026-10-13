@@ -409,6 +409,7 @@ impl Simulator for Spectre {
     }
 
     async fn run(&self, job: &SimJob, cancel: &CancellationToken) -> Result<SimOutput, SimError> {
+        job.ngspice_only(SimId::Spectre)?;
         check_deck(&job.netlist_text, &self.config()?.remote_folders)?;
         let stem = job.stem();
         let ws = Workspace::new()?;

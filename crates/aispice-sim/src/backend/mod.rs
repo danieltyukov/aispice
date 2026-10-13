@@ -14,6 +14,7 @@
 #[cfg(target_os = "linux")]
 pub mod confine;
 pub mod ltspice;
+pub mod native_code;
 pub mod ngspice;
 pub mod process;
 pub mod spectre;
@@ -109,6 +110,24 @@ pub struct SimJob {
     /// add to it. `Some` also runs ngspice in its native mode, which PDK
     /// model libraries need.
     pub pdk: Option<crate::pdk::PdkRun>,
+    /// Behavioural model libraries aispice built in this process (Verilog-A
+    /// as OSDI, Verilog for `d_cosim`). ngspice writes their bytes into its
+    /// private run folder, checks each SHA-256 and loads them; the other
+    /// backends refuse a job that has any.
+    pub libraries: Vec<std::sync::Arc<crate::behavioral::Library>>,
+    /// What the deck reads of the user's: the files it includes and names,
+    /// as the netlist policy resolved them, and the folder of the project's
+    /// PDK. A run that loads `libraries` may read these and nothing else of
+    /// the user's.
+    pub reads: Vec<PathBuf>,
+    /// The sandbox a run that loads `libraries` or has control commands
+    /// runs in; `None` finds one with [`native_code::ready_for`] when the
+    /// run starts.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// The deck has control commands (a `.control` block or a `*#` line),
+    /// which the netlist policy allowed because the user enabled control
+    /// blocks: ngspice then runs only in the sandbox, as for `libraries`.
+    pub control: bool,
 }
 
 impl SimJob {
@@ -119,7 +138,20 @@ impl SimJob {
             deck_name: "deck".into(),
             timeout: Duration::from_secs(120),
             pdk: None,
+            libraries: Vec::new(),
+            reads: Vec::new(),
+            sandbox: None,
+            control: false,
         }
+    }
+
+    /// Refuse a job with behavioural libraries on a backend that cannot
+    /// load them.
+    pub fn ngspice_only(&self, sim: SimId) -> Result<(), SimError> {
+        if self.libraries.is_empty() {
+            return Ok(());
+        }
+        Err(SimError::NgspiceOnly(sim.name().to_string()))
     }
 
     /// The sanitised deck name.
@@ -170,6 +202,8 @@ pub enum SimError {
     TooLarge { what: String, size: u64, limit: u64 },
     #[error("{0} is not supported here")]
     Unsupported(String),
+    #[error("Verilog-A models and Verilog co-simulation run on ngspice only, not on {0}")]
+    NgspiceOnly(String),
     #[error(transparent)]
     Raw(#[from] RawError),
     #[error("{0}")]
@@ -267,7 +301,7 @@ pub fn which(program: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -275,7 +309,7 @@ fn is_executable(p: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 

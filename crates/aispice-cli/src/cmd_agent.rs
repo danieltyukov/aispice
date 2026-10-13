@@ -219,6 +219,7 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             "pdks": pdk_lines(&runner),
             "layout_tools": layout_lines(&runner),
             "layout_sandbox": rt.block_on(aispice_tools::layout::sandbox_description()),
+            "behavioral_models": rt.block_on(behavioral_lines(&runner)),
             "providers": configured.iter().map(|k| serde_json::json!({"provider": k.provider, "source": k.source.to_string()})).collect::<Vec<_>>(),
             "config": Config::default_path(),
         });
@@ -275,6 +276,10 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
         "sandbox",
         rt.block_on(aispice_tools::layout::sandbox_description())
     );
+    println!("\nBehavioural models (Verilog-A, Verilog co-simulation on ngspice):");
+    for l in rt.block_on(behavioral_lines(&runner)) {
+        println!("  {l}");
+    }
     println!("\nModel providers with a key:");
     if configured.is_empty() {
         println!(
@@ -291,6 +296,53 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             .unwrap_or_else(|| "unavailable".into())
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// OpenVAF (Verilog-A), Verilator, a C++ compiler, make and ngspice's
+/// d_cosim sources (co-simulation), and the C compiler and sandbox a run
+/// that loads them needs: where each is, or how to get it.
+async fn behavioral_lines(runner: &aispice_tools::Runner) -> Vec<String> {
+    let t = runner.behavioral_toolchain().await;
+    let tool = |name: &str, found: &Option<(std::path::PathBuf, String)>, hint: &str| match found {
+        Some((p, v)) => format!("{name:9} {} ({v})", p.display()),
+        None => format!("{name:9} not found ({hint})"),
+    };
+    let path = |name: &str, found: &Option<std::path::PathBuf>, hint: &str| match found {
+        Some(p) => format!("{name:9} {}", p.display()),
+        None => format!("{name:9} not found ({hint})"),
+    };
+    vec![
+        tool(
+            "OpenVAF",
+            &t.openvaf,
+            "23.5 from openvaf.semimod.de, or set openvaf_path",
+        ),
+        tool(
+            "Verilator",
+            &t.verilator,
+            "5.0 or newer, or set verilator_path",
+        ),
+        path(
+            "C",
+            &t.cc,
+            "cc, gcc or clang in /usr/local/bin, /usr/bin or /bin, for the library a sandboxed ngspice preloads",
+        ),
+        path("C++", &t.cxx, "g++ or clang++"),
+        path("make", &t.make, "GNU make"),
+        path(
+            "d_cosim",
+            &t.cosim_shim,
+            "ngspice 42 or newer installs its sources under share/ngspice/scripts/src; set ngspice_path",
+        ),
+        match t.cosim_missing() {
+            None => "co-simulation can be built here".into(),
+            Some(m) => format!("co-simulation needs {m}"),
+        },
+        match runner.behavioral_sandbox().await {
+            Ok(sandbox) => format!("compiled models run in a sandboxed ngspice: {sandbox}"),
+            Err(e) => e,
+        },
+    ]
 }
 
 /// KLayout (DRC, LVS, generators, pictures) and Magic (extraction): where

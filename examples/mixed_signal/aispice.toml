@@ -1,0 +1,8 @@
+# Behavioural models aispice compiles for this project's decks. Decks use
+# the Verilog-A module as a model type and the co-simulated model by name;
+# they never name a compiled file.
+veriloga = ["models/comparator.va"]
+
+[[cosim]]
+model = "counter"
+sources = ["rtl/counter.v"]

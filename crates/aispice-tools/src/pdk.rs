@@ -201,6 +201,70 @@ impl Registry {
 pub struct ProjectConfig {
     /// The registered PDK the project's circuits use.
     pub pdk: Option<String>,
+    /// Verilog-A sources aispice compiles for the project's decks
+    /// (`veriloga = ["models/comparator.va"]`), project-relative.
+    pub veriloga: Vec<String>,
+    /// Verilog models the project's decks co-simulate (`[[cosim]]`).
+    pub cosim: Vec<CosimDecl>,
+}
+
+/// One `[[cosim]]` entry: the model name decks use on an XSPICE `A`
+/// instance, the Verilog sources, and the top module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CosimDecl {
+    pub model: String,
+    pub sources: Vec<String>,
+    pub top: String,
+}
+
+/// Behavioural models one project may declare, Verilog-A and co-simulated
+/// together.
+pub const MAX_BEHAVIORAL_MODELS: usize = 32;
+
+/// A Verilog or Verilog-A name: a letter or `_`, then letters, digits and
+/// `_`, at most 64 characters.
+fn identifier(s: &str) -> bool {
+    let mut c = s.chars();
+    s.len() <= 64
+        && c.next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && c.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// A project-relative source path with one of the extensions: no `..`, not
+/// absolute, not under aispice's own folder.
+fn source_path(s: &str, exts: &[&str]) -> bool {
+    let p = Path::new(s);
+    let lower = s.to_ascii_lowercase();
+    !s.is_empty()
+        && s.len() <= 256
+        && !p.is_absolute()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        && !s.starts_with(".aispice")
+        && exts.iter().any(|e| lower.ends_with(e))
+}
+
+/// A list of source paths from `aispice.toml`; the error names the key,
+/// never the file's text.
+fn sources(value: Option<&toml::Value>, key: &str, exts: &[&str]) -> Result<Vec<String>, String> {
+    let bad = || {
+        format!(
+            "{PROJECT_FILE}: {key} must be a list of project-relative {} files",
+            exts.join(" or ")
+        )
+    };
+    match value {
+        None => Ok(Vec::new()),
+        Some(toml::Value::Array(items)) => items
+            .iter()
+            .map(|v| match v {
+                toml::Value::String(s) if source_path(s, exts) => Ok(s.clone()),
+                _ => Err(bad()),
+            })
+            .collect(),
+        Some(_) => Err(bad()),
+    }
 }
 
 impl ProjectConfig {
@@ -221,7 +285,82 @@ impl ProjectConfig {
                 ));
             }
         };
-        Ok(Self { pdk })
+        let veriloga = sources(table.get("veriloga"), "veriloga", &[".va", ".vams"])?;
+        // Each Verilog-A source compiles to a model library named after its
+        // file stem, so two sources with the same stem (in different folders,
+        // or differing only in case) would overwrite each other in a run
+        // folder; refuse that here, where the message can name the file.
+        let mut lib_names = std::collections::HashSet::new();
+        for path in &veriloga {
+            let stem = Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name = aispice_sim::behavioral::safe_name(&stem).to_ascii_lowercase();
+            if !lib_names.insert(name) {
+                return Err(format!(
+                    "{PROJECT_FILE}: two `veriloga` sources compile to the same model library (`{path}` has the same file name as an earlier one, ignoring case and folder); rename one"
+                ));
+            }
+        }
+        let mut cosim = Vec::new();
+        match table.get("cosim") {
+            None => {}
+            Some(toml::Value::Array(entries)) => {
+                for (i, entry) in entries.iter().enumerate() {
+                    let at = format!("{PROJECT_FILE}: [[cosim]] entry {}", i + 1);
+                    let toml::Value::Table(t) = entry else {
+                        return Err(format!("{at} is not a table"));
+                    };
+                    if t.keys()
+                        .any(|k| !matches!(k.as_str(), "model" | "sources" | "top"))
+                    {
+                        return Err(format!("{at} takes only model, sources and top"));
+                    }
+                    let name = |key: &str| match t.get(key) {
+                        Some(toml::Value::String(s)) if identifier(s) => Ok(Some(s.clone())),
+                        None => Ok(None),
+                        Some(_) => Err(format!(
+                            "{at}: {key} must be a Verilog name (letters, digits and _, starting with a letter)"
+                        )),
+                    };
+                    let model = name("model")?.ok_or_else(|| format!("{at} needs a model name"))?;
+                    let top = name("top")?.unwrap_or_else(|| model.clone());
+                    let srcs =
+                        sources(t.get("sources"), "sources", &[".v", ".sv"]).map_err(|e| {
+                            format!(
+                                "{at}: {}",
+                                e.trim_start_matches(&format!("{PROJECT_FILE}: "))
+                            )
+                        })?;
+                    if srcs.is_empty() {
+                        return Err(format!("{at} needs at least one source"));
+                    }
+                    if cosim
+                        .iter()
+                        .any(|c: &CosimDecl| c.model.eq_ignore_ascii_case(&model))
+                    {
+                        return Err(format!("{at} repeats the model name {model}"));
+                    }
+                    cosim.push(CosimDecl {
+                        model,
+                        sources: srcs,
+                        top,
+                    });
+                }
+            }
+            Some(_) => return Err(format!("{PROJECT_FILE}: cosim must be [[cosim]] tables")),
+        }
+        if veriloga.len() + cosim.len() > MAX_BEHAVIORAL_MODELS {
+            return Err(format!(
+                "{PROJECT_FILE} declares more than {MAX_BEHAVIORAL_MODELS} behavioural models"
+            ));
+        }
+        Ok(Self {
+            pdk,
+            veriloga,
+            cosim,
+        })
     }
 }
 
@@ -301,6 +440,51 @@ pub fn with_pdk(existing: Option<&str>, name: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn behavioural_models_are_declared_by_path_and_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(PROJECT_FILE),
+            "veriloga = [\"models/comp.va\"]\n[[cosim]]\nmodel = \"counter\"\nsources = [\"rtl/counter.v\", \"rtl/inc.sv\"]\n[[cosim]]\nmodel = \"div\"\ntop = \"divider\"\nsources = [\"rtl/div.v\"]\n",
+        )
+        .unwrap();
+        let c = ProjectConfig::load(dir.path()).unwrap();
+        assert_eq!(c.veriloga, ["models/comp.va"]);
+        assert_eq!(c.cosim.len(), 2);
+        assert_eq!(c.cosim[0].top, "counter");
+        assert_eq!(c.cosim[1].top, "divider");
+        for (text, why) in [
+            ("veriloga = [\"../x.va\"]\n", "veriloga must be"),
+            ("veriloga = [\"/etc/x.va\"]\n", "veriloga must be"),
+            ("veriloga = [\".aispice/build/x.va\"]\n", "veriloga must be"),
+            ("veriloga = [\"lib.so\"]\n", "veriloga must be"),
+            (
+                "[[cosim]]\nmodel = \"c\"\nsources = [\"lib.so\"]\n",
+                "sources must be",
+            ),
+            (
+                "[[cosim]]\nmodel = \"1c\"\nsources = [\"c.v\"]\n",
+                "model must be",
+            ),
+            (
+                "[[cosim]]\nmodel = \"c\"\nsources = []\n",
+                "at least one source",
+            ),
+            (
+                "[[cosim]]\nmodel = \"c\"\nsources = [\"c.v\"]\nsimulation = \"x.so\"\n",
+                "takes only",
+            ),
+            (
+                "[[cosim]]\nmodel = \"c\"\nsources = [\"c.v\"]\n[[cosim]]\nmodel = \"C\"\nsources = [\"d.v\"]\n",
+                "repeats",
+            ),
+        ] {
+            std::fs::write(dir.path().join(PROJECT_FILE), text).unwrap();
+            let e = ProjectConfig::load(dir.path()).unwrap_err();
+            assert!(e.contains(why), "{text}: {e}");
+        }
+    }
+
     use super::*;
 
     #[test]
