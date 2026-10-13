@@ -93,14 +93,17 @@ pub fn too_large(size: u64, limit: u64) -> String {
 
 /// A file's bytes, after its size says it is within `limit`.
 pub fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, ReadError> {
-    let size = std::fs::metadata(path)?.len();
+    read_file_capped(std::fs::File::open(path)?, limit)
+}
+
+/// An open file's bytes, after its size says it is within `limit`.
+pub fn read_file_capped(file: std::fs::File, limit: u64) -> Result<Vec<u8>, ReadError> {
+    let size = file.metadata()?.len();
     if size > limit {
         return Err(ReadError::TooLarge(too_large(size, limit)));
     }
     let mut data = Vec::new();
-    std::fs::File::open(path)?
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut data)?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut data)?;
     let read = data.len() as u64;
     if read > limit {
         // It grew after the stat.

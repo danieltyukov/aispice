@@ -124,6 +124,7 @@ Fields:
 - `corners` lists the conditions the block was characterized at. Analog macros need at least one, since the measured specs refer to them. `<name>.lib` is characterized at the first corner. A corner with a `liberty` file has a liberty of its own, checked like `<name>.lib`.
 - `macro.toml` and the spec table are TOML 1.0, which every TOML reader understands (Python's `tomllib` reads nothing newer). What TOML 1.1 added (the `\e` and `\xHH` escapes, line breaks and trailing commas in inline tables, times without seconds) is a syntax error, and so are an integer that does not fit in 64 bits and a float too large for a double. Text files are UTF-8; the view formats are read as ASCII, so names, keywords and numbers in them must be ASCII.
 - File names in `macro.toml` are bare names inside the package; paths are not allowed.
+- A validator reads only what is in the package. It does not follow symbolic links, which could lead to a sibling directory or anywhere else, and reads only regular files: a file it would read, `evidence/` or a summary in it that is a symbolic link or not a regular file (a FIFO, say) is reported as `file.unreadable`.
 - Unknown fields are errors, so a typo does not pass silently. Put tool-specific data under `[extra]`.
 
 The JSON schema `macro-v1.schema.json` (in ChipLeap at `src/chipleap/macro/`, in aispice at `crates/aispice-core/src/macropkg/`) describes `macro.toml`, and under `$defs` the evidence summary (`#/$defs/evidence`) and the spec table (`#/$defs/specs_file`). Editors that understand JSON schemas for TOML (Taplo, Even Better TOML) use it through the `#:schema` comment.
@@ -134,11 +135,11 @@ All names are case-sensitive except in SPICE, which is case-insensitive. Each vi
 
 **GDS.** A cell named `<name>` must be a top cell. Other top cells are a warning, since they would be merged into the chip. Subcells should carry the macro name as a prefix (`tiny_ota_pair`), so two macros merged into one chip never share a cell name; the validator does not check this. No cell may contain itself, directly or through other cells. The bounding box of the top cell, through its whole hierarchy and ignoring text, must lie inside the boundary from `macro.toml`, placed by the LEF `ORIGIN`. Each pin bit should have a text label of the same name in the top cell, as LVS finds pins by their labels; a missing label is a warning.
 
-**LEF.** The file must contain `MACRO <name>` with `CLASS BLOCK` (another class is a warning) and a `SIZE` equal to `macro.toml` within 0.0005 um. Every pin bit has a `PIN` with at least one `PORT` shape. Signal, clock and analog pins have a `DIRECTION` equal to `macro.toml`'s (`OUTPUT TRISTATE` counts as output). Power pins have `USE POWER`, ground pins `USE GROUND`, and no other pin may use either; a `USE` that does not match a signal, clock or analog pin is a warning. If `macro.toml` gives a pin `layer`, the LEF pin has a shape on that layer. Bus bits use square brackets (`BUSBITCHARS "[]"`).
+**LEF.** The file must contain `MACRO <name>` with `CLASS BLOCK` (another class is a warning) and a `SIZE` equal to `macro.toml` within 0.0005 um. Every pin bit has a `PIN` with at least one `PORT` shape. Signal, clock and analog pins have a `DIRECTION` equal to `macro.toml`'s (`OUTPUT TRISTATE` counts as output). Power pins have `USE POWER`, ground pins `USE GROUND`, and no other pin may use either; a `USE` that does not match a signal, clock or analog pin is a warning. If `macro.toml` gives a pin `layer`, the LEF pin has a shape on that layer. Bus bits use square brackets (`BUSBITCHARS "[]"`). Keywords are read in any case, as OpenROAD reads them (`macro`, `Pin`); names keep their case. A file that defines a macro twice, or a pin of a macro twice, cannot be read (`lef.parse`): tools differ on which definition they keep.
 
-**Liberty.** The file must contain `cell(<name>)`. Signal, clock and analog pins are `pin` groups, directly or as bits of a `bus` whose `bus_type` names a `type` group in the library, with the same `direction`. Power and ground pins are `pg_pin` groups with a `pg_type` ending in `_power` or `_ground`. In a digital macro, every output signal or clock pin has at least one `timing` group. Analog macros may have none.
+**Liberty.** The file must contain `cell(<name>)`. Signal, clock and analog pins are `pin` groups, directly or as bits of a `bus` whose `bus_type` names a `type` group in the library, with the same `direction`. Power and ground pins are `pg_pin` groups with a `pg_type` ending in `_power` or `_ground`. In a digital macro, every output signal or clock pin has at least one `timing` group. Analog macros may have none. A file that defines a cell twice, or a pin, `pg_pin` or bus bit of `<name>` twice, cannot be read (`lib.parse`): OpenSTA keeps the last cell of a name and both pins.
 
-**Verilog.** The file must contain `module <name>`, with ANSI or non-ANSI port declarations. Signal, clock and analog pins are ports with the same direction; a bus has a range of the same width, a scalar has none. Power and ground ports may be left out (they are often behind `ifdef USE_POWER_PINS`); when present they are `inout` or `input`. Preprocessor lines are ignored and both sides of an `ifdef` are read.
+**Verilog.** The file must contain `module <name>`, with ANSI or non-ANSI port declarations. Signal, clock and analog pins are ports with the same direction; a bus has a range of the same width, a scalar has none. Power and ground ports may be left out (they are often behind `ifdef USE_POWER_PINS`); when present they are `inout` or `input`. Preprocessor lines are ignored and both sides of an `ifdef` are read, so a module or port declared on both sides is declared twice: `module <name>` declared more than once, or a port declared more than once, is an error (`verilog.duplicate`), since a tool reads one side and which one depends on its defines (Yosys defines `SYNTHESIS`). When a port is declared more than once, the port checks are not run.
 
 **SPICE.** The file must contain `.subckt <name>` whose ports are exactly the pin bits, in any order. Parameters after the ports (`params:` or `name=value`) are ignored. When `*.PININFO` comment lines follow (the CDL convention, `name:I`, `name:O`, `name:B`), the directions of signal, clock and analog pins must agree: `I` is input, `O` output, `B` inout. Digital netlists may instantiate the PDK's standard cells without defining them.
 
@@ -190,6 +191,8 @@ Known operations: `drc`, `lvs`, `antenna`, `erc`, `density`, `sta`, `pex`, `sim`
 ## Checking against the chip's PDK
 
 The tool that places a macro passes its own PDK: `macro check DIR --pdk ihp-sg13g2` or `--pdk ihp-sg13g2@22f2a25`. A different PDK name is an error; a different commit is a warning, because a PDK update often leaves a block valid but should be looked at.
+
+A chip merges the layouts and the netlists of its cells by name, so a macro cell named like a cell of its PDK would replace that cell. For a package whose `pdk.name` is `ihp-sg13g2`, the package's name, every cell of its GDS and every subcircuit of its SPICE file, compared with ASCII letters folded to lower case, must not begin with `sg13g2` or `rm_ihpsg13`, the names of the PDK's standard, IO and SRAM cells (`pdk.cell_name`). A validator that has the PDK's libraries (the LEF macros, CDL subcircuits and GDS cells of every library under `libs.ref`) also refuses any of those names that equals one of their cells. The check runs with or without `--pdk`, after every other rule: the package's name first, then the cells of the GDS in file order, then the subcircuits in file order, leaving out the top cell and the subcircuit named `<name>`.
 
 ## Limits
 
@@ -269,6 +272,7 @@ Every finding has a rule id, a severity, the file it concerns (relative to the p
 | `verilog.missing_pin`, `verilog.extra_pin` | error | port sets differ |
 | `verilog.direction` | error | a direction differs |
 | `verilog.width` | error | a bus width differs, or a bus is declared as a scalar or the other way round |
+| `verilog.duplicate` | error | `module <name>`, or one of its ports, is declared more than once |
 | `spice.limit` | error | the SPICE file goes past a limit |
 | `spice.subckt` | error | no `.subckt <name>` |
 | `spice.missing_pin`, `spice.extra_pin` | error | port sets differ |
@@ -287,6 +291,7 @@ Every finding has a rule id, a severity, the file it concerns (relative to the p
 | `evidence.stale` | error | an input's SHA-256 differs from the package file |
 | `pdk.mismatch` | error | a summary names another PDK or commit than `macro.toml` |
 | `pdk.expected` | error or warning | the package is for another PDK (error) or commit (warning) than `--pdk` |
+| `pdk.cell_name` | error | the package's name, a GDS cell or a subcircuit is in its PDK's cell name space, or is a cell of the PDK's libraries (see Checking against the chip's PDK) |
 | `check.limit` | warning | the report leaves out findings past the first 1,000 |
 
 Messages are identical in both tools, except the detail after `: ` in `*.parse`, `*.syntax` and `file.unreadable` messages, which comes from each tool's parser or operating system. The shared fixtures pin every message.

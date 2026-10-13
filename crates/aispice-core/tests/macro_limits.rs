@@ -9,7 +9,7 @@ use aispice_core::macropkg::gds::{GdsError, parse_gds, parse_gds_with};
 use aispice_core::macropkg::lef::{LefError, parse_lef, parse_lef_with};
 use aispice_core::macropkg::liberty::{LibertyError, parse_liberty, parse_liberty_with};
 use aispice_core::macropkg::spice::{spice_subckt, spice_subckt_with};
-use aispice_core::macropkg::verilog::{verilog_ports, verilog_ports_with};
+use aispice_core::macropkg::verilog::{VerilogError, verilog_ports, verilog_ports_with};
 use aispice_core::macropkg::{CheckOptions, LimitError, Limits, Manifest, Report, check_package};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -45,7 +45,10 @@ fn package(tmp: &Path, name: &str) -> PathBuf {
 }
 
 fn check(pkg: &Path, limits: Limits) -> Report {
-    let opts = CheckOptions { pdk: None, limits };
+    let opts = CheckOptions {
+        limits,
+        ..Default::default()
+    };
     check_package(pkg, &opts).unwrap()
 }
 
@@ -85,6 +88,15 @@ impl From<LefError> for Anything {
         match e {
             LefError::Limit(e) => Anything::Limit(e.0),
             LefError::Syntax(m) => Anything::Other(m),
+        }
+    }
+}
+
+impl From<VerilogError> for Anything {
+    fn from(e: VerilogError) -> Self {
+        match e {
+            VerilogError::Limit(e) => Anything::Limit(e.0),
+            VerilogError::Duplicate(m) => Anything::Other(m),
         }
     }
 }
@@ -410,7 +422,8 @@ fn view_limits() {
         limit_message(parse_lef_with(&many, &SMALL)),
         "the LEF has more than 50 tokens"
     );
-    let pins = format!("MACRO m\n{}END m\n", "PIN a\nEND a\n".repeat(4));
+    let pins: String = (0..4).map(|i| format!("PIN a{i}\nEND a{i}\n")).collect();
+    let pins = format!("MACRO m\n{pins}END m\n");
     assert_eq!(
         limit_message(parse_lef_with(&pins, &SMALL)),
         r#"MACRO "m" has more than 3 pins"#

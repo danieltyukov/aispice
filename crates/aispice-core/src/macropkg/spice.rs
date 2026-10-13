@@ -34,14 +34,7 @@ pub fn spice_subckt(text: &str, name: &str) -> Result<Option<SpiceSubckt>, Limit
     spice_subckt_with(text, name, &Limits::DEFAULT)
 }
 
-/// `.subckt name` with its ports and `*.PININFO` directions, or None if
-/// absent. Fails when the file has too many lines or the subcircuit too many
-/// ports.
-pub fn spice_subckt_with(
-    text: &str,
-    name: &str,
-    limits: &Limits,
-) -> Result<Option<SpiceSubckt>, LimitError> {
+fn check_lines(text: &str, limits: &Limits) -> Result<(), LimitError> {
     let count = |b: u8| text.bytes().filter(|&c| c == b).count();
     let lines = count(b'\n') + count(b'\r') - text.matches("\r\n").count() + 1;
     if lines > limits.tokens {
@@ -50,6 +43,32 @@ pub fn spice_subckt_with(
             limits.tokens
         )));
     }
+    Ok(())
+}
+
+/// The names of every `.subckt` of a SPICE file, in file order. Fails when
+/// the file has too many lines.
+pub fn spice_subckts_with(text: &str, limits: &Limits) -> Result<Vec<String>, LimitError> {
+    check_lines(text, limits)?;
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    Ok(text
+        .split('\n')
+        .filter_map(|raw| {
+            let ws = words(code(raw.trim_matches(is_ws)));
+            (ws.len() >= 2 && ws[0].eq_ignore_ascii_case(".subckt")).then(|| ws[1].to_string())
+        })
+        .collect())
+}
+
+/// `.subckt name` with its ports and `*.PININFO` directions, or None if
+/// absent. Fails when the file has too many lines or the subcircuit too many
+/// ports.
+pub fn spice_subckt_with(
+    text: &str,
+    name: &str,
+    limits: &Limits,
+) -> Result<Option<SpiceSubckt>, LimitError> {
+    check_lines(text, limits)?;
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines: Vec<String> = Vec::new();
     for raw in text.split('\n') {
@@ -131,5 +150,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(spice_subckt(text, "missing"), Ok(None));
+        let names = spice_subckts_with(text, &Limits::DEFAULT).unwrap();
+        assert_eq!(names, ["other", "BLK"]);
     }
 }

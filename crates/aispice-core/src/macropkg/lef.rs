@@ -1,5 +1,8 @@
 //! LEF, far enough to compare a macro's class, size, origin and pins.
 //! ChipLeap's `chipleap.macro.views.parse_lef` reads it the same way.
+//!
+//! Keywords, and the values of CLASS, DIRECTION and USE, are read in any
+//! case, as OpenROAD reads them (`macro`, `Pin`); names keep their case.
 
 use super::is_ws;
 use super::limits::{LimitError, Limits};
@@ -184,21 +187,26 @@ pub fn parse_lef(text: &str) -> Result<BTreeMap<String, LefMacro>, LefError> {
     parse_lef_with(text, &Limits::DEFAULT)
 }
 
-/// Every MACRO in a LEF file, by name. Fails when it is malformed, has too
-/// many tokens or a macro has too many pins.
+/// Every MACRO in a LEF file, by name. Fails when it is malformed, defines
+/// a macro, or a pin of one, twice (tools differ on which one they keep), has
+/// too many tokens or a macro has too many pins.
 pub fn parse_lef_with(text: &str, limits: &Limits) -> Result<BTreeMap<String, LefMacro>, LefError> {
     let toks = tokens(text, limits)?;
     let mut macros = BTreeMap::new();
     let mut i = 0;
     while i < toks.len() {
-        if toks[i] == "MACRO" && i + 1 < toks.len() {
+        if toks[i].eq_ignore_ascii_case("MACRO") && i + 1 < toks.len() {
+            let name = &toks[i + 1];
+            if macros.contains_key(name) {
+                return syntax(format!("MACRO {name} is defined twice"));
+            }
             let mut t = Tokens {
                 toks: &toks,
                 i: i + 2,
-                what: format!("MACRO {}", toks[i + 1]),
+                what: format!("MACRO {name}"),
             };
-            let m = parse_macro(&mut t, &toks[i + 1], limits)?;
-            macros.entry(m.name.clone()).or_insert(m);
+            let m = parse_macro(&mut t, name, limits)?;
+            macros.insert(name.clone(), m);
             i = t.i;
         } else {
             i += 1;
@@ -214,7 +222,7 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
     };
     let mut pins = 0usize;
     loop {
-        let kw = t.next()?.to_string();
+        let kw = t.next()?.to_ascii_uppercase();
         match kw.as_str() {
             "END" => {
                 if t.next()? != name {
@@ -222,7 +230,7 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
                 }
                 return Ok(m);
             }
-            "CLASS" => m.class = t.statement()?.join(" "),
+            "CLASS" => m.class = t.statement()?.join(" ").to_ascii_uppercase(),
             "ORIGIN" => {
                 let args = t.statement()?;
                 let [x, y, ..] = &args[..] else {
@@ -235,7 +243,7 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
                 let [w, by, h] = &args[..] else {
                     return syntax(format!("SIZE of {name} is not 'SIZE w BY h'"));
                 };
-                if by != "BY" {
+                if !by.eq_ignore_ascii_case("BY") {
                     return syntax(format!("SIZE of {name} is not 'SIZE w BY h'"));
                 }
                 m.size = Some((number(w)?, number(h)?));
@@ -252,12 +260,15 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
                 }
                 let pin_name = t.next()?.to_string();
                 let pin = parse_pin(t, &pin_name)?;
-                m.pins.entry(pin.name.clone()).or_insert(pin);
+                if m.pins.contains_key(&pin.name) {
+                    return syntax(format!("PIN {pin_name} of MACRO {name} is defined twice"));
+                }
+                m.pins.insert(pin_name, pin);
             }
             "OBS" => {
                 let mut layer = String::new();
                 loop {
-                    let kw = t.next()?.to_string();
+                    let kw = t.next()?.to_ascii_uppercase();
                     if kw == "END" {
                         break;
                     }
@@ -272,7 +283,7 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
                 }
             }
             "DENSITY" => {
-                while t.next()? != "END" {
+                while !t.next()?.eq_ignore_ascii_case("END") {
                     t.statement()?;
                 }
             }
@@ -288,8 +299,14 @@ fn parse_pin(t: &mut Tokens, name: &str) -> Result<LefPin, LefError> {
         name: name.to_string(),
         ..LefPin::default()
     };
+    let first = |args: Vec<String>| {
+        args.into_iter()
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase()
+    };
     loop {
-        let kw = t.next()?.to_string();
+        let kw = t.next()?.to_ascii_uppercase();
         match kw.as_str() {
             "END" => {
                 if t.next()? != name {
@@ -298,10 +315,10 @@ fn parse_pin(t: &mut Tokens, name: &str) -> Result<LefPin, LefError> {
                 return Ok(p);
             }
             // OUTPUT TRISTATE is an output.
-            "DIRECTION" => p.direction = t.statement()?.into_iter().next().unwrap_or_default(),
-            "USE" => p.use_ = t.statement()?.into_iter().next().unwrap_or_default(),
+            "DIRECTION" => p.direction = first(t.statement()?),
+            "USE" => p.use_ = first(t.statement()?),
             "PORT" => loop {
-                let kw = t.next()?.to_string();
+                let kw = t.next()?.to_ascii_uppercase();
                 if kw == "END" {
                     break;
                 }
@@ -396,5 +413,54 @@ mod tests {
         let e = parse_lef("MACRO x\nEND y\n").unwrap_err();
         assert!(e.to_string().contains("wrong name"), "{e}");
         assert!(parse_lef("MACRO x\nSIZE 1_0 BY 2 ;\nEND x\n").is_err());
+    }
+
+    #[test]
+    fn keywords_are_read_in_any_case() {
+        // As in ChipLeap's test_lef_keywords_are_read_in_any_case.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/macro/tiny_counter.macro/tiny_counter.lef"
+        );
+        let mut text = std::fs::read_to_string(path).unwrap();
+        for kw in [
+            "MACRO",
+            "CLASS",
+            "SIZE",
+            "BY",
+            "PIN",
+            "DIRECTION",
+            "USE",
+            "PORT",
+            "LAYER",
+        ] {
+            text = text.replace(&format!("{kw} "), &format!("{} ", kw.to_lowercase()));
+        }
+        text = text
+            .replace("RECT", "rect")
+            .replace("END", "End")
+            .replace("BLOCK", "block");
+        let m = &parse_lef(&text).unwrap()["tiny_counter"];
+        assert_eq!((m.class.as_str(), m.size), ("BLOCK", Some((20.0, 10.0))));
+        assert_eq!(m.pins["q[0]"].direction, "OUTPUT");
+        assert_eq!(m.pins["VDD"].use_, "POWER");
+        assert_eq!(m.pins["clk"].shapes, 1);
+        assert_eq!(m.pins["clk"].layers, ["Metal2"]);
+        assert_eq!(m.pins["clk"].rects.len(), 1);
+        // OpenROAD reads a lower-case macro too, and keeps the first of a name.
+        let twice = format!("macro tiny_counter\n  size 30 by 10 ;\nend tiny_counter\n{text}");
+        let e = parse_lef(&twice).unwrap_err().to_string();
+        assert_eq!(e, "MACRO tiny_counter is defined twice");
+    }
+
+    #[test]
+    fn a_pin_defined_twice_cannot_be_read() {
+        let e = parse_lef("MACRO m\nPIN a\nEND a\npin a\nEND a\nEND m\n").unwrap_err();
+        assert_eq!(e.to_string(), "PIN a of MACRO m is defined twice");
+        // Names keep their case: two macros or pins differing in it are two.
+        let macros = parse_lef("MACRO m\nPIN a\nEND a\nPIN A\nEND A\nEND m\nMACRO M\nEND M\n");
+        let macros = macros.unwrap();
+        assert_eq!(macros.keys().collect::<Vec<_>>(), ["M", "m"]);
+        assert_eq!(macros["m"].pins.len(), 2);
     }
 }

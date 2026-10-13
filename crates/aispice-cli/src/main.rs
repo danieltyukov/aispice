@@ -310,6 +310,10 @@ enum MacroAction {
         /// ihp-sg13g2.
         #[arg(long)]
         pdk: Option<String>,
+        /// The PDK's directory (ihp-sg13g2): also refuse cells named like
+        /// its libraries' cells.
+        #[arg(long, value_name = "DIR")]
+        pdk_libs: Option<PathBuf>,
         /// Also fail on warnings.
         #[arg(long)]
         strict: bool,
@@ -685,9 +689,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
             } => cmd_layout::chip(&spec, "assemble", out, !no_check, &cli.symbols, cli.json),
         },
         Command::Macro { action } => match action {
-            MacroAction::Check { dir, pdk, strict } => {
-                cmd_macro::check(&dir, pdk, strict, cli.json)
-            }
+            MacroAction::Check {
+                dir,
+                pdk,
+                pdk_libs,
+                strict,
+            } => cmd_macro::check(&dir, pdk, pdk_libs.as_deref(), strict, cli.json),
             MacroAction::Export {
                 circuit,
                 layout,

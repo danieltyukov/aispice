@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 // The contract both repositories share. ChipLeap pins the same hashes in
 // tests/test_macro.py; change both together (CONTRIBUTING.md).
-const SPEC_SHA256: &str = "b163157047ac18658b59d2bf2aec91a61823cd4056a9bb8d0427d31eb953069c";
+const SPEC_SHA256: &str = "7f64a8235353f4f8f34584657104454e3c2d5a2e73b69c0c9d806996f51760b7";
 const SCHEMA_SHA256: &str = "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327";
-const FIXTURES_SHA256: &str = "62a75b14e98a40a72df85162862e2cb980be2afd8692aec6b6d42917338b0074";
+const FIXTURES_SHA256: &str = "e2afb61df8867df02db4ae502029c0ad21b9f08af1d8fb06774c4af8835f3ee0";
 
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
