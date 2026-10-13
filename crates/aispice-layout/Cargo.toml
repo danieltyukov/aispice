@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio.workspace = true
 futures.workspace = true
 tokio-util = "0.7"
+tracing.workspace = true
 tempfile.workspace = true
 roxmltree = "0.21"
 toml = "1"

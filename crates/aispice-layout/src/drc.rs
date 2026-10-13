@@ -391,14 +391,19 @@ pub async fn run(
     tools::check_name("cell", cell)?;
     std::fs::create_dir_all(out_dir).map_err(|e| LayoutError::Io(e.to_string()))?;
     let run = RunDir::new()?;
+    let access = tools::Access::new()
+        .read(&files.root)
+        .read(gds)
+        .write(out_dir);
     let jobs = decks(files, checks);
     let futures = jobs.iter().map(|(name, deck, table)| {
         let report = out_dir.join(format!("{name}.lyrdb"));
         let log = out_dir.join(format!("{name}.log"));
         let vars = switches(files, gds, cell, checks, table, &report, &log);
         let dir = run.path().to_path_buf();
+        let access = &access;
         async move {
-            let out = tools::klayout(programs, &dir, deck, &vars, cancel).await?;
+            let out = tools::klayout(programs, &dir, deck, &vars, access, cancel).await?;
             if !out.success() || !report.is_file() {
                 return Err(LayoutError::Failed {
                     program: format!("KLayout DRC ({name} deck)"),

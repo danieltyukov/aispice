@@ -750,7 +750,17 @@ pub async fn lef(
         ("AISPICE_LEF", out.display().to_string()),
         ("AISPICE_PINS", pins.join(" ")),
     ];
-    let res = tools::magic(programs, run.path(), &files.magicrc, &script, &env, cancel).await?;
+    let access = tools::Access::new().read(&files.root).read(gds);
+    let res = tools::magic(
+        programs,
+        run.path(),
+        &files.magicrc,
+        &script,
+        &env,
+        &access,
+        cancel,
+    )
+    .await?;
     if !res.success() || !out.is_file() {
         return Err(LayoutError::Failed {
             program: "Magic (writing the LEF abstract)".into(),

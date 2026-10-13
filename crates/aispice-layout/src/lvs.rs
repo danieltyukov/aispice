@@ -393,7 +393,19 @@ pub async fn run(
         ("target_netlist", extracted.display().to_string()),
     ];
     let run = RunDir::new()?;
-    let out = tools::klayout(programs, run.path(), &files.lvs_deck, &vars, cancel).await?;
+    let access = tools::Access::new()
+        .read(&files.root)
+        .read(gds)
+        .write(out_dir);
+    let out = tools::klayout(
+        programs,
+        run.path(),
+        &files.lvs_deck,
+        &vars,
+        &access,
+        cancel,
+    )
+    .await?;
     if !lvsdb.is_file() {
         let all = out.combined();
         let tail: Vec<&str> = all
@@ -432,6 +444,7 @@ pub async fn read_lvsdb(
             ("db", lvsdb.display().to_string()),
             ("out", json.display().to_string()),
         ],
+        &tools::Access::new().read(lvsdb).write(out_dir),
         cancel,
     )
     .await?;

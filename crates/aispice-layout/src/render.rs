@@ -41,6 +41,7 @@ pub async fn png(
             ("width", w.to_string()),
             ("height", h.to_string()),
         ],
+        &tools::Access::new().read(&files.root).read(gds),
         cancel,
     )
     .await?;

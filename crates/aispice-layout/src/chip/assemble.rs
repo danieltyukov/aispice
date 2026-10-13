@@ -233,6 +233,17 @@ pub async fn draw(
     std::fs::write(&json, plan.to_string()).map_err(|e| LayoutError::Io(e.to_string()))?;
     let run = RunDir::new()?;
     let script = run.script("chip.py", CHIP_SCRIPT)?;
+    // The script reads the library files the plan names (IHP's IO cells,
+    // the blocks) and writes the chip into `dir`.
+    let mut access = tools::Access::new().read(&files.root).write(dir);
+    if let Some(libs) = plan.get("libraries").and_then(Value::as_array) {
+        for file in libs
+            .iter()
+            .filter_map(|l| l.get("file").and_then(Value::as_str))
+        {
+            access = access.read(file);
+        }
+    }
     let out = tools::klayout(
         programs,
         run.path(),
@@ -241,6 +252,7 @@ pub async fn draw(
             ("pdk_python", files.python.display().to_string()),
             ("plan", json.display().to_string()),
         ],
+        &access,
         cancel,
     )
     .await?;
@@ -302,6 +314,7 @@ pub async fn assemble(
             ("top", spec.name.clone()),
             ("output", fill.display().to_string()),
         ],
+        &tools::Access::new().read(&files.root).write(dir),
         cancel,
     )
     .await?;
@@ -321,6 +334,7 @@ pub async fn assemble(
             ("fill_top", format!("{}_fill", spec.name)),
             ("out", gds.display().to_string()),
         ],
+        &tools::Access::new().write(dir),
         cancel,
     )
     .await?;

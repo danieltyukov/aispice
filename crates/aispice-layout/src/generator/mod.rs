@@ -364,6 +364,7 @@ pub async fn draw(
             ("plan", json.display().to_string()),
             ("out", gds.display().to_string()),
         ],
+        &tools::Access::new().read(&files.root).write_file(gds),
         cancel,
     )
     .await?;

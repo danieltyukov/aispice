@@ -168,7 +168,20 @@ async fn magic_pass(
         ("AISPICE_UNLABEL", unlabel.to_string()),
         ("AISPICE_CTHRESH", CTHRESH.to_string()),
     ];
-    let res = tools::magic(programs, run.path(), &files.magicrc, script, &env, cancel).await?;
+    let access = tools::Access::new()
+        .read(&files.root)
+        .read(gds)
+        .write_file(out);
+    let res = tools::magic(
+        programs,
+        run.path(),
+        &files.magicrc,
+        script,
+        &env,
+        &access,
+        cancel,
+    )
+    .await?;
     if !res.success() || !out.is_file() {
         let why = if res.code.is_none() {
             "Magic crashed".to_string()

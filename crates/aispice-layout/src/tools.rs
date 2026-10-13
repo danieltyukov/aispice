@@ -7,11 +7,22 @@
 //! cancellation. Scripts are aispice's own files, written into the folder;
 //! values reach them as `-rd name=value` arguments (KLayout) or environment
 //! variables (Magic), never as script text.
+//!
+//! Both programs read layouts aispice did not write, so they run in the
+//! sandbox aispice uses for any program ([`aispice_sim::sandbox`]), under the
+//! `Denylist` profile, as defense in depth: each run may read the system,
+//! the program's install and what its [`Access`] lists, and write only its
+//! private folder and the folders its [`Access`] lists. They run no code from
+//! a project (only aispice's scripts and the PDK's decks), so where this
+//! machine has no sandbox they still run, and [`unsandboxed`] says why for
+//! the tools to tell the user.
 
 use aispice_sim::backend::process::{self, ProcessOutput, ProcessSpec};
 use aispice_sim::backend::which;
 use aispice_sim::pdk::Pdk;
+use aispice_sim::sandbox::{Limits, Plan, Profile, Sandbox};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -177,71 +188,344 @@ impl RunDir {
 
 /// How long a layout program may run.
 pub const TIMEOUT: Duration = Duration::from_secs(1800);
+/// The largest file a layout program may write (`RLIMIT_FSIZE`).
+const MAX_FILE: u64 = 8 << 30;
+/// Processes and threads a layout program may add to what the user runs
+/// (`RLIMIT_NPROC`, relative): KLayout's DRC runs threads.
+const NPROC_HEADROOM: u64 = 512;
+/// Variables a sandboxed run keeps from aispice's environment, besides the
+/// ones each run sets: where programs and libraries are, and the locale.
+const PASSED_ENV: &[&str] = &["PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "LC_CTYPE"];
+/// System folders a layout program reads besides those every sandboxed
+/// program may: fonts and their configuration, for Qt's offscreen platform.
+const LAYOUT_SYSTEM: &[&str] = &["/etc/fonts"];
 
-/// Run `klayout -b -r <script> -rd k=v ...` in `dir`.
+/// What one layout run may touch besides the system, the program's install
+/// and its private folder (which it may write): the files and folders it
+/// reads, such as the PDK and its input layouts, and the folders it writes
+/// its results into.
+#[derive(Debug, Clone, Default)]
+pub struct Access {
+    read: Vec<PathBuf>,
+    write: Vec<PathBuf>,
+}
+
+impl Access {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Let the run read `p`, a file or a folder.
+    pub fn read(mut self, p: impl AsRef<Path>) -> Self {
+        self.read.push(real(p.as_ref()));
+        self
+    }
+
+    /// Let the run write in the folder `p`, which must exist.
+    pub fn write(mut self, p: impl AsRef<Path>) -> Self {
+        self.write.push(real(p.as_ref()));
+        self
+    }
+
+    /// Let the run write the file `p`: in its folder.
+    pub fn write_file(self, p: &Path) -> Self {
+        match p.parent() {
+            Some(dir) => self.write(dir),
+            None => self,
+        }
+    }
+}
+
+/// `p` with links resolved, so a rule or bind names the file itself.
+fn real(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The sandbox layout programs run in here, chosen once per process, or
+/// why there is none.
+async fn sandbox() -> Result<&'static Sandbox, &'static str> {
+    static CHOSEN: tokio::sync::OnceCell<Result<Sandbox, String>> =
+        tokio::sync::OnceCell::const_new();
+    // Not the caller's token: a cancelled run must not leave every later run
+    // without a sandbox.
+    CHOSEN
+        .get_or_init(|| async { Sandbox::select(&CancellationToken::new()).await })
+        .await
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+/// Why KLayout and Magic run without a sandbox on this machine, if they do,
+/// as a note for the tools to show.
+pub async fn unsandboxed() -> Option<String> {
+    sandbox().await.err().map(|why| {
+        format!(
+            "KLayout and Magic ran without a sandbox here ({why}). They run no code from the project, so they ran anyway; see docs/SANDBOX.md to enable one."
+        )
+    })
+}
+
+/// The sandbox KLayout and Magic run in here, or `none` and why, for
+/// `aispice doctor`.
+pub async fn sandbox_description() -> String {
+    match sandbox().await {
+        Ok(s) => s.describe(),
+        Err(why) => format!("none ({why}); they run unconfined"),
+    }
+}
+
+/// One run of a layout program, before the sandbox is chosen.
+struct Run<'a> {
+    name: &'static str,
+    program: PathBuf,
+    args: Vec<OsString>,
+    /// Variables the run sets; the rest of a sandboxed run's environment
+    /// is [`PASSED_ENV`].
+    env: Vec<(OsString, OsString)>,
+    dir: &'a Path,
+    access: &'a Access,
+    /// Programs it may start besides itself (a start-up script's
+    /// interpreter and helpers).
+    exec: Vec<PathBuf>,
+    timeout: Duration,
+}
+
+/// Run `run` in the sandbox when this machine has one, else as before:
+/// unconfined, in its private folder, with its variables set over aispice's
+/// environment.
+async fn run(run: Run<'_>, cancel: &CancellationToken) -> Result<ProcessOutput, LayoutError> {
+    let failed = |message: String| LayoutError::Failed {
+        program: run.name.into(),
+        message,
+    };
+    let spec = match sandbox().await {
+        Ok(sandbox) => sandbox
+            .command(&plan(&run))
+            .map_err(|e| failed(e.to_string()))?,
+        Err(why) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| tracing::warn!("KLayout and Magic run without a sandbox: {why}"));
+            let mut spec = ProcessSpec::new(&run.program, run.dir);
+            spec.args = run.args.clone();
+            spec.env = run.env.clone();
+            spec
+        }
+    };
+    process::run(&spec, run.timeout, cancel)
+        .await
+        .map_err(|e| failed(e.to_string()))
+}
+
+/// The sandbox plan of a run: the `Denylist` profile, the program's
+/// install, fonts and the run's [`Access`] to read, its private folder and
+/// the run's folders to write.
+fn plan(run: &Run<'_>) -> Plan {
+    let mut env: Vec<(OsString, OsString)> = PASSED_ENV
+        .iter()
+        .filter_map(|k| std::env::var_os(k).map(|v| (OsString::from(k), v)))
+        .collect();
+    for (k, v) in &run.env {
+        env.retain(|(x, _)| x != k);
+        env.push((k.clone(), v.clone()));
+    }
+    let mut read: Vec<PathBuf> = LAYOUT_SYSTEM
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    read.extend(install_folders(&run.program, home.as_deref()));
+    read.extend(run.access.read.iter().cloned());
+    let dir = real(run.dir);
+    let mut write = vec![dir.clone()];
+    write.extend(run.access.write.iter().cloned());
+    Plan {
+        program: run.program.clone(),
+        args: run.args.clone(),
+        env,
+        cwd: dir,
+        read,
+        exec: run.exec.clone(),
+        write,
+        profile: Profile::Denylist,
+        limits: Limits {
+            file_size: Some(MAX_FILE),
+            address_space: None,
+            nproc_headroom: Some(NPROC_HEADROOM),
+        },
+    }
+}
+
+/// The folders of a program installed outside `/usr` (which every
+/// sandboxed program reads): its own folder, and the `lib`, `lib64` and
+/// `share` folders beside it, unless that is `/` or holds `home`.
+fn install_folders(program: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    let real = real(program);
+    if real.starts_with("/usr") {
+        return Vec::new();
+    }
+    let Some(bin) = real.parent() else {
+        return Vec::new();
+    };
+    let mut v = vec![bin.to_path_buf()];
+    if let Some(prefix) = bin.parent()
+        && prefix.parent().is_some()
+        && !home.is_some_and(|h| h.starts_with(prefix))
+    {
+        for sub in ["lib", "lib64", "share"] {
+            let p = prefix.join(sub);
+            if p.is_dir() {
+                v.push(p);
+            }
+        }
+    }
+    v
+}
+
+/// What Magic's start-up script may run: Magic is usually a shell script
+/// (`#!/usr/bin/env bash`) that starts `magicdnull` or `magicexec` from its
+/// library folder, after a `uname | cut` for Cygwin.
+fn magic_helpers(program: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = ["env", "bash", "sh", "uname", "cut"]
+        .iter()
+        .filter_map(|h| which(h))
+        .collect();
+    let real = real(program);
+    if let Some(prefix) = real.parent().and_then(Path::parent) {
+        let mut libs = vec![prefix.join("lib"), prefix.join("lib64")];
+        if let Ok(entries) = std::fs::read_dir(prefix.join("lib")) {
+            libs.extend(entries.flatten().map(|e| e.path()));
+        }
+        v.extend(
+            libs.into_iter()
+                .map(|l| l.join("magic/tcl"))
+                .filter(|p| p.is_dir()),
+        );
+    }
+    v
+}
+
+/// Run `klayout -b -r <script> -rd k=v ...` in `dir`, with `access`.
 pub async fn klayout(
     programs: &Programs,
     dir: &Path,
     script: &Path,
     vars: &[(&str, String)],
+    access: &Access,
     cancel: &CancellationToken,
 ) -> Result<ProcessOutput, LayoutError> {
-    let exe = programs.klayout()?;
-    let mut spec = ProcessSpec::new(&exe, dir)
-        .env("HOME", dir)
-        .env("KLAYOUT_HOME", dir)
+    let program = programs.klayout()?;
+    let mut args: Vec<OsString> = vec!["-b".into(), "-r".into(), script.into()];
+    for (k, v) in vars {
+        args.push("-rd".into());
+        args.push(format!("{k}={v}").into());
+    }
+    let python = no_psutil(dir)?;
+    let env = vec![
+        ("HOME".into(), dir.into()),
+        ("KLAYOUT_HOME".into(), dir.into()),
+        // IHP's pcell library turns its `#ifdef KLAYOUT` blocks on when a
+        // process up its chain is named klayout, which it asks psutil, or
+        // when a variable of that name is set. psutil reads the `/proc` of
+        // every ancestor, which the sandbox does not show, and the library
+        // does not catch the refusal; without psutil it falls back to the
+        // variable. KLayout's Python reads KLAYOUT_PYTHONPATH, ahead of the
+        // system's folders, in place of PYTHONPATH.
+        ("KLAYOUT".into(), "1".into()),
+        ("KLAYOUT_PYTHONPATH".into(), python.into()),
         // IHP's pcell library writes preprocessed modules under fixed names
         // in the temporary folder and deletes them after loading: a shared
         // /tmp lets two runs delete each other's files, or a local user
         // plant one. Each run gets its own.
-        .env("TMPDIR", dir)
-        .env("TMP", dir)
-        .env("TEMP", dir)
+        ("TMPDIR".into(), dir.into()),
+        ("TMP".into(), dir.into()),
+        ("TEMP".into(), dir.into()),
         // Batch mode opens no window; this keeps Qt off the display too.
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .arg("-b")
-        .arg("-r")
-        .arg(script);
-    for (k, v) in vars {
-        spec = spec.arg("-rd").arg(format!("{k}={v}"));
+        ("QT_QPA_PLATFORM".into(), "offscreen".into()),
+    ];
+    let access = access.clone().read(script);
+    self::run(
+        Run {
+            name: "KLayout",
+            program,
+            args,
+            env,
+            dir,
+            access: &access,
+            exec: Vec::new(),
+            timeout: TIMEOUT,
+        },
+        cancel,
+    )
+    .await
+}
+
+/// A folder in `dir` holding a `psutil` that cannot be imported, for
+/// KLayout's Python to find first.
+fn no_psutil(dir: &Path) -> Result<PathBuf, LayoutError> {
+    let io = |e: std::io::Error| LayoutError::Io(format!("cannot prepare KLayout's Python: {e}"));
+    let python = dir.join("aispice-python");
+    let module = python.join("psutil");
+    std::fs::create_dir_all(&module).map_err(io)?;
+    let init = module.join("__init__.py");
+    if !init.is_file() {
+        // Runs in one folder may start together: write aside, then rename,
+        // so no run sees a half-written module.
+        static PARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = PARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let part = module.join(format!("__init__.{}.{n}.part", std::process::id()));
+        std::fs::write(
+            &part,
+            "raise ImportError('psutil is not available to KLayout under aispice')\n",
+        )
+        .map_err(io)?;
+        std::fs::rename(&part, &init).map_err(io)?;
     }
-    let out = process::run(&spec, TIMEOUT, cancel)
-        .await
-        .map_err(|e| LayoutError::Failed {
-            program: "KLayout".into(),
-            message: e.to_string(),
-        })?;
-    Ok(out)
+    Ok(python)
 }
 
 /// Run Magic without graphics on a Tcl script of aispice's, with the
-/// PDK's start-up file and the given environment.
+/// PDK's start-up file, the given environment and `access`.
+#[allow(clippy::too_many_arguments)]
 pub async fn magic(
     programs: &Programs,
     dir: &Path,
     rcfile: &Path,
     script: &Path,
     env: &[(&str, String)],
+    access: &Access,
     cancel: &CancellationToken,
 ) -> Result<ProcessOutput, LayoutError> {
-    let exe = programs.magic()?;
-    let mut spec = ProcessSpec::new(&exe, dir)
-        .env("HOME", dir)
-        .env("TMPDIR", dir)
-        .arg("-dnull")
-        .arg("-noconsole")
-        .arg("-rcfile")
-        .arg(rcfile)
-        .arg(script);
-    for (k, v) in env {
-        spec = spec.env(*k, v);
-    }
-    process::run(&spec, TIMEOUT, cancel)
-        .await
-        .map_err(|e| LayoutError::Failed {
-            program: "Magic".into(),
-            message: e.to_string(),
-        })
+    let program = programs.magic()?;
+    let args: Vec<OsString> = vec![
+        "-dnull".into(),
+        "-noconsole".into(),
+        "-rcfile".into(),
+        rcfile.into(),
+        script.into(),
+    ];
+    let mut vars: Vec<(OsString, OsString)> =
+        vec![("HOME".into(), dir.into()), ("TMPDIR".into(), dir.into())];
+    vars.extend(
+        env.iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
+    let access = access.clone().read(rcfile).read(script);
+    let exec = magic_helpers(&program);
+    self::run(
+        Run {
+            name: "Magic",
+            program,
+            args,
+            env: vars,
+            dir,
+            access: &access,
+            exec,
+            timeout: TIMEOUT,
+        },
+        cancel,
+    )
+    .await
 }
 
 /// The version a layout program reports (`klayout -v`, `magic --version`),
@@ -252,15 +536,29 @@ pub async fn version(programs: &Programs, magic: bool, cancel: &CancellationToke
     } else {
         (programs.klayout(), "-v")
     };
-    let (Ok(exe), Ok(run)) = (exe, RunDir::new()) else {
+    let (Ok(program), Ok(dir)) = (exe, RunDir::new()) else {
         return "unknown".into();
     };
-    let spec = ProcessSpec::new(&exe, run.path())
-        .env("HOME", run.path())
-        .env("KLAYOUT_HOME", run.path())
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .arg(flag);
-    match process::run(&spec, Duration::from_secs(60), cancel).await {
+    let exec = if magic {
+        magic_helpers(&program)
+    } else {
+        Vec::new()
+    };
+    let r = Run {
+        name: if magic { "Magic" } else { "KLayout" },
+        program,
+        args: vec![flag.into()],
+        env: vec![
+            ("HOME".into(), dir.path().into()),
+            ("KLAYOUT_HOME".into(), dir.path().into()),
+            ("QT_QPA_PLATFORM".into(), "offscreen".into()),
+        ],
+        dir: dir.path(),
+        access: &Access::new(),
+        exec,
+        timeout: Duration::from_secs(60),
+    };
+    match run(r, cancel).await {
         Ok(out) => parse_version(&out.combined()).unwrap_or_else(|| "unknown".into()),
         Err(_) => "unknown".into(),
     }
@@ -325,6 +623,71 @@ pub fn check_path(path: &Path) -> Result<(), LayoutError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's plan: the Denylist profile, the run's own reads and writes
+    /// on top of its private folder, its variables over the few kept from
+    /// aispice's environment, and nothing else of that environment.
+    #[test]
+    fn a_layout_run_is_planned_with_its_access_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let (input, out) = (dir.join("in.gds"), dir.join("out"));
+        std::fs::write(&input, "").unwrap();
+        std::fs::create_dir(&out).unwrap();
+        let access = Access::new()
+            .read(&input)
+            .write_file(&out.join("report.lyrdb"));
+        let run = Run {
+            name: "KLayout",
+            program: PathBuf::from("/usr/bin/klayout"),
+            args: vec!["-b".into()],
+            env: vec![
+                ("HOME".into(), dir.clone().into()),
+                ("LANG".into(), "C".into()),
+            ],
+            dir: &dir,
+            access: &access,
+            exec: Vec::new(),
+            timeout: TIMEOUT,
+        };
+        let p = plan(&run);
+        assert_eq!(p.profile, Profile::Denylist);
+        assert_eq!(p.cwd, dir);
+        assert_eq!(p.write, vec![dir.clone(), out.clone()]);
+        assert!(p.read.contains(&input));
+        assert!(p.exec.is_empty());
+        assert_eq!(p.limits.file_size, Some(MAX_FILE));
+        for (k, _) in &p.env {
+            let k = k.to_string_lossy();
+            assert!(k == "HOME" || PASSED_ENV.contains(&k.as_ref()), "{k}");
+        }
+        // A variable the run sets replaces the one kept from aispice's.
+        let langs: Vec<_> = p.env.iter().filter(|(k, _)| k == "LANG").collect();
+        assert_eq!(langs.len(), 1);
+        assert_eq!(langs[0].1, "C");
+    }
+
+    /// A program outside /usr brings its own folder and the lib, lib64 and
+    /// share folders beside it, but never a folder holding the home.
+    #[test]
+    fn install_folders_stop_short_of_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path().canonicalize().unwrap().join("opt");
+        for d in ["bin", "lib", "share"] {
+            std::fs::create_dir_all(prefix.join(d)).unwrap();
+        }
+        let program = prefix.join("bin/klayout");
+        std::fs::write(&program, "").unwrap();
+        assert_eq!(
+            install_folders(&program, None),
+            [prefix.join("bin"), prefix.join("lib"), prefix.join("share")]
+        );
+        assert_eq!(
+            install_folders(&program, Some(&prefix.join("home"))),
+            [prefix.join("bin")]
+        );
+        assert!(install_folders(Path::new("/usr/bin/klayout"), None).is_empty());
+    }
 
     #[test]
     fn names_that_reach_tools_are_plain() {
