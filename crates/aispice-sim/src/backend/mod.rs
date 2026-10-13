@@ -119,6 +119,9 @@ pub struct SimJob {
     /// project, model and PDK folders. A run that loads `libraries` may
     /// read these and nothing else of the user's.
     pub reads: Vec<PathBuf>,
+    /// The sandbox a run that loads `libraries` runs in; `None` finds one
+    /// with [`native_code::ready`] when the run starts.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 impl SimJob {
@@ -131,6 +134,7 @@ impl SimJob {
             pdk: None,
             libraries: Vec::new(),
             reads: Vec::new(),
+            sandbox: None,
         }
     }
 

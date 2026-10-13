@@ -21,8 +21,8 @@
 //! files by `osdi` lines in the `.spiceinit`, co-simulation libraries by
 //! `d_cosim` model cards added to the deck after the netlist policy checked
 //! it. No path a deck or a project names is ever loaded. A run that loads
-//! any of them is confined, since their code runs inside ngspice: see
-//! [`super::native_code`].
+//! any of them runs in a sandbox, since their code runs inside ngspice:
+//! see [`super::native_code`].
 //!
 //! ngspice refuses to evaluate `.meas` in batch mode when it writes a raw
 //! file, so a deck with measurements runs twice: once for the raw file and
@@ -38,6 +38,7 @@ use super::{
 use crate::behavioral::{Library, LibraryKind, sha256_hex};
 use crate::log::parse_ngspice_output;
 use crate::pdk::PdkRun;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,11 +51,6 @@ pub struct Ngspice {
     /// The `ngbehavior` compatibility setting. `ltpsa` matches LTspice;
     /// `None` runs plain ngspice.
     pub compat: Option<String>,
-    /// The Landlock ABI to confine a run that loads compiled models with,
-    /// instead of the newest this kernel and aispice share. Tests set 4 to
-    /// check the oldest accepted ruleset on a newer kernel; below 4 the
-    /// run is refused.
-    pub landlock_abi: Option<u8>,
 }
 
 impl Default for Ngspice {
@@ -62,7 +58,6 @@ impl Default for Ngspice {
         Self {
             exe: None,
             compat: Some("ltpsa".into()),
-            landlock_abi: None,
         }
     }
 }
@@ -141,23 +136,6 @@ impl Ngspice {
     /// The second run that evaluates `.meas` lines.
     pub fn meas_args(stem: &str) -> Vec<String> {
         vec!["-b".into(), format!("{stem}_meas.cir")]
-    }
-}
-
-/// WIP: enforcement still takes #40's `process::Confinement` until it
-/// moves onto `sandbox::Confinement`; this drops the seccomp policy and
-/// ABI, which #40's enforcer fixes at its denylist and ABI 6.
-fn legacy(c: &crate::sandbox::Confinement) -> process::Confinement {
-    process::Confinement {
-        landlock: c.landlock().map(|l| process::Landlock {
-            read: l.read.clone(),
-            exec: l.exec.clone(),
-            write: l.write.clone(),
-            rw: l.rw.clone(),
-        }),
-        rlimit_fsize: c.limits().file_size,
-        rlimit_as: c.limits().address_space,
-        nproc_headroom: c.limits().nproc_headroom,
     }
 }
 
@@ -307,42 +285,43 @@ impl Simulator for Ngspice {
             ".spiceinit",
             self.spiceinit_with(job.pdk.as_ref(), &osdi).as_bytes(),
         )?;
-        let confine = if job.libraries.is_empty() {
+        // Code the project compiled runs only in the sandbox, with the
+        // preloaded library that keeps ngspice's temporary file in the run
+        // folder.
+        let sandboxed = if job.libraries.is_empty() {
             None
         } else {
-            let abi = match self.landlock_abi {
-                Some(abi) => abi,
-                None => native_code::available().map_err(|e| {
-                    SimError::Config(format!(
-                        "the project's compiled models were not loaded: {e}"
-                    ))
-                })?,
+            let sandbox = match &job.sandbox {
+                Some(s) => s.clone(),
+                None => native_code::ready(cancel).await.map_err(SimError::Config)?,
             };
-            let pdk_osdi = job.pdk.as_ref().map(|p| p.osdi.clone()).unwrap_or_default();
-            let c = native_code::confinement(&exe, ws.path(), &job.reads, &pdk_osdi, abi)?;
-            let shim = native_code::tmpfile_library(cancel).await?;
-            let preload = native_code::place_tmpfile_library(ws.path(), &shim)?;
-            Some((c, preload))
+            let preload = native_code::preload(cancel).await?;
+            native_code::place_preload(ws.path(), &preload)?;
+            let mut reads = job.reads.clone();
+            if let Some(pdk) = &job.pdk {
+                reads.extend(pdk.osdi.iter().cloned());
+            }
+            let plan = native_code::plan(&exe, ws.path(), &reads, Vec::new())?;
+            Some((sandbox, plan))
         };
-        let command = |args: Vec<String>| {
-            let mut spec = ProcessSpec::new(&exe, ws.path());
-            match &confine {
-                Some((c, preload)) => {
-                    spec.clear_env = true;
-                    spec.env = native_code::environment(ws.path(), preload);
-                    spec.confine = Some(legacy(c));
-                }
-                None => {
-                    spec = spec.env("HOME", ws.path()).env("USERPROFILE", ws.path());
-                }
+        let command = |args: Vec<String>| match &sandboxed {
+            Some((sandbox, plan)) => {
+                let mut plan = plan.clone();
+                plan.args = args.into_iter().map(OsString::from).collect();
+                sandbox.command(&plan)
             }
-            for a in args {
-                spec = spec.arg(a);
+            None => {
+                let mut spec = ProcessSpec::new(&exe, ws.path())
+                    .env("HOME", ws.path())
+                    .env("USERPROFILE", ws.path());
+                for a in args {
+                    spec = spec.arg(a);
+                }
+                Ok(spec)
             }
-            spec
         };
         let started = std::time::Instant::now();
-        let out = process::run(&command(Self::args(&stem)), job.timeout, cancel).await?;
+        let out = process::run(&command(Self::args(&stem))?, job.timeout, cancel).await?;
         let mut log = out.combined();
         let mut report = parse_ngspice_output(&log);
         if has_meas(&deck) && report.errors.is_empty() {
@@ -354,7 +333,7 @@ impl Simulator for Ngspice {
                 &format!("{stem}_meas.cir"),
                 measurement_deck(&deck).as_bytes(),
             )?;
-            let m = process::run(&command(Self::meas_args(&stem)), left, cancel).await?;
+            let m = process::run(&command(Self::meas_args(&stem))?, left, cancel).await?;
             let mlog = m.combined();
             let mreport = parse_ngspice_output(&mlog);
             report.measurements = mreport.measurements;

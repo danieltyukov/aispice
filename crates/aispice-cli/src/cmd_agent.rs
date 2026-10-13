@@ -293,7 +293,8 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
 }
 
 /// OpenVAF (Verilog-A), Verilator, a C++ compiler, make and ngspice's
-/// d_cosim sources (co-simulation): where each is, or how to get it.
+/// d_cosim sources (co-simulation), and the C compiler and sandbox a run
+/// that loads them needs: where each is, or how to get it.
 async fn behavioral_lines(runner: &aispice_tools::Runner) -> Vec<String> {
     let t = runner.behavioral_toolchain().await;
     let tool = |name: &str, found: &Option<(std::path::PathBuf, String)>, hint: &str| match found {
@@ -315,6 +316,11 @@ async fn behavioral_lines(runner: &aispice_tools::Runner) -> Vec<String> {
             &t.verilator,
             "5.0 or newer, or set verilator_path",
         ),
+        path(
+            "C",
+            &t.cc,
+            "cc, gcc or clang in /usr/local/bin, /usr/bin or /bin, for the library a sandboxed ngspice preloads",
+        ),
         path("C++", &t.cxx, "g++ or clang++"),
         path("make", &t.make, "GNU make"),
         path(
@@ -326,11 +332,9 @@ async fn behavioral_lines(runner: &aispice_tools::Runner) -> Vec<String> {
             None => "co-simulation can be built here".into(),
             Some(m) => format!("co-simulation needs {m}"),
         },
-        match runner.behavioral_sandbox() {
-            Ok(abi) => {
-                format!("compiled models run in a confined ngspice (Landlock ABI {abi}, seccomp)")
-            }
-            Err(e) => format!("compiled models are not loaded here: {e}"),
+        match runner.behavioral_sandbox().await {
+            Ok(sandbox) => format!("compiled models run in a sandboxed ngspice: {sandbox}"),
+            Err(e) => e,
         },
     ]
 }

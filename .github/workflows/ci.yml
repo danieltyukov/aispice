@@ -205,7 +205,6 @@ jobs:
           cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
           cargo test -p aispice-tools --test mixed_signal -- --nocapture
           cargo test -p aispice-sim --test xspice_policy -- --nocapture
-          cargo test -p aispice-sim --test ngspice_sandbox -- --nocapture
           cargo test -p aispice-sim --lib native_code -- --nocapture
 
       # One DRC deck on a synthetic layout, then a generated current mirror

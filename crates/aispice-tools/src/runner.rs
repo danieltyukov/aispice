@@ -265,10 +265,12 @@ impl Runner {
         .await
     }
 
-    /// The Landlock ABI a run that loads compiled models is confined with,
-    /// or why this machine cannot confine one, for `doctor`.
-    pub fn behavioral_sandbox(&self) -> Result<u8, String> {
-        aispice_sim::backend::native_code::available()
+    /// The sandbox a run that loads compiled models runs in, or what this
+    /// machine lacks for one, for `doctor`.
+    pub async fn behavioral_sandbox(&self) -> Result<String, String> {
+        aispice_sim::backend::native_code::ready(&CancellationToken::new())
+            .await
+            .map(|s| s.describe())
     }
 
     /// The behavioural libraries this process has built.
@@ -687,20 +689,21 @@ impl Runner {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "deck".into());
         // Compiled only now, for a deck the policy accepted, and only where
-        // ngspice can be confined while it runs them.
-        let libraries = if uses_behavioral {
-            aispice_sim::backend::native_code::available().map_err(|e| {
-                RunError::Netlist(format!(
-                    "this circuit uses the project's Verilog-A or co-simulated models, which aispice does not load here: {e}"
-                ))
-            })?;
-            self.behavioral_build(project, netlist, &declared, cancel)
-                .await?
+        // ngspice can run them in a sandbox.
+        let (libraries, sandbox) = if uses_behavioral {
+            let sandbox = aispice_sim::backend::native_code::ready(cancel)
+                .await
+                .map_err(RunError::Netlist)?;
+            let libraries = self
+                .behavioral_build(project, netlist, &declared, cancel)
+                .await?;
+            (libraries, Some(sandbox))
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
+        job.sandbox = sandbox;
         // What a confined run may read of the user's: what the policy let
         // the deck include.
         job.reads = std::iter::once(policy.base_dir.clone())

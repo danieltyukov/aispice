@@ -25,7 +25,7 @@ fn have(program: &str) -> bool {
 }
 
 /// Whether this machine can build and run both kinds of behavioural model.
-fn toolchain() -> bool {
+async fn toolchain() -> bool {
     let ngspice = aispice_sim::backend::which("ngspice");
     let ok = ngspice.is_some()
         && have("openvaf")
@@ -41,7 +41,12 @@ fn toolchain() -> bool {
         );
         return false;
     }
-    if let Err(e) = aispice_sim::backend::native_code::available() {
+    if let Err(e) = aispice_sim::backend::native_code::ready(&CancellationToken::new()).await {
+        // CI makes a sandbox available; there a missing one is a failure.
+        assert!(
+            std::env::var_os("AISPICE_REQUIRE_SANDBOXES").is_none(),
+            "a sandbox is required here: {e}"
+        );
         eprintln!("skipped: {e}");
         return false;
     }
@@ -116,7 +121,7 @@ async fn count(ws: &Arc<Workspace>, circuit: &str, at: &str) -> u32 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_verilog_a_comparator_drives_a_cosimulated_counter() {
-    if !toolchain() {
+    if !toolchain().await {
         return;
     }
     let (dir, ws) = project("mixed_signal", RunnerConfig::default());
@@ -219,7 +224,7 @@ async fn the_strongarm_template_drives_a_cosimulated_counter() {
         eprintln!("skipped: AISPICE_PDK_IHP is not set");
         return;
     };
-    if !toolchain() {
+    if !toolchain().await {
         return;
     }
     let mut pdks = Registry::default();
