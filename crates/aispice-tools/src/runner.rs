@@ -1406,6 +1406,64 @@ mod tests {
         }
     }
 
+    /// Every deck form that would make ngspice load compiled code or run a
+    /// program is refused before any run, so it never reaches an
+    /// unconfined ngspice. The sandbox is only for the models aispice
+    /// builds from a project's declared sources, loaded outside the deck;
+    /// a deck can reach native code no other way. Gated on ngspice, so the
+    /// run gets past simulator selection to the policy.
+    #[tokio::test]
+    async fn a_deck_cannot_make_an_unconfined_ngspice_load_code() {
+        if aispice_sim::backend::which("ngspice").is_none() {
+            eprintln!("skipped: ngspice is not installed");
+            return;
+        }
+        let (dir, runner, project, _) = pdk_setup(None);
+        // A library and a program the deck might try to name.
+        std::fs::write(project.root().join("evil.so"), b"").unwrap();
+        std::fs::write(project.root().join("evil.osdi"), b"").unwrap();
+        std::fs::write(project.root().join("evil.cm"), b"").unwrap();
+        std::fs::write(project.root().join("prog"), b"").unwrap();
+        let _ = dir;
+        for deck in [
+            // Commands that load a shared library or a code model.
+            "t\nV1 a 0 1\nosdi evil.osdi\n.op\n.end\n",
+            "t\nV1 a 0 1\npre_osdi evil.osdi\n.op\n.end\n",
+            "t\nV1 a 0 1\ncodemodel evil.cm\n.op\n.end\n",
+            // An XSPICE model that loads a library or runs a program, in a
+            // spelling and inside a subcircuit.
+            "t\nV1 a 0 1\nA1 [a] [b] null cnt\n.model cnt d_cosim simulation=\"evil.so\"\n.op\n.end\n",
+            "t\nV1 a 0 1\nA1 [a] a null [b] p\n.model p d_process process_file=\"prog\"\n.op\n.end\n",
+            "t\nV1 a 0 1\n.model cnt d_cosim,simulation=\"evil.so\"\n.op\n.end\n",
+            // A deck ngspice reads as a control script.
+            "*ng_script\nosdi evil.osdi\n",
+            // Loading code from inside a control block (off by default, and
+            // refused even when on: see the policy tests).
+            "t\nV1 a 0 1\n.control\nosdi evil.osdi\n.endc\n.op\n.end\n",
+            // Including the library as a netlist file.
+            "t\nV1 a 0 1\n.include evil.so\n.op\n.end\n",
+        ] {
+            let netlist = netlist::parse(deck);
+            let err = runner
+                .run_netlist(
+                    &project,
+                    "deck.cir",
+                    &netlist,
+                    &[],
+                    None,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, RunError::Policy(_) | RunError::Netlist(_)),
+                "{deck:?} was not refused: {err:?}"
+            );
+        }
+        // Nothing ran: no run was kept.
+        assert!(runner.latest("deck.cir").is_none());
+    }
+
     #[tokio::test]
     async fn pdk_devices_need_the_project_to_name_a_pdk() {
         let (_d, runner, project, _) = pdk_setup(None);

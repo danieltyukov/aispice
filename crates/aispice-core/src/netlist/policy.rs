@@ -133,6 +133,14 @@ const FOREIGN: &[&str] = &[
     "osdi",
 ];
 
+/// How a deck that ngspice reads as a control script starts.
+const SCRIPT_MARK: &str = "*ng_script";
+
+/// Control commands that load compiled code (`osdi`, `pre_osdi`,
+/// `codemodel`) or run another file of commands (`source`), refused even in
+/// a control block the user's setting allows.
+const CONTROL_LOADERS: &[&str] = &["osdi", "pre_osdi", "codemodel", "source"];
+
 /// File types that hold compiled code a simulator would load and run.
 const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
 
@@ -442,6 +450,16 @@ fn check_lines(
     let mut in_control = false;
     for (i, logical) in lines.iter().enumerate() {
         let line = &logical.text;
+        // A deck whose title is `*ng_script` is read by ngspice as a script
+        // of control commands, not a netlist. Refused on any line, comment
+        // or not, in a deck or a file it includes.
+        if line.to_ascii_lowercase().starts_with(SCRIPT_MARK) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: "`*ng_script` makes ngspice read the deck as a script of control commands, which can load code and write files; it is not allowed".into(),
+            });
+            continue;
+        }
         // ngspice acts on a title that starts with a dot (it includes the
         // file a `.include` title names), so such a title is checked like
         // any other line. Xyce never reads the title.
@@ -463,7 +481,16 @@ fn check_lines(
             in_control = false;
             continue;
         }
+        // Control blocks are allowed only by the user's setting, and even
+        // then never load compiled code or another file of commands: the
+        // policy cannot follow what those would run.
         if in_control {
+            if let Some(reason) = control_loads_code(&lower) {
+                out.push(Violation {
+                    line: line.clone(),
+                    reason,
+                });
+            }
             continue;
         }
         // On any line, not only `.model` cards: the words are read as
@@ -631,6 +658,23 @@ fn code_running_model(lower: &str) -> Option<String> {
                 "`{w}=` names native code for an XSPICE model to load or run; a deck cannot set it"
             )
         })
+}
+
+/// Why a line inside an allowed control block is refused: it loads
+/// compiled code, runs a file of commands, or names an XSPICE model or
+/// parameter that does (`circbyline`, `altermod`). The command is the first
+/// word, ended by whitespace or any of `=(),;`.
+fn control_loads_code(lower: &str) -> Option<String> {
+    let command = lower
+        .split(|c: char| c.is_whitespace() || "=(),;".contains(c))
+        .find(|w| !w.is_empty())
+        .unwrap_or("");
+    if CONTROL_LOADERS.contains(&command) {
+        return Some(format!(
+            "`{command}` in a control block loads compiled code or runs a file of commands the policy cannot check; it is refused even with control blocks enabled"
+        ));
+    }
+    code_running_model(lower)
 }
 
 /// The words of a line as ngspice's parser reads a card (`INPgetTok`):
@@ -1789,6 +1833,67 @@ mod tests {
             ]
         );
         assert!(ngspice_words(" ,=() ").is_empty());
+    }
+
+    /// A deck ngspice would read as a control script (`*ng_script` title)
+    /// is refused, on any line and in an included file, so it never runs as
+    /// a script instead of a netlist.
+    #[test]
+    fn ng_script_decks_are_refused() {
+        let d = temp("ngscript");
+        std::fs::write(d.join("script.lib"), "* x\n*ng_script\nosdi x.osdi\n").unwrap();
+        let policy = policy_at(&d);
+        for deck in [
+            "*ng_script\necho hi\n".to_string(),
+            "*NG_SCRIPT\nosdi x.osdi\n".to_string(),
+            "  *ng_script\nshell id\n".to_string(),
+            "t\n.include script.lib\n".to_string(),
+        ] {
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("ng_script")
+                    || v.reason.contains("confidential")
+                    || v.reason.contains("native")),
+                "{deck}: {v:?}"
+            );
+            assert!(!v.is_empty(), "{deck}");
+        }
+    }
+
+    /// Even with control blocks enabled, a control block may not load
+    /// compiled code or `source` another file of commands; `osdi`,
+    /// `pre_osdi`, `codemodel` and `source` are refused there, and a plain
+    /// control command still runs.
+    #[test]
+    fn a_control_block_cannot_load_code_even_when_enabled() {
+        let d = temp("control-loaders");
+        let mut policy = policy_at(&d);
+        policy.allow_control_blocks = true;
+        for line in [
+            "osdi /tmp/x.osdi",
+            "pre_osdi /tmp/x.osdi",
+            "codemodel /tmp/x.cm",
+            "source /tmp/x.cir",
+            "SOURCE /tmp/x.cir",
+            "source\t/tmp/x.cir",
+        ] {
+            let deck = format!("t\n.control\n{line}\n.endc\n.end\n");
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("control block")),
+                "{line}: {v:?}"
+            );
+        }
+        // A d_cosim card written inside a control block is refused too.
+        let deck = "t\n.control\n.model q d_cosim simulation=\"x.so\"\n.endc\n.end\n";
+        assert!(
+            check(deck, &policy)
+                .iter()
+                .any(|v| v.reason.contains("native")),
+            "{deck}"
+        );
+        // An ordinary control command still runs.
+        assert!(check("t\n.control\nrun\nprint v(a)\n.endc\n.end\n", &policy).is_empty());
     }
 
     #[test]
