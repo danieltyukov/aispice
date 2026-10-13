@@ -622,18 +622,24 @@ pub async fn lef(
         ("AISPICE_LEF", out.display().to_string()),
         ("AISPICE_PINS", pins.join(" ")),
     ];
-    let res = tools::magic(programs, run.path(), &files.magicrc, &script, &env, cancel).await?;
-    if !res.success() || !out.is_file() {
+    let access = tools::Access::new().read(&files.root).read(gds);
+    let res = tools::magic(
+        programs,
+        &run,
+        &files.magicrc,
+        &script,
+        &env,
+        &access,
+        cancel,
+    )
+    .await?;
+    if !res.success() || !tools::is_output(&out) {
         return Err(LayoutError::Failed {
             program: "Magic (writing the LEF abstract)".into(),
             message: tools::tail(&res.combined(), 10),
         });
     }
-    let size = std::fs::metadata(&out).map(|x| x.len()).unwrap_or(0);
-    if size > MAX_LEF_BYTES {
-        return Err(LayoutError::Input("the LEF abstract is too large".into()));
-    }
-    let text = std::fs::read_to_string(&out).map_err(|e| LayoutError::Io(e.to_string()))?;
+    let text = tools::read_output_text(&out, MAX_LEF_BYTES)?;
     let macros = parse_lef(&text).map_err(|e| LayoutError::Input(format!("Magic's LEF: {e}")))?;
     let found = macros
         .get(&m.name)

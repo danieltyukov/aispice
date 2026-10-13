@@ -119,6 +119,7 @@ dependencies = [
  "aispice-core",
  "aispice-sim",
  "futures",
+ "libc",
  "roxmltree 0.21.1",
  "schemars 1.2.2",
  "serde",
@@ -128,6 +129,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

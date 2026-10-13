@@ -138,12 +138,13 @@ async fn a_block_with_pcells_in_its_context_information_is_refused() {
     let cancel = CancellationToken::new();
     let out = tools::klayout(
         &programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("pdk_python", files.python.display().to_string()),
             ("out", blk.display().to_string()),
         ],
+        &tools::Access::new().read(&files.root).write_file(&blk),
         &cancel,
     )
     .await

@@ -229,18 +229,29 @@ pub async fn draw(
     cancel: &CancellationToken,
 ) -> Result<(), LayoutError> {
     tools::check_path(dir)?;
-    let json = dir.join("plan.json");
-    std::fs::write(&json, plan.to_string()).map_err(|e| LayoutError::Io(e.to_string()))?;
     let run = RunDir::new()?;
+    let json = run.file("plan.json", plan.to_string().as_bytes())?;
     let script = run.script("chip.py", CHIP_SCRIPT)?;
+    // The script reads the library files the plan names (IHP's IO cells,
+    // the blocks) and writes the chip into `dir`.
+    let mut access = tools::Access::new().read(&files.root).write(dir);
+    if let Some(libs) = plan.get("libraries").and_then(Value::as_array) {
+        for file in libs
+            .iter()
+            .filter_map(|l| l.get("file").and_then(Value::as_str))
+        {
+            access = access.read(file);
+        }
+    }
     let out = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("pdk_python", files.python.display().to_string()),
             ("plan", json.display().to_string()),
         ],
+        &access,
         cancel,
     )
     .await?;
@@ -280,39 +291,41 @@ pub async fn assemble(
     let lvs_view = dir.join("lvs_view.gds");
     let data = draw_plan(spec, plan, io, blocks, &nofill, &lvs_view);
     draw(programs, files, &data, dir, cancel).await?;
-    if !nofill.is_file() || !lvs_view.is_file() {
+    if !tools::is_output(&nofill) || !tools::is_output(&lvs_view) {
         return Err(LayoutError::Failed {
             program: "KLayout (assembling the chip)".into(),
             message: "it wrote no chip".into(),
         });
     }
 
-    let run = RunDir::new()?;
-
     // Fill comes from aispice's own KLayout script: IHP's filler keep-outs,
-    // with the metals filled only as far as the chip's density needs.
+    // with the metals filled only as far as the chip's density needs. Each
+    // run gets a fresh folder.
+    let run = RunDir::new()?;
     let fill = dir.join("fill.gds");
     let fill_script = run.script("fill.drc", FILL_SCRIPT)?;
     let out = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &fill_script,
         &[
             ("input", nofill.display().to_string()),
             ("top", spec.name.clone()),
             ("output", fill.display().to_string()),
         ],
+        &tools::Access::new().read(&files.root).write(dir),
         cancel,
     )
     .await?;
-    if !out.success() || !fill.is_file() {
+    if !out.success() || !tools::is_output(&fill) {
         return Err(failed("KLayout (fill)", &out));
     }
     let gds = dir.join(format!("{}.gds", spec.name));
+    let run = RunDir::new()?;
     let merge = run.script("merge.py", MERGE_SCRIPT)?;
     let out = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &merge,
         &[
             ("chip", nofill.display().to_string()),
@@ -321,10 +334,11 @@ pub async fn assemble(
             ("fill_top", format!("{}_fill", spec.name)),
             ("out", gds.display().to_string()),
         ],
+        &tools::Access::new().write(dir),
         cancel,
     )
     .await?;
-    if !out.success() || !gds.is_file() {
+    if !out.success() || !tools::is_output(&gds) {
         return Err(failed("KLayout (merging the fill)", &out));
     }
     Ok(Assembled { gds, lvs_view })

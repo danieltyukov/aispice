@@ -302,6 +302,7 @@ jobs:
           cargo test -p aispice-layout --test drc_ihp -- --nocapture
           cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact edge_pinned
           cargo test -p aispice-layout --test chip_script_ihp -- --nocapture
+          cargo test -p aispice-layout --test layout_sandbox -- --nocapture
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
 
       # Only when every step above passed (a failed run saves nothing, as with

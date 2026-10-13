@@ -218,6 +218,7 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             "ltspice_library": runner.ltspice_lib_dirs(),
             "pdks": pdk_lines(&runner),
             "layout_tools": layout_lines(&runner),
+            "layout_sandbox": rt.block_on(aispice_tools::layout::sandbox_description()),
             "behavioral_models": rt.block_on(behavioral_lines(&runner)),
             "providers": configured.iter().map(|k| serde_json::json!({"provider": k.provider, "source": k.source.to_string()})).collect::<Vec<_>>(),
             "config": Config::default_path(),
@@ -270,6 +271,11 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
     for l in layout_lines(&runner) {
         println!("  {l}");
     }
+    println!(
+        "  {:8} {}",
+        "sandbox",
+        rt.block_on(aispice_tools::layout::sandbox_description())
+    );
     println!("\nBehavioural models (Verilog-A, Verilog co-simulation on ngspice):");
     for l in rt.block_on(behavioral_lines(&runner)) {
         println!("  {l}");

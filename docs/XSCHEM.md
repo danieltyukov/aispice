@@ -65,7 +65,7 @@ xschem evaluates Tcl from the files it opens: `tcleval(...)` property values, `@
    - read the system, its own install, the library and model folders, its input and the rc;
    - execute only itself, a shell, awk and gzip;
    - write only its private output, home and tmp folders, plain files and folders only;
-   - write no file over 64 MiB, and start at most 128 processes and threads beyond what you run already.
+   - write no file over 64 MiB, and start at most 1024 processes and threads beyond what you run when it starts (the kernel counts all of yours, so the margin also has to absorb your other work growing meanwhile; it still stops a fork bomb at once).
 
    It reaches no network, socket, other process or IPC, and it is killed with everything it started when it exits, times out or is cancelled. Nothing caps the total bytes written across its folders.
 

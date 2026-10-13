@@ -110,13 +110,14 @@ impl Library {
     }
 }
 
-/// Read a GDSII file.
+/// Read a GDSII file. It is opened without following a link, as a plain
+/// file only: the callers give real paths, and a layout program's output
+/// could be anything a run left at that name.
 pub fn read(path: &Path) -> Result<Library, GdsError> {
-    let meta = std::fs::metadata(path).map_err(|e| GdsError::Io(e.to_string()))?;
-    if meta.len() > MAX_BYTES {
-        return Err(GdsError::TooLarge);
-    }
-    let bytes = std::fs::read(path).map_err(|e| GdsError::Io(e.to_string()))?;
+    let bytes = crate::tools::read_output(path, MAX_BYTES).map_err(|e| match e {
+        crate::tools::LayoutError::Input(_) => GdsError::TooLarge,
+        e => GdsError::Io(e.to_string()),
+    })?;
     parse(&bytes)
 }
 
