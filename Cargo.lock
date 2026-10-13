@@ -126,6 +126,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -161,6 +162,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "futures",
+ "same-file",
  "schemars 1.2.2",
  "serde",
  "serde_json",

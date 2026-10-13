@@ -449,7 +449,6 @@ pub(crate) fn plan(
         read,
         exec: Vec::new(),
         write: vec![run],
-        unnamed_tmp: false,
         profile: Profile::NativeCode,
         limits: Limits {
             file_size: Some(MAX_FILE),

@@ -1,0 +1,128 @@
+# Written by aispice. Fill for a chip: Activ, GatPoly, Metal1 to Metal5,
+# TopMetal1 and TopMetal2 filler shapes inside the seal ring, keeping the
+# spacing IHP's filler rules ask from everything drawn (the keep-outs of
+# IHP's own KLayout filler macros), and with Metal1 to Metal5 filled only as
+# densely as the chip needs to land in the middle of IHP's global density
+# window (35 to 60 %): a pad ring is so dense in metal that filling the rest
+# of a small chip fully would push it past the maximum.
+#
+# Inputs come as -rd variables, checked here and never evaluated: `input`
+# (the chip, with its seal ring), `top` (its top cell), `output` (the fill
+# layout to write, with top cell `<top>_fill`).
+
+unless $top.to_s =~ /\A[A-Za-z_][A-Za-z0-9_]{0,127}\z/
+  raise "bad cell name"
+end
+[$input, $output].each do |p|
+  if p.to_s.empty? || !p.to_s.start_with?("/") || p.to_s =~ /[\x00-\x1f]/
+    raise "bad path"
+  end
+end
+
+source($input, $top)
+target($output, "#{$top}_fill")
+flat
+
+edge_seal = input(39, 0)
+edge_seal_box = input(39, 4)
+pr_boundary = input(189, 0)
+trans = input(26, 0)
+no_met_filler = input(160, 0)
+activ = input(1, 0)
+activ_filler = input(1, 22)
+activ_nofill = input(1, 23)
+gatpoly = input(5, 0)
+gatpoly_filler = input(5, 22)
+gatpoly_nofill = input(5, 23)
+cont = input(6, 0)
+psd = input(14, 0)
+nsd_block = input(7, 21)
+salblock = input(28, 0)
+nwell = input(31, 0)
+nbulay = input(32, 0)
+pwell_block = input(46, 21)
+
+# The chip as IHP's density deck measures it: prBoundary, else the seal
+# ring's boundary, else everything.
+chip_area =
+  if !pr_boundary.is_empty?
+    pr_boundary.merged.area
+  elsif !edge_seal_box.is_empty?
+    edge_seal_box.merged.area
+  else
+    extent.area
+  end
+inside = edge_seal.holes
+if inside.is_empty?
+  raise "the chip has no seal ring to fill inside"
+end
+
+def grown(layer, d)
+  l = layer.dup
+  l.size(d, d, "square_limit")
+  l
+end
+
+def ring(layer, d)
+  outer = grown(layer, d)
+  inner = layer.dup
+  inner.size(-d, -d, "square_limit")
+  outer - inner
+end
+
+# Activ and GatPoly: IHP's interleaved patterns and keep-outs, with the
+# GatPoly bars 7.5 um apart in a row rather than 10: a small chip with a pad
+# ring otherwise ends just under the 15 % GatPoly minimum (the bars keep
+# 2.5 um between them, the filler spacing rule asks 0.8).
+act_fill = fill_pattern("aispice_act_fill").shape(1, 22, box(0, 0, 3.4, 3.4))
+act_fill.origin(-0.8, 0)
+act_fill.dim(5, 3.4)
+gp_fill = fill_pattern("aispice_gp_fill").shape(5, 22, box(0, 0, 5, 1.4))
+gp_fill.origin(0, -1)
+gp_fill.dim(5, 3.4)
+excl_act = grown(gatpoly, 1.1) | grown(cont, 1.1) | grown(activ, 0.42) |
+  grown(trans, 1.0) | ring(nwell, 1.0) | ring(pwell_block, 1.5) | activ_nofill
+excl_gp = grown(gatpoly_filler, 0.8) | grown(activ, 1.1) | grown(gatpoly, 1.1) |
+  grown(cont, 1.1) | grown(psd, 1.1) | grown(nsd_block, 1.1) | grown(salblock, 1.1) |
+  grown(trans, 1.1) | ring(nwell, 1.1) | gatpoly_nofill
+(inside - excl_act - excl_gp).fill(act_fill, hstep(5.0, 2.5), vstep(0, 5.0))
+(inside - excl_gp - excl_act).fill(gp_fill, hstep(7.5, 0), vstep(5.0, 2.5))
+
+# Metal1 to Metal5: 2 um squares at the pitch that brings the layer to
+# 47.5 % of the chip, the middle of the 35 to 60 % window, counting what is
+# drawn; the pitch is never tighter than the 0.42 um filler spacing allows.
+target_density = 0.475
+square = 2.0
+[[8, "Metal1"], [10, "Metal2"], [30, "Metal3"], [50, "Metal4"], [67, "Metal5"]].each do |gds, name|
+  metal = input(gds, 0)
+  filler = input(gds, 22)
+  nofill = input(gds, 23)
+  slit = input(gds, 24)
+  drawn = (metal | filler).merged.area
+  room = inside - grown(filler, 0.42) - grown(metal, 0.42) - grown(trans, 1.0) - nofill - slit - no_met_filler
+  need = target_density * chip_area - drawn
+  room_area = room.merged.area
+  if need <= 0 || room_area <= 0
+    puts "aispice: #{name} is at #{(100.0 * drawn / chip_area).round(1)} %; no fill"
+    next
+  end
+  # Squares fill about 85 % of the pitch cells a region offers them.
+  wanted = [need / (room_area * 0.85), 1.0].min
+  pitch = [square / Math.sqrt(wanted), square + 0.42].max
+  pitch = (pitch / 0.005).ceil * 0.005
+  pattern = fill_pattern("aispice_m#{gds}_fill").shape(gds, 22, box(0, 0, square, square))
+  room.fill(pattern, hstep(pitch), vstep(pitch))
+  puts "aispice: #{name} is at #{(100.0 * drawn / chip_area).round(1)} %; filling at #{pitch} um pitch"
+end
+
+# TopMetal1 and TopMetal2: IHP's pattern and keep-outs.
+[[126, "TopMetal1"], [134, "TopMetal2"]].each do |gds, name|
+  metal = input(gds, 0)
+  filler = input(gds, 22)
+  nofill = input(gds, 23)
+  slit = input(gds, 24)
+  pattern = fill_pattern("aispice_tm#{gds}_fill").shape(gds, 22, box(0, 0, 5.0, 10.0))
+  room = inside - grown(filler, 3.0) - grown(metal, 3.0) - grown(trans, 4.9) - nofill - slit - no_met_filler
+  room.fill(pattern, hstep(8.05), vstep(13.05))
+end
+puts "aispice: wrote the fill"

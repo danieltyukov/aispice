@@ -6,10 +6,12 @@
 //! program runs from an argument vector in a private folder, with scripts
 //! that are aispice's own and parameters passed as data.
 
+pub mod chip;
 pub mod drc;
 pub mod extract;
 pub mod gds;
 pub mod generator;
 pub mod lvs;
+pub mod macro_export;
 pub mod render;
 pub mod tools;

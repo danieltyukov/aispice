@@ -269,7 +269,6 @@ pub fn netlist_plan(x: &Xschem, input: &Path, run: &Run, dirs: &Dirs) -> Plan {
             .filter(|p| p.exists())
             .collect(),
         write: vec![dirs.out.clone(), dirs.home.clone(), dirs.tmp.clone()],
-        unnamed_tmp: false,
         profile: Profile::Denylist,
         limits: limits(),
     }

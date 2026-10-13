@@ -216,6 +216,28 @@ Extraction runs Magic's `extract` and `ext2spice` with coupling capacitance (cap
 
 Reports, logs, KLayout's extracted netlist and Magic's netlists are kept in `.aispice/layout/<run>/`.
 
+### Export a block as a macro package
+
+```sh
+aispice macro export ota.asc --layout ota.gds --name ota5t --process tt,ss,ff --temp=-40,27,125
+aispice macro check macros/ota5t.macro --pdk ihp-sg13g2
+```
+
+Export needs a layout made by `layout generate` (its `.layout.json` names the generator and parameters) and a PDK folder that is a git checkout, since a package records the PDK commit it was checked with. The block is drawn again with every pin on a Metal4 column at its bottom edge, 1.2 um apart, and the circuit's ground (net `0`) named `vss` (`--ground` changes it). Pins get their directions from the block's transistors (gates only: input; a drain that is not a diode: output; supplies by name); `--pins '{"clk": {"kind": "clock"}}'` changes any. The specs come from the circuit's `.specs` file or `--specs`, at tt and 27 C unless corners are given; every value after layout must meet its limits. The package goes to `macros/<name>.macro/` (or `--out`) only when it passes the same checks `macro check` runs, in one approved write that `history` can undo. ChipLeap's `chipleap macro check` accepts it too.
+
+### Assemble a chip
+
+```sh
+aispice chip plan demo.chip.toml       # floorplan and routes, nothing written
+aispice chip assemble demo.chip.toml   # draw, fill, DRC and LVS; writes demo.chip/
+```
+
+A chip needs, besides the above, IHP-Open-PDK's IO library (`libs.ref/sg13g2_io`) and, for blocks with standard cells, its standard-cell netlist (`libs.ref/sg13g2_stdcell/cdl`). The description names the chip, optionally `pad_pitch_um` (default 100), the blocks (`[[macros]]` with `instance`, `package`, optional `at_um` in the core and `nets`) and the pads (`[[pads]]` with `net`, `side` and `kind`: `analog`, `input`, `output`, `vdd`, `vss`, `iovdd`, `iovss`; analog pads take `resistor = true` to reach the core through the cell's secondary protection). Every package is checked against the project's PDK first; a different PDK commit is a warning.
+
+From the die edge inward, a chip has IHP's seal ring, a band of 70 um bond pads that abut the pad cells, the IO ring (corners, pads and fillers that close each side exactly), and the core with the blocks. Supply pads get straps into the ring's rails (`vdd` on Metal3, `vss` on Metal4), and every net, supplies included, is routed on Metal3 and Metal4 with 0.3 um wires on a 0.6 um grid, which keeps the spacing rules by construction; the supply wires are as narrow as the signals, enough for small blocks. Fill keeps IHP's filler spacing rules and brings Metal1 to Metal5 to the middle of the 35 to 60 % density window. DRC runs IHP's main, extra, antenna and density decks on the finished chip, without IHP's recommended rules (the pad cells with their bond pads break the recommended pad rules, as in IHP's and Croc's chips). LVS compares the chip without its pad cells, bond pads, seal ring and fill against the blocks' netlists, with each pad's net as a port labelled where it meets its pad: IHP's LVS deck cannot read the IO cells' netlists, so their insides are covered by DRC and by IHP, and a pad wired to the wrong net still fails.
+
+`assemble` writes `<name>.chip/` beside the description (or `--out`): `<name>.gds`, `<name>.lvs.spice`, `<name>.chip.json` (floorplan, routes and results) and `evidence/drc.json` and `evidence/lvs.json`, in one approved write. It replaces only a folder it made. The demo in `crates/aispice-tools/tests/chip_ihp.rs` (an OTA, a comparator and 13 pads) takes about four minutes.
+
 ## Behavioural models and co-simulation
 
 A project can describe blocks by behaviour and simulate them with transistors and logic on ngspice:
@@ -358,7 +380,9 @@ Cursor, Claude Desktop, and other clients that take a JSON server list:
 | `.aispice/history/` | A snapshot before every edit, for undo |
 | `.aispice/runs/` | Recent simulation output |
 | `<cell>.gds`, `<cell>.layout.json` | A generated layout and how it was made (template, roles, parameters, devices, dummies). Commit both. |
-| `.aispice/layout/` | DRC and LVS reports, logs and extracted netlists |
+| `macros/<name>.macro/` | A macro package from `macro export`. Commit it, or hand it to ChipLeap. |
+| `<name>.chip.toml`, `<name>.chip/` | A chip description and what `chip assemble` made of it |
+| `.aispice/layout/` | DRC and LVS reports, logs, extracted netlists, and the run folders of exports and chips |
 
 Add `.aispice/` to `.gitignore` unless you want history in version control. Chat sessions from the desktop app are kept in your user data folder, not in the project.
 
