@@ -448,12 +448,20 @@ fn bwrap_args(plan: &Plan, program: &Path, programs: usize) -> Vec<OsString> {
     }
     // bubblewrap sets PWD to the new working folder just before it runs
     // the program, after every --setenv and --unsetenv, so an --unsetenv
-    // cannot remove it. `env -u PWD` does, as the last step before the
-    // program (the same process, so the same pid), and the program gets
-    // exactly the plan's environment, as under Landlock.
+    // cannot remove it. `env` puts it back as the plan has it (unset, or
+    // the plan's value) as the last step before the program, in the same
+    // process and so with the same pid, and the program gets exactly the
+    // plan's environment, as under Landlock.
     push(&[&"--"]);
     if let Some(env) = which("env").map(|e| real(&e)) {
-        push(&[&env, &"-u", &"PWD"]);
+        match plan.env.iter().find(|(k, _)| k == "PWD") {
+            Some((_, v)) => {
+                let mut set = OsString::from("PWD=");
+                set.push(v);
+                push(&[&env, &set]);
+            }
+            None => push(&[&env, &"-u", &"PWD"]),
+        }
     }
     push(&[&program]);
     a.extend(plan.args.iter().cloned());

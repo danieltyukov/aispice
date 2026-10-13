@@ -109,7 +109,8 @@ fn the_bubblewrap_command_shows_only_the_plan() {
         .collect();
     assert_eq!(fds, want.iter().collect::<Vec<_>>());
     // The program runs through `env -u PWD`, which removes the PWD
-    // bubblewrap sets after every other variable.
+    // bubblewrap sets after every other variable; a plan that sets PWD
+    // gets its own value back.
     let tail = args.iter().position(|a| a == "--").unwrap();
     let env = which("env").unwrap().canonicalize().unwrap();
     assert_eq!(
@@ -122,6 +123,10 @@ fn the_bubblewrap_command_shows_only_the_plan() {
             "--flag"
         ]
     );
+    plan.env.push(("PWD".into(), "/elsewhere".into()));
+    let args = strings(&sandbox.command(&plan).unwrap().args);
+    let tail = args.iter().position(|a| a == "--").unwrap();
+    assert_eq!(args[tail + 2], "PWD=/elsewhere", "{args:?}");
 }
 
 /// In every sandbox here, the program sees exactly the plan's environment:
@@ -137,22 +142,28 @@ async fn a_program_sees_exactly_the_plans_environment() {
         for profile in [Profile::Denylist, Profile::NativeCode] {
             let tmp = tempfile::tempdir().unwrap();
             let dir = tmp.path().canonicalize().unwrap();
-            let mut plan = plan_in(&dir, &env, profile);
-            plan.env.push(("AISPICE_PROBE".into(), "1 2".into()));
-            let spec = sandbox.command(&plan).unwrap();
-            let out = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
-                .await
-                .unwrap();
-            assert!(out.success(), "{}: {}", sandbox.describe(), out.combined());
-            let mut seen: Vec<String> = out.stdout.lines().map(str::to_string).collect();
-            let mut want: Vec<String> = plan
-                .env
-                .iter()
-                .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
-                .collect();
-            seen.sort();
-            want.sort();
-            assert_eq!(seen, want, "{} {profile:?}", sandbox.describe());
+            // Without PWD, and with a PWD of the plan's own.
+            for pwd in [None, Some("/somewhere/else")] {
+                let mut plan = plan_in(&dir, &env, profile);
+                plan.env.push(("AISPICE_PROBE".into(), "1 2".into()));
+                if let Some(p) = pwd {
+                    plan.env.push(("PWD".into(), p.into()));
+                }
+                let spec = sandbox.command(&plan).unwrap();
+                let out = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert!(out.success(), "{}: {}", sandbox.describe(), out.combined());
+                let mut seen: Vec<String> = out.stdout.lines().map(str::to_string).collect();
+                let mut want: Vec<String> = plan
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+                    .collect();
+                seen.sort();
+                want.sort();
+                assert_eq!(seen, want, "{} {profile:?}", sandbox.describe());
+            }
         }
     }
 }
