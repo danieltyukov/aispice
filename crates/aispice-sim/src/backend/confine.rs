@@ -991,9 +991,9 @@ fn plan_seccomp(c: &Confinement) -> io::Result<Seccomp> {
     let programs = profile_programs(profile)?;
     if c.seccomp_as_fds() {
         // bubblewrap runs the program as pid 2 of its PID namespace, under
-        // its reaper at pid 1, and makes it lead its own session and group
-        // (`--new-session`), so the signal program is written with that pid
-        // here and goes first, as below.
+        // its reaper at pid 1, so the signal program is written with that
+        // pid here and goes first, as below. The program does not lead its
+        // own group there; it reaches its group by 0.
         let mut all = Vec::new();
         if signals == Signals::SelfOnly {
             let mut s = SignalProgram::new();

@@ -271,6 +271,8 @@ async fn landlock_narrows_exec_and_signals() {
 /// every sandbox here: `kill(-1, 0)` fails with an errno at Landlock ABI 6
 /// too, where the signal scope alone would let it report success, and under
 /// bubblewrap, whose namespace pid the signal program is written with.
+/// Under Landlock the program leads its own group, so it also reaches the
+/// group by minus its pid; under bubblewrap it does not lead one.
 #[cfg(unix)]
 #[tokio::test]
 async fn native_code_cannot_signal_everyone() {
@@ -280,11 +282,17 @@ async fn native_code_cannot_signal_everyone() {
         let script = "#!/bin/sh\nprintf 'ok\\n' > result\n\
             kill -0 $$ && printf 'self\\n' >> result\n\
             kill -0 0 && printf 'group\\n' >> result\n\
-            kill -0 -$$ && printf 'own group\\n' >> result\n\
-            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n";
+            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n\
+            kill -0 -$$ 2>/dev/null && printf 'own group\\n' >> result\n";
         let text = run_script(&sandbox, &dir, script, Profile::NativeCode).await;
         assert!(
-            text.starts_with("ok\nself\ngroup\nown group\n"),
+            text.starts_with("ok\nself\ngroup\n"),
+            "{}: {text}",
+            sandbox.describe()
+        );
+        assert_eq!(
+            text.ends_with("own group\n"),
+            !sandbox.is_bwrap(),
             "{}: {text}",
             sandbox.describe()
         );
