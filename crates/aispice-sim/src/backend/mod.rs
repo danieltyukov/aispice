@@ -14,6 +14,7 @@
 #[cfg(target_os = "linux")]
 pub mod confine;
 pub mod ltspice;
+pub mod native_code;
 pub mod ngspice;
 pub mod process;
 pub mod spectre;
@@ -114,6 +115,14 @@ pub struct SimJob {
     /// private run folder, checks each SHA-256 and loads them; the other
     /// backends refuse a job that has any.
     pub libraries: Vec<std::sync::Arc<crate::behavioral::Library>>,
+    /// What the deck reads of the user's: the files it includes and names,
+    /// as the netlist policy resolved them, and the folder of the project's
+    /// PDK. A run that loads `libraries` may read these and nothing else of
+    /// the user's.
+    pub reads: Vec<PathBuf>,
+    /// The sandbox a run that loads `libraries` runs in; `None` finds one
+    /// with [`native_code::ready`] when the run starts.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 impl SimJob {
@@ -125,6 +134,8 @@ impl SimJob {
             timeout: Duration::from_secs(120),
             pdk: None,
             libraries: Vec::new(),
+            reads: Vec::new(),
+            sandbox: None,
         }
     }
 

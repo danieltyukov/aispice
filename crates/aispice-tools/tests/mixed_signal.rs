@@ -25,7 +25,7 @@ fn have(program: &str) -> bool {
 }
 
 /// Whether this machine can build and run both kinds of behavioural model.
-fn toolchain() -> bool {
+async fn toolchain() -> bool {
     let ngspice = aispice_sim::backend::which("ngspice");
     let ok = ngspice.is_some()
         && have("openvaf")
@@ -39,8 +39,18 @@ fn toolchain() -> bool {
         eprintln!(
             "skipped: needs ngspice with its d_cosim sources, OpenVAF, Verilator and a C++ compiler"
         );
+        return false;
     }
-    ok
+    if let Err(e) = aispice_sim::backend::native_code::ready(&CancellationToken::new()).await {
+        // CI makes a sandbox available; there a missing one is a failure.
+        assert!(
+            std::env::var_os("AISPICE_REQUIRE_SANDBOXES").is_none(),
+            "a sandbox is required here: {e}"
+        );
+        eprintln!("skipped: {e}");
+        return false;
+    }
+    true
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -111,7 +121,7 @@ async fn count(ws: &Arc<Workspace>, circuit: &str, at: &str) -> u32 {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_verilog_a_comparator_drives_a_cosimulated_counter() {
-    if !toolchain() {
+    if !toolchain().await {
         return;
     }
     let (dir, ws) = project("mixed_signal", RunnerConfig::default());
@@ -175,6 +185,33 @@ async fn a_verilog_a_comparator_drives_a_cosimulated_counter() {
 
 /// A deck cannot choose compiled code: no d_cosim or d_process card of its
 /// own, whatever the spelling, even in a project that declares models.
+/// A run that loads compiled models reads only the files its deck includes
+/// (and the project's PDK), not the project folder: a deck whose include
+/// includes another, by a path relative to itself, still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sandboxed_run_reads_the_files_its_deck_includes() {
+    if !toolchain().await {
+        return;
+    }
+    let (dir, ws) = project("mixed_signal", RunnerConfig::default());
+    let root = dir.path().join("mixed_signal");
+    std::fs::create_dir_all(root.join("models/sub")).unwrap();
+    std::fs::write(
+        root.join("models/bias.inc"),
+        "* bias\n.include sub/vref.inc\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("models/sub/vref.inc"), "Vinn inn 0 0.5\n").unwrap();
+    let deck = std::fs::read_to_string(root.join("ramp_counter.cir")).unwrap();
+    assert!(deck.contains("Vinn inn 0 0.5\n"));
+    std::fs::write(
+        root.join("ramp_counter_inc.cir"),
+        deck.replace("Vinn inn 0 0.5\n", ".include models/bias.inc\n"),
+    )
+    .unwrap();
+    assert_eq!(count(&ws, "ramp_counter_inc.cir", "9.9u").await, 5);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deck_cannot_name_a_library_or_a_program() {
     if !have("ngspice") {
@@ -214,7 +251,7 @@ async fn the_strongarm_template_drives_a_cosimulated_counter() {
         eprintln!("skipped: AISPICE_PDK_IHP is not set");
         return;
     };
-    if !toolchain() {
+    if !toolchain().await {
         return;
     }
     let mut pdks = Registry::default();

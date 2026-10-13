@@ -10,6 +10,7 @@
 //! one may leave a shared daemon such as wineserver running on purpose).
 
 use super::SimError;
+pub use crate::sandbox::Confinement;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -26,44 +27,6 @@ pub const OUTPUT_CAP: usize = 1 << 20;
 /// it started (wineserver) may hold them open indefinitely.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
-/// A Landlock domain to confine a child to before it execs. Each path is
-/// opened once with `O_PATH|O_NOFOLLOW` and the rule is built from that
-/// descriptor, never from a path re-resolved later, so nothing can be swapped
-/// for a symlink in between. The domain also scopes off abstract UNIX sockets
-/// and signals to other domains, and (through the handled network access)
-/// forbids every TCP bind and connect. Built in the parent and enforced in
-/// the child's `pre_exec` hook by [`super::confine`] (Linux only).
-#[derive(Debug, Clone, Default)]
-pub struct Landlock {
-    /// Files and directories the tool may read (the system, the library and
-    /// the PDK, the private input copy); a directory is also listable.
-    pub read: Vec<PathBuf>,
-    /// The only files the tool may execute: itself and its helpers.
-    pub exec: Vec<PathBuf>,
-    /// Directories the tool may write under (its private output, home, tmp).
-    pub write: Vec<PathBuf>,
-    /// Single files the tool may read and write (`/dev/null`).
-    pub rw: Vec<PathBuf>,
-}
-
-/// How a child is confined on Linux: resource limits, and an optional
-/// Landlock domain. Ignored on other systems, where it is never set. Every
-/// confined child also gets its descriptors above stderr closed on exec,
-/// is asked to die with aispice, and has its process group killed when it
-/// exits.
-#[derive(Debug, Clone, Default)]
-pub struct Confinement {
-    pub landlock: Option<Landlock>,
-    /// `RLIMIT_FSIZE`: the largest file the child may write.
-    pub rlimit_fsize: Option<u64>,
-    /// `RLIMIT_AS`: the child's address space.
-    pub rlimit_as: Option<u64>,
-    /// `RLIMIT_NPROC` as a margin: the child and everything it starts may
-    /// add at most this many processes and threads to what its user runs
-    /// when it starts.
-    pub nproc_headroom: Option<u64>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ProcessSpec {
     pub program: PathBuf,
@@ -73,7 +36,8 @@ pub struct ProcessSpec {
     /// Start from an empty environment instead of aispice's own, so the
     /// child sees only `env`.
     pub clear_env: bool,
-    /// How to confine the child before it runs (Linux only).
+    /// How to confine the child before it runs. Only Linux can; elsewhere
+    /// a spec with a confinement is refused, never run unconfined.
     pub confine: Option<Confinement>,
 }
 
@@ -209,16 +173,22 @@ pub async fn run(
     }
     #[cfg(unix)]
     cmd.process_group(0);
-    // Confine the child before it runs (resource limits, and a Landlock
-    // domain when one is given). The ruleset is built here, in the parent;
-    // the pre_exec hook only enforces it. On other systems a confinement is
-    // never set.
+    // Confine the child before it runs. The ruleset and programs are built
+    // here, in the parent; the pre_exec hook only enforces them.
     #[cfg(target_os = "linux")]
     if let Some(c) = &spec.confine {
         super::confine::apply(&mut cmd, c).map_err(|e| SimError::Spawn {
             program: spec.program.display().to_string(),
             message: format!("could not confine the process: {e}"),
         })?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    if spec.confine.is_some() {
+        return Err(SimError::Spawn {
+            program: spec.program.display().to_string(),
+            message: "confining a process needs Linux (Landlock and seccomp); it was not run"
+                .into(),
+        });
     }
     let start = Instant::now();
     let mut child = cmd.spawn().map_err(|e| SimError::Spawn {
@@ -411,7 +381,7 @@ mod tests {
         let mut spec = ProcessSpec::new("sh", &dir)
             .arg("-c")
             .arg("sleep 30 & echo $!");
-        spec.confine = Some(Confinement::default());
+        spec.confine = Some(Confinement::limits_only(Default::default()));
         let start = Instant::now();
         let out = run(&spec, Duration::from_secs(10), &CancellationToken::new())
             .await
@@ -425,6 +395,16 @@ mod tests {
         assert!(gone(pid), "background process {pid} outlived the run");
     }
 
+    /// Off Linux a confined spec is refused rather than run unconfined.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn a_confined_run_is_refused_off_linux() {
+        let mut spec = ProcessSpec::new("echo", std::env::temp_dir()).arg("ran");
+        spec.confine = Some(Confinement::limits_only(Default::default()));
+        let r = run(&spec, Duration::from_secs(10), &CancellationToken::new()).await;
+        assert!(matches!(r, Err(SimError::Spawn { .. })), "{r:?}");
+    }
+
     /// A confined child sees a process limit set relative to what its user
     /// runs, not unlimited.
     #[cfg(target_os = "linux")]
@@ -432,10 +412,10 @@ mod tests {
     async fn a_confined_run_has_a_process_limit() {
         let dir = std::env::temp_dir();
         let mut spec = ProcessSpec::new("cat", &dir).arg("/proc/self/limits");
-        spec.confine = Some(Confinement {
+        spec.confine = Some(Confinement::limits_only(crate::sandbox::Limits {
             nproc_headroom: Some(64),
-            ..Confinement::default()
-        });
+            ..Default::default()
+        }));
         let out = run(&spec, Duration::from_secs(10), &CancellationToken::new())
             .await
             .unwrap();

@@ -61,27 +61,17 @@ xschem evaluates Tcl from the files it opens: `tcleval(...)` property values, `@
 
 1. **An import never runs xschem.** It is read by aispice's own parser, its Tcl by aispice's own subset, and it is netlisted by aispice's own netlister, which follows xschem's step by step. No flag, environment variable, tool input or project file runs xschem on it. Everything an import produces (code-block SPICE, directives, model names, include and lib lines) passes aispice's netlist policy before it is written or simulated, and an import never opens a file outside the project or a registered PDK because of a path in the `.sch`.
 2. **An export writes nothing xschem would evaluate, and xschem runs on it only after you approve the file.** Every value in an export comes from the `.asc`, so the export writer lets a value reach the file only where it stays literal: an instance whose values or nets a symbol's Tcl would read gets a plain `format` of its own, or becomes its SPICE line in a code block, and anything holding `tcleval` is left out with a finding. The written file is read back as xschem reads it and the export fails if any property does not round-trip. Only this text is ever given to xschem, and aispice hands it over as text: the sandbox code writes it into a fresh private folder itself, so there is no path for anything else to stand in for.
-3. **The export check runs in a sandbox anyway, as defense in depth.** aispice uses, in order:
-   - **bubblewrap** (`bwrap`) where it can start: new user, PID, IPC, UTS and network namespaces (no network at all), no further user namespace inside it on bubblewrap 0.8 and later (`--disable-userns`, checked with `--assert-userns-disabled`), the system folders and xschem's install read-only, the library, model and input folders read-only, a private `/tmp` and `HOME`, and one writable folder for the netlist;
-   - else **Landlock** at ABI 6 or later (Linux 6.12 and later), at a hard requirement so a kernel that cannot enforce all of it is refused rather than used with a weaker sandbox, together with a **seccomp** filter. Landlock lets xschem read the system, the library, the PDK and its input; write only its private folders, and there only plain files and folders; make no TCP connection; open no abstract UNIX socket; and signal nothing outside its sandbox. Execute is granted only on xschem, the helpers it runs (a shell, awk, gzip) and the loader; that keeps it from starting other programs by path but is not a boundary on its own, since the loader can run any readable binary. seccomp denies creating or using any socket (so no TCP, UDP, netlink or UNIX-socket connection, including to the session bus), io_uring, tracing or reading another process or taking its descriptors, the keyring, BPF, perf, userfaultfd, System V shared memory, message queues and semaphores and POSIX message queues (another program of yours, such as the X server's shared memory, is reachable through them without an IPC namespace), mounts, new namespaces through `unshare`, `setns` or `clone` (`clone3` is answered as unsupported so the C library uses `clone`), and leaving the process group through `setsid` or `setpgid`. On x86_64 a second filter refuses every x32 system call: those carry the x86_64 architecture with bit 30 set in the call number, so they match none of the 64-bit rules, and without it an x32 `socket` call would get through. The filters are inherited across exec;
-   - when neither is available, xschem is not run and the export is reported as not verified with xschem; the export itself is still written.
+3. **The export check runs in a sandbox anyway, as defense in depth**, the one aispice uses for every program it does not trust ([SANDBOX.md](SANDBOX.md)). That is bubblewrap where it can start, else Landlock (ABI 4 or later) with seccomp's `Denylist` profile. When neither is available, xschem is not run, the export is reported as not verified with xschem, and the export itself is still written. xschem may:
+   - read the system, its own install, the library and model folders, its input and the rc;
+   - execute only itself, a shell, awk and gzip;
+   - write only its private output, home and tmp folders, plain files and folders only;
+   - write no file over 64 MiB, and start at most 128 processes and threads beyond what you run already.
 
-   Under either sandbox xschem keeps no descriptor of aispice's but stdin, stdout and stderr (every other one is closed on exec, since Landlock does not restrict descriptors opened before it applies), may start at most 128 processes and threads beyond what you run already, writes no single file over 64 MiB, and is killed together with everything it started when it exits, times out or is cancelled (`killpg` on its process group, which it cannot leave). Under Landlock nothing caps the total bytes written across many files in its writable folders; bubblewrap's `/tmp` is a 64 MiB tmpfs, but its netlist folder is not capped either.
+   It reaches no network, socket, other process or IPC, and it is killed with everything it started when it exits, times out or is cancelled. Nothing caps the total bytes written across its folders.
 
-   The netlist xschem writes is read back through one descriptor opened without following a symlink and without blocking, so a fifo left in its place is refused rather than waited on.
+   The netlist xschem writes is read back through one descriptor opened without following a symlink and without blocking, so a fifo left in its place is refused rather than waited on. A run that ends by a signal, or leaves a netlist that is empty or stops before its `.end`, did not finish (xschem aborts that way when it cannot start a helper), and its file is not taken for xschem's netlist.
 
-   On Ubuntu 24.04 the default kernel refuses bubblewrap its user namespace (`kernel.apparmor_restrict_unprivileged_userns=1`) unless bwrap has an AppArmor profile, so aispice falls back to Landlock there. To use bubblewrap instead, add a profile that allows the namespace (this needs root), for example in `/etc/apparmor.d/bwrap`:
-
-   ```
-   abi <abi/4.0>,
-   include <tunables/global>
-   profile bwrap /usr/bin/bwrap flags=(unconfined) {
-     userns,
-     include if exists <local/bwrap>
-   }
-   ```
-
-   then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. aispice does not change system configuration; this is yours to decide.
+   On Ubuntu 24.04 bubblewrap needs an AppArmor profile to start; [SANDBOX.md](SANDBOX.md#using-bubblewrap-on-ubuntu-2404) shows one.
 
 A scan of the text (`aispice_core::xschem::safety`) runs on an export before xschem does. It is defense in depth, not a security boundary, and refuses what is known to be dangerous or not comparable:
 

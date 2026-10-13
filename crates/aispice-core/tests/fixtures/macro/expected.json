@@ -135,6 +135,40 @@
       ]
     },
     {
+      "package": "broken/lef-duplicate-macro/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lef.parse",
+          "severity": "error",
+          "file": "tiny_counter.lef",
+          "message": "cannot read the LEF: MACRO tiny_counter is defined twice"
+        }
+      ]
+    },
+    {
+      "package": "broken/liberty-duplicate-cell/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "lib.parse",
+          "severity": "error",
+          "file": "tiny_counter.lib",
+          "message": "cannot read the liberty file: cell tiny_counter is defined twice"
+        }
+      ]
+    },
+    {
       "package": "broken/lvs-fail/tiny_counter.macro",
       "pdk": null,
       "name": "tiny_counter",
@@ -259,6 +293,29 @@
       ]
     },
     {
+      "package": "broken/pdk-cell-name/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_tap\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        },
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "subcircuit \"Sg13g2_Dly\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        }
+      ]
+    },
+    {
       "package": "broken/power-pin-as-signal/tiny_counter.macro",
       "pdk": null,
       "name": "tiny_counter",
@@ -363,6 +420,23 @@
           "severity": "error",
           "file": "tiny_counter.v",
           "message": "port \"en\" is output, macro.toml says input"
+        }
+      ]
+    },
+    {
+      "package": "broken/verilog-ifdef-port/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "verilog.duplicate",
+          "severity": "error",
+          "file": "tiny_counter.v",
+          "message": "port \"en\" is declared more than once"
         }
       ]
     },

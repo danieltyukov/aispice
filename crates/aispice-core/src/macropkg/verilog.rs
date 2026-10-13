@@ -14,6 +14,19 @@ pub struct VerilogPort {
     pub direction: String,
     /// None for a scalar; Some(0) when the range is not a literal.
     pub width: Option<u64>,
+    /// How many input, output or inout declarations name it. Both sides of
+    /// an `ifdef` are read, so a port declared on both counts two.
+    pub declared: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VerilogError {
+    /// The module is declared more than once: a tool reads one of them, and
+    /// which one may depend on its defines.
+    #[error("{0}")]
+    Duplicate(String),
+    #[error(transparent)]
+    Limit(#[from] LimitError),
 }
 
 const DIRECTIONS: [&str; 3] = ["input", "output", "inout"];
@@ -212,24 +225,30 @@ fn skip_parens(toks: &[String], mut i: usize) -> usize {
 
 /// The ports of `module` in declaration order, or None if the module is
 /// absent, with the default limits.
-pub fn verilog_ports(text: &str, module: &str) -> Result<Option<Vec<VerilogPort>>, LimitError> {
+pub fn verilog_ports(text: &str, module: &str) -> Result<Option<Vec<VerilogPort>>, VerilogError> {
     verilog_ports_with(text, module, &Limits::DEFAULT)
 }
 
 /// The ports of `module` in declaration order, or None if the module is
-/// absent. Fails when the file has too many tokens or the module too many
-/// ports.
+/// absent. Fails when the module is declared more than once, and when the
+/// file has too many tokens or the module too many ports.
 pub fn verilog_ports_with(
     text: &str,
     module: &str,
     limits: &Limits,
-) -> Result<Option<Vec<VerilogPort>>, LimitError> {
+) -> Result<Option<Vec<VerilogPort>>, VerilogError> {
     let toks = tokens(&clean(text), limits)?;
-    let Some(start) = (0..toks.len().saturating_sub(1))
-        .find(|&k| (toks[k] == "module" || toks[k] == "macromodule") && toks[k + 1] == module)
-    else {
+    let mut starts = (0..toks.len().saturating_sub(1))
+        .filter(|&k| (toks[k] == "module" || toks[k] == "macromodule") && toks[k + 1] == module);
+    let Some(start) = starts.next() else {
         return Ok(None);
     };
+    if starts.next().is_some() {
+        return Err(VerilogError::Duplicate(format!(
+            "module {} is declared more than once",
+            quote(module)
+        )));
+    }
     let mut i = start + 2;
     if i < toks.len() && toks[i] == "#" {
         i = skip_parens(&toks, i + 1);
@@ -262,6 +281,7 @@ pub fn verilog_ports_with(
                         name: item[k].clone(),
                         direction: direction.clone(),
                         width,
+                        declared: 1,
                     });
                 }
             } else {
@@ -274,6 +294,7 @@ pub fn verilog_ports_with(
                     name: name.clone(),
                     direction: String::new(),
                     width: None,
+                    declared: 0,
                 });
             }
         }
@@ -283,7 +304,8 @@ pub fn verilog_ports_with(
             "module {} has more than {} ports",
             quote(module),
             limits.pins
-        )));
+        ))
+        .into());
     }
     if ansi {
         return Ok(Some(ports));
@@ -312,6 +334,7 @@ pub fn verilog_ports_with(
                 if let Some(p) = by_name.get(&item[0]).and_then(|&k| ports.get_mut(k)) {
                     p.direction = t.to_string();
                     p.width = width;
+                    p.declared += 1;
                 }
             }
             i = j;
@@ -387,5 +410,33 @@ mod tests {
             verilog_ports("module blk; endmodule", "blk"),
             Ok(Some(vec![]))
         );
+    }
+
+    #[test]
+    fn declarations_are_counted_and_a_module_is_declared_once() {
+        // As in ChipLeap's test_a_view_that_defines_something_twice_cannot_be_read.
+        let twice = "module m (input a); endmodule\nmodule m (output a); endmodule\n";
+        assert_eq!(
+            verilog_ports(twice, "m"),
+            Err(VerilogError::Duplicate(
+                r#"module "m" is declared more than once"#.into()
+            ))
+        );
+        let ports = verilog_ports(
+            "module m (a, b);\ninput a;\noutput a;\ninput b;\nendmodule\n",
+            "m",
+        )
+        .unwrap()
+        .unwrap();
+        let counts: Vec<(&str, usize)> = ports
+            .iter()
+            .map(|p| (p.name.as_str(), p.declared))
+            .collect();
+        assert_eq!(counts, [("a", 2), ("b", 1)]);
+        // Both sides of an ifdef are read.
+        let ansi = "module m (\n`ifdef SYNTHESIS\n output en,\n`else\n input en,\n`endif\n input clk);\nendmodule\n";
+        let ports = verilog_ports(ansi, "m").unwrap().unwrap();
+        let names: Vec<&str> = ports.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["en", "en", "clk"]);
     }
 }

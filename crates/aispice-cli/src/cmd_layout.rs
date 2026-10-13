@@ -18,7 +18,7 @@ async fn call(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutpu
     Ok(t.call(&ToolContext::default(), input).await)
 }
 
-fn run_tool(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutput> {
+pub fn run_tool(ws: &Arc<Workspace>, tool: &str, input: Value) -> Result<ToolOutput> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -41,7 +41,7 @@ fn print(out: &ToolOutput, json_mode: bool) {
 }
 
 /// A file's path relative to the project folder `ws` was opened on.
-fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
+pub fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
     let p = ws.project()?;
     let abs =
         std::fs::canonicalize(file).with_context(|| format!("{} not found", file.display()))?;
@@ -55,7 +55,7 @@ fn in_project(ws: &Workspace, file: &Path) -> Result<String> {
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-fn done(out: &ToolOutput, json_mode: bool, ok: bool) -> Result<ExitCode> {
+pub fn done(out: &ToolOutput, json_mode: bool, ok: bool) -> Result<ExitCode> {
     print(out, json_mode);
     if out.is_error {
         bail!("{}", out.text_content());
@@ -139,7 +139,7 @@ pub struct GenerateArgs {
     pub no_check: bool,
 }
 
-fn json_arg(what: &str, text: Option<&str>) -> Result<Value> {
+pub fn json_arg(what: &str, text: Option<&str>) -> Result<Value> {
     match text {
         Some(t) => serde_json::from_str(t).with_context(|| format!("--{what} is not JSON")),
         None => Ok(Value::Null),
@@ -249,4 +249,35 @@ pub fn check_post_layout(a: PostLayoutArgs) -> Result<ExitCode> {
         .and_then(|d| d["value"]["post"]["all_pass"].as_bool())
         .unwrap_or(false);
     done(&out, a.json_mode, pass)
+}
+
+/// `aispice chip plan|assemble`: the `chip` tool on the description's
+/// project. Exit code 1 when the chip cannot be planned, or when assembled
+/// and checked it fails DRC or LVS.
+pub fn chip(
+    spec: &Path,
+    action: &str,
+    out: Option<String>,
+    check: bool,
+    symbols: &[PathBuf],
+    json_mode: bool,
+) -> Result<ExitCode> {
+    let (ws, spec) = workspace_for(spec, symbols)?;
+    let out = run_tool(
+        &ws,
+        "chip",
+        json!({"action": action, "spec": spec, "out": out, "check": check}),
+    )?;
+    if out.is_error {
+        println!("{}", crate::cmd_agent::terminal_safe(&out.text_content()));
+        return Ok(ExitCode::from(1));
+    }
+    let r = out.data.as_ref().map(|d| &d["value"]["result"]);
+    let ok = action == "plan"
+        || !check
+        || r.is_some_and(|r| {
+            r["drc"]["rules"].as_array().is_some_and(Vec::is_empty)
+                && r["lvs"]["matched"].as_bool() == Some(true)
+        });
+    done(&out, json_mode, ok)
 }

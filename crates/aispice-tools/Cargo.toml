@@ -27,9 +27,16 @@ tempfile.workspace = true
 toml = "1"
 tracing.workspace = true
 
+# Folder identity on Windows, where std's volume serial and file index are
+# unstable; Unix reads device and inode from std.
+[target.'cfg(windows)'.dependencies]
+same-file = "1"
+
 [dev-dependencies]
 aispice-agent = { workspace = true, features = ["testing"] }
 aispice-core = { workspace = true, features = ["testing"] }
+# The test-only Landlock ABI override, for mixed_signal_landlock4.
+aispice-sim = { workspace = true, features = ["testing"] }
 similar.workspace = true
 
 [lints]

@@ -67,10 +67,42 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ngspice
 
+      # Both sandboxes for real: bubblewrap, with Ubuntu's restriction on
+      # unprivileged user namespaces lifted (aispice changes no system
+      # setting itself; this runner is throwaway), and Landlock at the
+      # kernel's ABI. The sandbox tests fail rather than skip when either is
+      # missing here.
+      - name: Sandboxes (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+          uname -r
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
+
       # The whole workspace, app shell included: formatting needs no compiling.
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
+
+      # Each crate's `testing` feature exposes entry points only tests may
+      # use (a process-wide Landlock ABI override, xschem text that is not an
+      # export). Only dev-dependencies may turn one on: no normal dependency
+      # path of a shipped binary, on any target, may.
+      - name: No test-only features in shipped binaries
+        if: runner.os == 'Linux'
+        run: |
+          for bin in aispice aispice-app; do
+            for dep in aispice-sim aispice-core aispice-agent; do
+              tree=$(cargo tree -p "$bin" -e normal,features -i "$dep" --target all)
+              if grep -q "$dep feature \"testing\"" <<<"$tree"; then
+                echo "$bin turns on $dep/testing through a normal dependency:"
+                echo "$tree"
+                exit 1
+              fi
+            done
+          done
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -93,7 +125,9 @@ jobs:
       IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
       OPENVAF_URL: https://openva.fra1.cdn.digitaloceanspaces.com/openvaf_23_5_0_linux_amd64.tar.gz
       OPENVAF_SHA256: 79c0e08ad948a7a9f460dc87be88b261bbd99b63a4038db3c64680189f44e4f0
-      KLAYOUT_URL: https://www.klayout.org/downloads/Ubuntu-24/klayout_0.30.4-1_amd64.deb
+      # The package for this version is cached; its hash is checked on every
+      # install, from the cache or the site.
+      KLAYOUT_VERSION: 0.30.4-1
       KLAYOUT_SHA256: a25e750329921de81ea35f349194768fc925f5d1aacbacffc1856af733a7be25
     steps:
       - uses: actions/checkout@v7
@@ -117,6 +151,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ngspice verilator
+
+      # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
+      # models is run under the native-code profile in each.
+      - name: Sandboxes
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
+
+      # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
+      # models is run under the native-code profile in each.
+      - name: Sandboxes
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
 
       # Only the PDK's sources are cached. The OSDI models are compiled on every
       # run instead: OpenVAF builds for the runner's own CPU, a cache restored on
@@ -166,31 +216,72 @@ jobs:
           # The mixed-signal tests compile Verilog-A with the same OpenVAF.
           echo "$RUNNER_TEMP/openvaf" >> "$GITHUB_PATH"
 
+      # www.klayout.org has timed out on CI, so the package is fetched once
+      # per version and kept in the cache.
+      - name: Restore the KLayout package
+        id: klayout-deb
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/klayout-deb
+          key: klayout-${{ env.KLAYOUT_VERSION }}-ubuntu-24.04-amd64
+
+      - name: Download KLayout
+        if: steps.klayout-deb.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/klayout-deb
+          url="https://www.klayout.org/downloads/Ubuntu-24/klayout_${KLAYOUT_VERSION}_amd64.deb"
+          for wait in 10 30 60 0; do
+            if curl -sSfL --connect-timeout 30 --max-time 600 -o ~/klayout-deb/klayout.deb "$url"; then
+              exit 0
+            fi
+            rm -f ~/klayout-deb/klayout.deb
+            [ "$wait" = 0 ] && break
+            echo "download failed; retrying in $wait s"
+            sleep "$wait"
+          done
+          echo "could not download $url" >&2
+          exit 1
+
       - name: Install KLayout
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/klayout.deb" "$KLAYOUT_URL"
-          echo "$KLAYOUT_SHA256  $RUNNER_TEMP/klayout.deb" | sha256sum -c -
-          sudo apt-get install --no-install-recommends -y "$RUNNER_TEMP/klayout.deb"
+          echo "$KLAYOUT_SHA256  $HOME/klayout-deb/klayout.deb" | sha256sum -c -
+          sudo apt-get install --no-install-recommends -y "$HOME/klayout-deb/klayout.deb"
           klayout -b -v
+
+      # Saved only after the hash check passed, so a bad download is never
+      # cached.
+      - name: Save the KLayout package
+        if: steps.klayout-deb.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/klayout-deb
+          key: klayout-${{ env.KLAYOUT_VERSION }}-ubuntu-24.04-amd64
 
       - name: PDK tests
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-sim --lib pdk::
+          cargo test -p aispice-sim --lib sandbox::
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
           cargo test -p aispice-tools --test templates_ihp -- --nocapture
           cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
           cargo test -p aispice-tools --test mixed_signal -- --nocapture
+          cargo test -p aispice-tools --test mixed_signal_landlock4 -- --nocapture
           cargo test -p aispice-sim --test xspice_policy -- --nocapture
+          cargo test -p aispice-sim --lib native_code -- --nocapture
 
       # One DRC deck on a synthetic layout, then a generated current mirror
-      # through DRC and LVS, the broken-layout checks, and the files each
-      # layout tool writes on a generated OTA: about two minutes.
+      # through DRC and LVS, the broken-layout checks, blocks with their pins
+      # at the edge as macro packages have them, and the files each layout
+      # tool writes on a generated OTA: about two minutes. The chip assembly
+      # script is run on block files made to mislead it. Macro export and
+      # chip assembly need Magic, so they run where it is installed.
       - name: Layout tests
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-layout --test drc_ihp -- --nocapture
-          cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact
+          cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact edge_pinned
+          cargo test -p aispice-layout --test chip_script_ihp -- --nocapture
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
 
   shell:

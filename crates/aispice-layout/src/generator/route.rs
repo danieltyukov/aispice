@@ -220,16 +220,82 @@ pub fn assemble(
             Some(net),
         );
     }
-    for port in ports {
-        if let Some(&(x1, ty)) = first_track.get(port) {
-            plan.labels.push(Label {
-                layer: Layer::Metal3,
-                text: port.clone(),
-                x: x1 + TRACK_W / 2,
-                y: ty,
-                pin: true,
-            });
+    if params.pin_edge {
+        edge_pins(&mut plan, ports, &first_track);
+    } else {
+        for port in ports {
+            if let Some(&(x1, ty)) = first_track.get(port) {
+                plan.labels.push(Label {
+                    layer: Layer::Metal3,
+                    text: port.clone(),
+                    x: x1 + TRACK_W / 2,
+                    y: ty,
+                    pin: true,
+                });
+            }
         }
     }
     (plan, spine)
 }
+
+/// Pin columns of an edge-pinned block are this far apart, on a grid fixed
+/// to the block's origin: twice the chip router's 0.6 um grid, so a router
+/// reaches each from below with room on both sides.
+pub const PIN_PITCH: i64 = 1200;
+
+/// Bring every port to the bottom edge of the block: a Metal4 column per
+/// port to the left of everything, on the [`PIN_PITCH`] grid, joined to the
+/// port's first Metal3 track by extending that track left to a Via3. The
+/// pin is the column's foot. Columns are vertical on Metal4 and extensions
+/// horizontal on Metal3 at the tracks' own heights, which no other net uses
+/// in their channel, so no two nets meet on one layer.
+fn edge_pins(plan: &mut Plan, ports: &[String], first_track: &BTreeMap<String, (i64, i64)>) {
+    let Some(bbox) = plan.bbox() else {
+        return;
+    };
+    let first = (bbox.x1 - SPINE_GAP - TRACK_W / 2).div_euclid(PIN_PITCH) * PIN_PITCH;
+    // The feet stand below everything else, so even the column of a track
+    // at the very bottom is long enough for `Mn.d` (0.144 um2).
+    let bottom = bbox.y1 - PIN_FOOT;
+    let pinned = ports
+        .iter()
+        .filter_map(|p| first_track.get(p).map(|t| (p, *t)));
+    for (i, (port, (x1, ty))) in pinned.enumerate() {
+        let cx = first - i as i64 * PIN_PITCH;
+        plan.add(
+            Layer::Metal3,
+            Rect::new(
+                cx - VIA / 2 - VIA_ENDCAP,
+                ty - TRACK_W / 2,
+                x1 + TRACK_W,
+                ty + TRACK_W / 2,
+            ),
+            Some(port),
+        );
+        plan.add(Layer::Via3, Rect::centred(cx, ty, VIA, VIA), Some(port));
+        plan.add(
+            Layer::Metal4,
+            Rect::new(
+                cx - TRACK_W / 2,
+                bottom,
+                cx + TRACK_W / 2,
+                ty + VIA / 2 + VIA_ENDCAP,
+            ),
+            Some(port),
+        );
+        plan.labels.push(Label {
+            layer: Layer::Metal4,
+            text: port.clone(),
+            x: cx,
+            y: bottom + PIN_LABEL_UP,
+            pin: true,
+        });
+    }
+}
+
+/// How far the pin columns reach below the rest of the block.
+const PIN_FOOT: i64 = 600;
+
+/// The pin label sits this far above the column's foot, so the pin shape
+/// drawn around it (0.2 um square) ends on the block's edge.
+const PIN_LABEL_UP: i64 = 100;

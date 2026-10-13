@@ -40,6 +40,8 @@ const RUNNING: Record<string, (c: string | null) => string> = {
   behavioral_models: () => "Building the behavioural models",
   budget: () => "Working out the budget",
   trim_check: () => "Checking the trim range",
+  macro_export: (c) => `Exporting ${c ?? "the block"} as a macro package`,
+  chip: () => "Assembling the chip",
   xschem_import: () => "Importing from xschem",
   xschem_export: (c) => `Exporting ${c ?? "the schematic"} to xschem`,
 };

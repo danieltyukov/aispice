@@ -24,6 +24,7 @@
 
 mod check;
 mod evidence;
+mod files;
 pub mod gds;
 pub mod lef;
 pub mod liberty;
@@ -37,11 +38,12 @@ pub mod verilog;
 
 pub use check::{
     CheckOptions, Finding, REPORT_SCHEMA, Report, Severity, check_package, parse_pdk_option,
-    required_files,
+    pdk_cell_prefixes, required_files,
 };
 pub use evidence::{
     Engineering, Evidence, EvidenceTool, FileRef, Status, sha256_capped, sha256_file,
 };
+pub use files::{read_package_file, sha256_package_file};
 pub use limits::{LimitError, Limits};
 pub use manifest::{
     Corner, Direction, Domain, EVIDENCE_SCHEMA, MANIFEST, MacroError, MacroKind, Manifest,

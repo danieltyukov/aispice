@@ -34,6 +34,7 @@ version = "0.2.0"
 dependencies = [
  "aispice-agent",
  "aispice-core",
+ "aispice-layout",
  "aispice-tools",
  "anyhow",
  "assert_cmd",
@@ -101,6 +102,7 @@ dependencies = [
  "insta",
  "regex",
  "resvg",
+ "rustix",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -126,6 +128,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
 ]
 
 [[package]]
@@ -161,6 +164,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.1",
  "futures",
+ "same-file",
  "schemars 1.2.2",
  "serde",
  "serde_json",

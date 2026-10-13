@@ -150,6 +150,7 @@ impl Tool for DrcTool {
             extra: input.extra,
             antenna: input.antenna,
             density: input.density,
+            recommended: true,
         };
         let report = tri!(run_drc(&env, &gds, checks, &ctx.cancel).await);
         let mut t = format!("{}: {}", gds.rel, report.to_text());

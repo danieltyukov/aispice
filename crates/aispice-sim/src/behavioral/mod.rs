@@ -399,6 +399,9 @@ pub struct Toolchain {
     pub make: Option<PathBuf>,
     /// ngspice's `d_cosim` shim sources, found next to the ngspice in use.
     pub cosim_shim: Option<PathBuf>,
+    /// The C compiler that builds the library a sandboxed ngspice
+    /// preloads ([`crate::backend::native_code`]).
+    pub cc: Option<PathBuf>,
 }
 
 impl Toolchain {
@@ -429,6 +432,7 @@ impl Toolchain {
             cxx: verilog::cxx(),
             make: crate::backend::which("make"),
             cosim_shim: ngspice.as_deref().and_then(verilog::shim_dir),
+            cc: crate::backend::native_code::compiler(),
         }
     }
 

@@ -3,20 +3,20 @@
 //! with the same rule ids and messages; `tests/fixtures/macro/expected.json`
 //! pins both.
 
-use super::evidence::sha256_capped;
+use super::files::{self, Kind, read_package_file, sha256_package_file};
 use super::gds::{GdsError, GdsLibrary, parse_gds_with};
 use super::lef::{LefError, LefMacro, parse_lef_with};
 use super::liberty::{LibertyError, parse_liberty_with};
-use super::limits::{Limits, ReadError, json_depth, read_capped, toml_depth};
+use super::limits::{Limits, ReadError, json_depth, toml_depth};
 use super::manifest::{
     Direction, MANIFEST, MacroError, MacroKind, Manifest, OPENADA_SCHEMA, Pin, PinKind,
     SCHEMA_VERSION,
 };
 use super::schema::{Val, validate_def};
-use super::spice::spice_subckt_with;
+use super::spice::{spice_subckt_with, spice_subckts_with};
 use super::text::{fmt_g, names, plural, quote};
 use super::toml10::toml11_syntax;
-use super::verilog::verilog_ports_with;
+use super::verilog::{VerilogError, verilog_ports_with};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -104,8 +104,23 @@ impl Report {
 pub struct CheckOptions {
     /// The placing chip's PDK: `NAME` or `NAME@COMMIT`.
     pub pdk: Option<String>,
+    /// The cells of the PDK's libraries (the LEF macros, CDL subcircuits and
+    /// GDS cells of every library under `libs.ref`), when the caller has
+    /// them: a package cell named like one is refused (`pdk.cell_name`).
+    /// Compared in ASCII lower case.
+    pub pdk_cells: BTreeSet<String>,
     /// For tests; the spec fixes the values of [`Limits::DEFAULT`].
     pub limits: Limits,
+}
+
+/// The name spaces of a PDK's own cells, lower case (`pdk.cell_name`): a
+/// chip merges layouts and netlists by cell name, so a macro's cell named in
+/// one could replace a cell of the PDK.
+pub fn pdk_cell_prefixes(pdk: &str) -> &'static [&'static str] {
+    match pdk {
+        "ihp-sg13g2" => &["sg13g2", "rm_ihpsg13"],
+        _ => &[],
+    }
 }
 
 fn pdk_name_ok(s: &str) -> bool {
@@ -220,6 +235,13 @@ struct Checker<'a> {
     unlisted_warnings: usize,
     /// Files reported as too large, once each.
     too_large: HashSet<String>,
+    /// Files reported as unreadable, once each.
+    unreadable: HashSet<String>,
+    /// The cells a chip would merge, seen while the views are read: (file,
+    /// what it is, name).
+    cells: Vec<(String, &'static str, String)>,
+    /// From [`CheckOptions::pdk_cells`], lower case.
+    pdk_cells: HashSet<String>,
     /// Package files hashed for evidence.
     digests: HashMap<String, Option<String>>,
     hash_limit_reported: bool,
@@ -252,13 +274,15 @@ impl Checker<'_> {
         }
     }
 
-    fn is_file(&self, name: &str) -> bool {
-        self.root.join(name).is_file()
+    /// Whether the package holds `rel` as anything but a directory: a
+    /// symbolic link is there, and reading it is refused.
+    fn present(&self, rel: &str) -> bool {
+        !matches!(files::kind(self.root, rel), Kind::Missing | Kind::Dir)
     }
 
     /// A package file's bytes, or None after reporting why it cannot be read.
     fn read(&mut self, rel: &str, limit: u64) -> Option<Vec<u8>> {
-        match read_capped(&self.root.join(rel), limit) {
+        match read_package_file(self.root, rel, limit) {
             Ok(data) => Some(data),
             Err(e) => {
                 self.unreadable(rel, e);
@@ -270,11 +294,16 @@ impl Checker<'_> {
     fn unreadable(&mut self, rel: &str, e: ReadError) {
         match e {
             ReadError::TooLarge(m) => self.report_too_large(rel, m),
-            ReadError::Io(e) => self.add(
-                "file.unreadable",
+            ReadError::Io(e) => self.report_unreadable(
                 rel,
                 format!("cannot read the file: {}", first_line(&e.to_string())),
             ),
+        }
+    }
+
+    fn report_unreadable(&mut self, rel: &str, message: String) {
+        if self.unreadable.insert(rel.to_string()) {
+            self.add("file.unreadable", rel, message);
         }
     }
 
@@ -285,8 +314,7 @@ impl Checker<'_> {
     }
 
     fn manifest(&mut self) -> Option<Manifest> {
-        let path = self.root.join(MANIFEST);
-        if !path.is_file() {
+        if !self.present(MANIFEST) {
             self.add("file.missing", MANIFEST, "required file is missing".into());
             return None;
         }
@@ -493,7 +521,7 @@ impl Checker<'_> {
 
     fn required(&mut self, m: &Manifest) {
         for f in required_files(m) {
-            if !self.is_file(&f) {
+            if !self.present(&f) {
                 self.add("file.missing", &f, "required file is missing".into());
             }
         }
@@ -515,7 +543,7 @@ impl Checker<'_> {
 
     fn gds(&mut self, m: &Manifest, lef: Option<&LefMacro>) {
         let f = m.file("gds");
-        if !self.is_file(&f) {
+        if !self.present(&f) {
             return;
         }
         let Some(data) = self.read(&f, self.limits.gds_bytes) else {
@@ -528,6 +556,9 @@ impl Checker<'_> {
                 return;
             }
         };
+        for c in lib.cells().iter().filter(|c| **c != m.name) {
+            self.cells.push((f.clone(), "GDS cell", c.clone()));
+        }
         let tops = lib.top_cells();
         if !tops.contains(&m.name) {
             let message = if lib.has_cell(&m.name) {
@@ -605,11 +636,11 @@ impl Checker<'_> {
     /// (macro, problem, macro names), reporting nothing: the GDS check needs
     /// the LEF origin, and the LEF's own findings come after the GDS's.
     fn read_lef(&self, m: &Manifest) -> (Option<LefMacro>, Option<LefProblem>, Vec<String>) {
-        let path = self.root.join(m.file("lef"));
-        if !path.is_file() {
+        let f = m.file("lef");
+        if !self.present(&f) {
             return (None, None, Vec::new());
         }
-        let data = match read_capped(&path, self.limits.view_bytes) {
+        let data = match read_package_file(self.root, &f, self.limits.view_bytes) {
             Ok(d) => d,
             Err(e) => return (None, Some(LefProblem::Read(e)), Vec::new()),
         };
@@ -630,7 +661,7 @@ impl Checker<'_> {
         macro_names: &[String],
     ) {
         let f = m.file("lef");
-        if !self.is_file(&f) {
+        if !self.present(&f) {
             return;
         }
         match problem {
@@ -773,7 +804,7 @@ impl Checker<'_> {
     }
 
     fn liberty(&mut self, m: &Manifest, f: &str) {
-        if !self.is_file(f) {
+        if !self.present(f) {
             return;
         }
         let Some(data) = self.read(f, self.limits.liberty_bytes) else {
@@ -883,7 +914,7 @@ impl Checker<'_> {
 
     fn verilog(&mut self, m: &Manifest) {
         let f = m.file("v");
-        if !self.is_file(&f) {
+        if !self.present(&f) {
             return;
         }
         let Some(data) = self.read(&f, self.limits.view_bytes) else {
@@ -900,11 +931,36 @@ impl Checker<'_> {
                 );
                 return;
             }
-            Err(e) => {
+            Err(VerilogError::Limit(e)) => {
                 self.add("verilog.limit", &f, e.0);
                 return;
             }
+            Err(VerilogError::Duplicate(message)) => {
+                self.add("verilog.duplicate", &f, message);
+                return;
+            }
         };
+        // A port declared twice (on both sides of an ifdef, say): a tool reads
+        // one of the declarations, and which one depends on its defines.
+        let mut count: HashMap<&str, usize> = HashMap::new();
+        for p in &ports {
+            *count.entry(p.name.as_str()).or_default() += p.declared.max(1);
+        }
+        let twice: BTreeSet<&str> = count
+            .into_iter()
+            .filter(|&(_, k)| k > 1)
+            .map(|(name, _)| name)
+            .collect();
+        for name in &twice {
+            self.add(
+                "verilog.duplicate",
+                &f,
+                format!("port {} is declared more than once", quote(name)),
+            );
+        }
+        if !twice.is_empty() {
+            return;
+        }
         // A later port of the same name wins, as in a Python dict.
         let by_name: HashMap<&str, _> = ports.iter().map(|p| (p.name.as_str(), p)).collect();
         for p in &m.pins {
@@ -989,22 +1045,30 @@ impl Checker<'_> {
 
     fn spice(&mut self, m: &Manifest) {
         let f = m.file("spice");
-        if !self.is_file(&f) {
+        if !self.present(&f) {
             return;
         }
         let Some(data) = self.read(&f, self.limits.view_bytes) else {
             return;
         };
-        let sub = match spice_subckt_with(&String::from_utf8_lossy(&data), &m.name, &self.limits) {
-            Ok(Some(sub)) => sub,
-            Ok(None) => {
-                self.add("spice.subckt", &f, format!("no .subckt {}", quote(&m.name)));
-                return;
+        let text = String::from_utf8_lossy(&data);
+        let found = spice_subckt_with(&text, &m.name, &self.limits)
+            .and_then(|sub| Ok((sub, spice_subckts_with(&text, &self.limits)?)));
+        let sub = match found {
+            Ok((sub, all)) => {
+                for c in all.into_iter().filter(|c| !c.eq_ignore_ascii_case(&m.name)) {
+                    self.cells.push((f.clone(), "subcircuit", c));
+                }
+                sub
             }
             Err(e) => {
                 self.add("spice.limit", &f, e.0);
                 return;
             }
+        };
+        let Some(sub) = sub else {
+            self.add("spice.subckt", &f, format!("no .subckt {}", quote(&m.name)));
+            return;
         };
         let ports: HashSet<String> = sub.ports.iter().map(|p| ascii_lower(p)).collect();
         let mut bits = HashSet::new();
@@ -1058,7 +1122,7 @@ impl Checker<'_> {
 
     fn specs(&mut self, m: &Manifest) {
         let f = m.file("specs.toml");
-        if !self.is_file(&f) {
+        if !self.present(&f) {
             return;
         }
         let Some(bytes) = self.read(&f, self.limits.specs_bytes) else {
@@ -1200,9 +1264,26 @@ impl Checker<'_> {
     }
 
     /// Names of the summaries in evidence/, sorted; None when there are too
-    /// many. Names that are not UTF-8 are skipped.
-    fn summaries(&self, folder: &Path) -> Option<Vec<String>> {
-        let Ok(entries) = std::fs::read_dir(folder) else {
+    /// many. Names that are not UTF-8 are skipped. Any `*.json` but a
+    /// directory is a summary: one that is a symbolic link is listed, and
+    /// reported when it is read. `evidence` itself must be a directory, not a
+    /// link to one.
+    fn summaries(&mut self) -> Option<Vec<String>> {
+        match files::kind(self.root, "evidence") {
+            Kind::Dir => {}
+            Kind::Link => {
+                let message = "cannot read the folder: it is a symbolic link".into();
+                self.report_unreadable("evidence", message);
+                return Some(Vec::new());
+            }
+            Kind::Other => {
+                let message = "cannot read the folder: it is not a directory".into();
+                self.report_unreadable("evidence", message);
+                return Some(Vec::new());
+            }
+            Kind::Missing | Kind::File => return Some(Vec::new()),
+        }
+        let Ok(entries) = std::fs::read_dir(self.root.join("evidence")) else {
             return Some(Vec::new());
         };
         let mut found = Vec::new();
@@ -1210,7 +1291,8 @@ impl Checker<'_> {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if !name.ends_with(".json") || !entry.path().is_file() {
+            // The entry's own type: a link to a directory is listed.
+            if !name.ends_with(".json") || entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             found.push(name);
@@ -1223,12 +1305,13 @@ impl Checker<'_> {
     }
 
     /// The SHA-256 of package file `base`, hashed once per check. A file
-    /// already found too large for its own check is not read here either.
+    /// already found too large or unreadable for its own check is not read
+    /// here either.
     fn digest(&mut self, f: &str, base: &str) -> Option<String> {
         if let Some(d) = self.digests.get(base) {
             return d.clone();
         }
-        if self.too_large.contains(base) {
+        if self.too_large.contains(base) || self.unreadable.contains(base) {
             return None;
         }
         if self.digests.len() >= self.limits.hashed_files {
@@ -1242,7 +1325,7 @@ impl Checker<'_> {
             }
             return None;
         }
-        let digest = match sha256_capped(&self.root.join(base), self.limits.gds_bytes) {
+        let digest = match sha256_package_file(self.root, base, self.limits.gds_bytes) {
             Ok(d) => Some(d),
             Err(e) => {
                 self.unreadable(base, e);
@@ -1254,7 +1337,7 @@ impl Checker<'_> {
     }
 
     fn evidence(&mut self, m: &Manifest) {
-        let Some(files) = self.summaries(&self.root.join("evidence")) else {
+        let Some(files) = self.summaries() else {
             let message = format!("more than {} summaries", self.limits.evidence_files);
             self.add("evidence.limit", "evidence", message);
             return;
@@ -1342,7 +1425,7 @@ impl Checker<'_> {
                     };
                     let normal = path.replace('\\', "/");
                     let base = normal.rsplit('/').next().unwrap_or("");
-                    if base.is_empty() || base == "." || base == ".." || !self.is_file(base) {
+                    if base.is_empty() || base == "." || base == ".." || !self.present(base) {
                         continue;
                     }
                     let Some(actual) = self.digest(&f, base) else {
@@ -1427,6 +1510,35 @@ impl Checker<'_> {
             );
         }
     }
+
+    /// `pdk.cell_name`: the package's name and every cell a chip would
+    /// merge, ASCII case folded, outside its PDK's cell name spaces and, when
+    /// the validator has the PDK's libraries, not one of their cells.
+    fn cell_names(&mut self, m: &Manifest) {
+        let prefixes = pdk_cell_prefixes(&m.pdk.name);
+        let cells = std::mem::take(&mut self.cells);
+        let all = std::iter::once((MANIFEST.to_string(), "name", m.name.clone())).chain(cells);
+        for (f, what, name) in all {
+            let low = ascii_lower(&name);
+            let message = if let Some(hit) = prefixes.iter().find(|p| low.starts_with(*p)) {
+                format!(
+                    "{what} {} begins with {}, as the cells of PDK {} do",
+                    quote(&name),
+                    quote(hit),
+                    quote(&m.pdk.name)
+                )
+            } else if self.pdk_cells.contains(&low) {
+                format!(
+                    "{what} {} is a cell of PDK {}",
+                    quote(&name),
+                    quote(&m.pdk.name)
+                )
+            } else {
+                continue;
+            };
+            self.add("pdk.cell_name", &f, message);
+        }
+    }
 }
 
 /// Check a macro package directory against macro/v1.
@@ -1445,6 +1557,9 @@ pub fn check_package(dir: &Path, opts: &CheckOptions) -> Result<Report, MacroErr
         unlisted_errors: 0,
         unlisted_warnings: 0,
         too_large: HashSet::new(),
+        unreadable: HashSet::new(),
+        cells: Vec::new(),
+        pdk_cells: opts.pdk_cells.iter().map(|n| ascii_lower(n)).collect(),
         digests: HashMap::new(),
         hash_limit_reported: false,
         name: None,
@@ -1476,6 +1591,7 @@ pub fn check_package(dir: &Path, opts: &CheckOptions) -> Result<Report, MacroErr
         if let Some((name, commit)) = &expected {
             c.expected_pdk(m, name, commit.as_deref());
         }
+        c.cell_names(m);
     }
     let unlisted = c.unlisted_errors + c.unlisted_warnings;
     if unlisted > 0 {

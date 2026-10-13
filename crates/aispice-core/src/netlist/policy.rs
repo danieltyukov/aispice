@@ -133,6 +133,14 @@ const FOREIGN: &[&str] = &[
     "osdi",
 ];
 
+/// How a deck that ngspice reads as a control script starts.
+const SCRIPT_MARK: &str = "*ng_script";
+
+/// Control commands that load compiled code (`osdi`, `pre_osdi`,
+/// `codemodel`) or run another file of commands (`source`), refused even in
+/// a control block the user's setting allows.
+const CONTROL_LOADERS: &[&str] = &["osdi", "pre_osdi", "codemodel", "source"];
+
 /// File types that hold compiled code a simulator would load and run.
 const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
 
@@ -159,12 +167,46 @@ const MAX_INCLUDE_TOTAL: u64 = 256 * 1024 * 1024;
 
 /// Check netlist text. An empty result means the deck may run.
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
+    check_reads(text, policy).0
+}
+
+/// What a simulator running a deck reads, from [`check_reads`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeckReads {
+    /// Every file the deck includes, followed into the files those include,
+    /// and every existing file a value on a line names (`file=...`), with
+    /// symbolic links resolved, sorted.
+    pub files: Vec<PathBuf>,
+    /// The includes that reach their file through a symbolic link.
+    pub linked: Vec<LinkedInclude>,
+}
+
+/// An include whose path, as written, goes through a symbolic link: the
+/// simulator opens `path` and the file it reads is `file`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedInclude {
+    /// The path as the include line writes it.
+    pub include: String,
+    /// That path made absolute, without resolving links.
+    pub path: PathBuf,
+    /// The file it resolves to.
+    pub file: PathBuf,
+}
+
+/// [`check`], and what a simulator running the deck reads ([`DeckReads`]),
+/// with includes followed as [`check`] follows them. With no violations,
+/// `files` are all the files of the project and the model folders the deck
+/// can make a simulator open; a sandbox grants reading them and nothing
+/// else there.
+pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, DeckReads) {
     let mut out = Vec::new();
     let mut seen = Vec::new();
     let cx = Cx {
         policy,
         trusted: canonical_dirs(&policy.trusted_dirs),
         read: std::cell::Cell::new(0),
+        named: std::cell::RefCell::new(Vec::new()),
+        linked: std::cell::RefCell::new(Vec::new()),
     };
     check_inner(
         &cx,
@@ -182,7 +224,12 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
             unique.push(v);
         }
     }
-    unique
+    let mut files = seen;
+    files.extend(cx.named.into_inner());
+    files.sort();
+    files.dedup();
+    let linked = cx.linked.into_inner();
+    (unique, DeckReads { files, linked })
 }
 
 struct Cx<'a> {
@@ -191,6 +238,35 @@ struct Cx<'a> {
     trusted: Vec<PathBuf>,
     /// Bytes of included files read so far.
     read: std::cell::Cell<u64>,
+    /// Existing files that values on checked lines name.
+    named: std::cell::RefCell<Vec<PathBuf>>,
+    /// Includes reached through a symbolic link.
+    linked: std::cell::RefCell<Vec<LinkedInclude>>,
+}
+
+impl Cx<'_> {
+    /// Note an include of `file`, written `include` in a file in `base`,
+    /// when the path as written goes through a symbolic link.
+    fn note_link(&self, include: &str, base: &Path, file: &Path) {
+        let written = Path::new(include.trim());
+        let path: PathBuf = if written.is_absolute() {
+            written.components().collect()
+        } else {
+            std::fs::canonicalize(base)
+                .unwrap_or_else(|_| base.to_path_buf())
+                .join(written)
+                .components()
+                .collect()
+        };
+        let mut linked = self.linked.borrow_mut();
+        if path != file && !linked.iter().any(|l| l.path == path) {
+            linked.push(LinkedInclude {
+                include: include.trim().to_string(),
+                path,
+                file: file.to_path_buf(),
+            });
+        }
+    }
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -374,6 +450,16 @@ fn check_lines(
     let mut in_control = false;
     for (i, logical) in lines.iter().enumerate() {
         let line = &logical.text;
+        // A deck whose title is `*ng_script` is read by ngspice as a script
+        // of control commands, not a netlist. Refused on any line, comment
+        // or not, in a deck or a file it includes.
+        if line.to_ascii_lowercase().starts_with(SCRIPT_MARK) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: "`*ng_script` makes ngspice read the deck as a script of control commands, which can load code and write files; it is not allowed".into(),
+            });
+            continue;
+        }
         // ngspice acts on a title that starts with a dot (it includes the
         // file a `.include` title names), so such a title is checked like
         // any other line. Xyce never reads the title.
@@ -395,7 +481,16 @@ fn check_lines(
             in_control = false;
             continue;
         }
+        // Control blocks are allowed only by the user's setting, and even
+        // then never load compiled code or another file of commands: the
+        // policy cannot follow what those would run.
         if in_control {
+            if let Some(reason) = control_loads_code(&lower) {
+                out.push(Violation {
+                    line: line.clone(),
+                    reason,
+                });
+            }
             continue;
         }
         // On any line, not only `.model` cards: the words are read as
@@ -440,7 +535,7 @@ fn check_lines(
             }
             Some(Ok(include)) => include,
             None => {
-                check_values(line, &lower, base, policy, trusted, out);
+                check_values(cx, line, &lower, base, trusted, out);
                 continue;
             }
         };
@@ -454,7 +549,11 @@ fn check_lines(
             });
             continue;
         }
-        match resolve(arg, base, policy) {
+        let resolved = resolve(arg, base, policy);
+        if let Ok(Some(file)) = &resolved {
+            cx.note_link(arg, base, file);
+        }
+        match resolved {
             Err(reason) => out.push(Violation {
                 line: line.clone(),
                 reason,
@@ -561,6 +660,23 @@ fn code_running_model(lower: &str) -> Option<String> {
         })
 }
 
+/// Why a line inside an allowed control block is refused: it loads
+/// compiled code, runs a file of commands, or names an XSPICE model or
+/// parameter that does (`circbyline`, `altermod`). The command is the first
+/// word, ended by whitespace or any of `=(),;`.
+fn control_loads_code(lower: &str) -> Option<String> {
+    let command = lower
+        .split(|c: char| c.is_whitespace() || "=(),;".contains(c))
+        .find(|w| !w.is_empty())
+        .unwrap_or("");
+    if CONTROL_LOADERS.contains(&command) {
+        return Some(format!(
+            "`{command}` in a control block loads compiled code or runs a file of commands the policy cannot check; it is refused even with control blocks enabled"
+        ));
+    }
+    code_running_model(lower)
+}
+
 /// The words of a line as ngspice's parser reads a card (`INPgetTok`):
 /// whitespace and each of `=`, `(`, `)` and `,` end a word and are never
 /// part of one, and a run of them is skipped, the first word included. So
@@ -589,13 +705,14 @@ fn ngspice_words(lower: &str) -> Vec<(&str, bool)> {
 /// value that names a file (`file=...`, `wavefile=...`, anything with a path
 /// separator) inside the allowed folders.
 fn check_values(
+    cx: &Cx,
     line: &str,
     lower: &str,
     base: &Path,
-    policy: &Policy,
     trusted: bool,
     out: &mut Vec<Violation>,
 ) {
+    let policy = cx.policy;
     if lower
         .split(|c: char| c.is_whitespace() || c == ',')
         .any(|t| t.starts_with("cmd=") || t == "cmd")
@@ -606,11 +723,13 @@ fn check_values(
         });
     }
     for value in path_like_values(line, trusted) {
-        if let Err(reason) = resolve(&value, base, policy) {
-            out.push(Violation {
+        match resolve(&value, base, policy) {
+            Err(reason) => out.push(Violation {
                 line: line.to_string(),
                 reason,
-            });
+            }),
+            Ok(Some(file)) if file.is_file() => cx.named.borrow_mut().push(file),
+            Ok(_) => {}
         }
     }
 }
@@ -1335,6 +1454,72 @@ mod tests {
         assert!(v[0].reason.contains("bad.lib"));
     }
 
+    /// The files a simulator reads for a deck: its includes, followed into
+    /// the files they include, and the files values name; no folder, and
+    /// nothing else of the project.
+    #[test]
+    fn the_files_a_deck_reads_are_its_includes_and_the_files_it_names() {
+        let d = temp("reads");
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join(".aispice")).unwrap();
+        std::fs::write(d.join(".aispice/state.json"), "{}").unwrap();
+        std::fs::write(d.join("models/top.lib"), "* top\n.include sub/inner.lib\n").unwrap();
+        std::fs::write(
+            d.join("models/sub/inner.lib"),
+            "* inner\n.model D1 D(Is=1n)\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("stim.txt"), "0 0\n1u 1\n").unwrap();
+        let deck = "t\n.include models/top.lib\nV1 a 0 PWL file=stim.txt\nD1 a 0 D1\n";
+        let (v, reads) = check_reads(deck, &policy_at(&d));
+        assert!(v.is_empty(), "{v:?}");
+        assert!(reads.linked.is_empty(), "{:?}", reads.linked);
+        let files = reads.files;
+        let real = |p: &str| d.join(p).canonicalize().unwrap();
+        let mut want = vec![
+            real("models/top.lib"),
+            real("models/sub/inner.lib"),
+            real("stim.txt"),
+        ];
+        want.sort();
+        assert_eq!(files, want);
+        assert_eq!(check(deck, &policy_at(&d)), v);
+    }
+
+    /// An include whose path goes through a link inside the project is
+    /// allowed and reported with the path as written and the file it
+    /// reaches; the deck's own includes, rewritten to the resolved file, are
+    /// not.
+    #[cfg(unix)]
+    #[test]
+    fn includes_through_a_link_are_reported() {
+        let d = temp("linked").canonicalize().unwrap();
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join("shared")).unwrap();
+        std::fs::write(d.join("shared/vref.inc"), "V2 b 0 2\n").unwrap();
+        let link = d.join("models/sub/link.inc");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("../../shared/vref.inc", &link).unwrap();
+        std::fs::write(d.join("models/bias.inc"), "* bias\n.include sub/link.inc\n").unwrap();
+        let policy = policy_at(&d);
+        let deck = canonical_includes("t\n.include models/bias.inc\n", &policy);
+        let (v, reads) = check_reads(&deck, &policy);
+        assert!(v.is_empty(), "{v:?}");
+        assert_eq!(
+            reads.linked,
+            vec![LinkedInclude {
+                include: "sub/link.inc".into(),
+                path: link.clone(),
+                file: d.join("shared/vref.inc"),
+            }]
+        );
+        assert!(reads.files.contains(&d.join("shared/vref.inc")));
+        assert!(!reads.files.contains(&link));
+        // A deck naming the link itself is rewritten to the file.
+        let deck = canonical_includes("t\n.include models/sub/link.inc\n", &policy);
+        assert!(check_reads(&deck, &policy).1.linked.is_empty(), "{deck}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_out_of_the_project_are_refused() {
@@ -1648,6 +1833,67 @@ mod tests {
             ]
         );
         assert!(ngspice_words(" ,=() ").is_empty());
+    }
+
+    /// A deck ngspice would read as a control script (`*ng_script` title)
+    /// is refused, on any line and in an included file, so it never runs as
+    /// a script instead of a netlist.
+    #[test]
+    fn ng_script_decks_are_refused() {
+        let d = temp("ngscript");
+        std::fs::write(d.join("script.lib"), "* x\n*ng_script\nosdi x.osdi\n").unwrap();
+        let policy = policy_at(&d);
+        for deck in [
+            "*ng_script\necho hi\n".to_string(),
+            "*NG_SCRIPT\nosdi x.osdi\n".to_string(),
+            "  *ng_script\nshell id\n".to_string(),
+            "t\n.include script.lib\n".to_string(),
+        ] {
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("ng_script")
+                    || v.reason.contains("confidential")
+                    || v.reason.contains("native")),
+                "{deck}: {v:?}"
+            );
+            assert!(!v.is_empty(), "{deck}");
+        }
+    }
+
+    /// Even with control blocks enabled, a control block may not load
+    /// compiled code or `source` another file of commands; `osdi`,
+    /// `pre_osdi`, `codemodel` and `source` are refused there, and a plain
+    /// control command still runs.
+    #[test]
+    fn a_control_block_cannot_load_code_even_when_enabled() {
+        let d = temp("control-loaders");
+        let mut policy = policy_at(&d);
+        policy.allow_control_blocks = true;
+        for line in [
+            "osdi /tmp/x.osdi",
+            "pre_osdi /tmp/x.osdi",
+            "codemodel /tmp/x.cm",
+            "source /tmp/x.cir",
+            "SOURCE /tmp/x.cir",
+            "source\t/tmp/x.cir",
+        ] {
+            let deck = format!("t\n.control\n{line}\n.endc\n.end\n");
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("control block")),
+                "{line}: {v:?}"
+            );
+        }
+        // A d_cosim card written inside a control block is refused too.
+        let deck = "t\n.control\n.model q d_cosim simulation=\"x.so\"\n.endc\n.end\n";
+        assert!(
+            check(deck, &policy)
+                .iter()
+                .any(|v| v.reason.contains("native")),
+            "{deck}"
+        );
+        // An ordinary control command still runs.
+        assert!(check("t\n.control\nrun\nprint v(a)\n.endc\n.end\n", &policy).is_empty());
     }
 
     #[test]

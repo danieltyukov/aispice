@@ -6,4 +6,4 @@
 aispice sim ramp_counter.cir -m "q0 = value_at(V(vq0), 9.9u)" -m "q2 = value_at(V(vq2), 9.9u)"
 ```
 
-Needs ngspice 42 or newer, OpenVAF, Verilator, a C++ compiler and make (`aispice doctor` lists them).
+Needs Linux with bubblewrap or Landlock ABI 4 or later (Linux 6.7), ngspice 42 or newer, OpenVAF, Verilator, a C and C++ compiler and make (`aispice doctor` lists them). aispice runs the compiled models only in a sandboxed ngspice.

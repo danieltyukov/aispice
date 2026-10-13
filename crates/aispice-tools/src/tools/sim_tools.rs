@@ -633,7 +633,7 @@ fn corner_variants(
 /// or the post-layout one, which corner rewrites treat the same way since
 /// its PDK model header is untouched.
 #[allow(clippy::too_many_arguments)]
-async fn corner_report(
+pub(crate) async fn corner_report(
     ws: &Workspace,
     p: &crate::project::Project,
     circuit: &str,

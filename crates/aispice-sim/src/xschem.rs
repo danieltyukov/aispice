@@ -8,28 +8,16 @@
 //! private folder itself. The only caller in the product is the check of an
 //! export; an imported schematic is never run through xschem.
 //!
-//! The run is sandboxed as defense in depth, in this order
-//! ([`Sandbox::select`]):
-//!
-//! - bubblewrap (`bwrap`), when it can make its namespaces on this machine:
-//!   new user, PID, IPC, UTS and network namespaces (no network at all), no
-//!   further user namespace inside (`--disable-userns`, on bubblewrap 0.8
-//!   and later, which has it), a fresh root on which only these are visible: the system folders (`/usr`
-//!   and the links into it) read-only, xschem itself and its shared folder
-//!   read-only, the library and model folders and the private input folder
-//!   read-only, the rc file read-only, a private `/tmp` (and the home inside
-//!   it) on a small tmpfs, and one writable folder for the netlist;
-//! - else Landlock at ABI 6 or later with a seccomp filter
-//!   (`crate::backend::confine`). This is the path on a machine whose kernel
-//!   restricts unprivileged user namespaces without a bwrap AppArmor
-//!   profile (Ubuntu 24.04's default);
-//! - when neither works, xschem is not run, and the caller reports the file
-//!   as not verified with xschem.
-//!
-//! Either way the process gets a file size, address space and process count
-//! limit, keeps no descriptor of aispice's but stdin, stdout and stderr,
-//! dies with aispice, starts in its own process group, which is killed
-//! when it exits, and is run:
+//! The run is sandboxed as defense in depth, in whichever sandbox
+//! [`Sandbox::select`] finds ([`crate::sandbox`]): bubblewrap where it can
+//! start, else Landlock with seccomp's [`Profile::Denylist`], else not at
+//! all, and the caller reports the file as not verified with xschem. xschem
+//! may read the system, its own install, the library and model folders, its
+//! input and the rc; execute only itself, a shell, awk and gzip; and write
+//! only its private output, home and tmp folders. It gets a file size,
+//! address space and process count limit, keeps no descriptor of aispice's
+//! but stdin, stdout and stderr, dies with aispice, and its process group
+//! is killed when it exits. It is run:
 //!
 //! - from an argument vector, with stdin closed, a timeout and capped
 //!   output, headless (`-x`: no window, `-q`: quit when done), in the
@@ -51,8 +39,10 @@
 //! cannot stall the read), so nothing left behind in the writable folder
 //! can point the read elsewhere.
 
-use crate::backend::process::{self, Confinement, Landlock, ProcessSpec};
+use crate::backend::process::{self, ProcessSpec};
 use crate::backend::{SimError, which};
+pub use crate::sandbox::Sandbox;
+use crate::sandbox::{Limits, Plan, Profile};
 pub use aispice_core::xschem::export::SchText;
 use aispice_core::xschem::safety::safe_path;
 use std::ffi::OsString;
@@ -64,8 +54,6 @@ use tokio_util::sync::CancellationToken;
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 /// Netlists larger than this are not read.
 const MAX_NETLIST: u64 = 16 << 20;
-/// The sandbox's `/tmp` (and the home inside it) holds at most this much.
-const TMP_BYTES: u64 = 64 << 20;
 /// No file xschem writes may grow past this (`RLIMIT_FSIZE`).
 const MAX_FILE: u64 = 64 << 20;
 /// xschem's address space (`RLIMIT_AS`).
@@ -73,14 +61,6 @@ const MAX_MEMORY: u64 = 4 << 30;
 /// Processes and threads xschem and its helpers may add to what the user
 /// runs (`RLIMIT_NPROC`, relative): a shell, awk and gzip need a handful.
 const NPROC_HEADROOM: u64 = 128;
-/// The first bubblewrap release with `--disable-userns`.
-const BWRAP_DISABLE_USERNS: (u32, u32, u32) = (0, 8, 0);
-
-/// Where things appear inside the bubblewrap namespace. None of these exist
-/// outside it; the Landlock path uses the real host folders instead.
-pub const SANDBOX_OUT: &str = "/tmp/aispice/out";
-pub const SANDBOX_RC: &str = "/tmp/aispice/xschemrc.tcl";
-pub const SANDBOX_HOME: &str = "/tmp/aispice/home";
 
 /// The rc file every run uses. It never contains a path: those come from
 /// the environment.
@@ -100,9 +80,6 @@ if {[info exists env(AISPICE_MODELS_XYCE)]} {
   set SG13G2_MODELS_XYCE $env(AISPICE_MODELS_XYCE)
 }
 ";
-
-/// Why xschem is not run when no sandbox is available on this machine.
-pub const NO_SANDBOX: &str = "aispice runs xschem only inside a sandbox, and this machine has neither: bubblewrap (bwrap) could not start (install the bubblewrap package, or on Ubuntu 24.04 add its AppArmor profile; see docs/XSCHEM.md), and the kernel has no Landlock support";
 
 /// An xschem installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,242 +120,6 @@ impl Xschem {
             None => Vec::new(),
         }
     }
-}
-
-/// The way xschem is confined on this machine, chosen by [`Sandbox::select`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Sandbox {
-    /// bubblewrap, with its own namespaces. `disable_userns` when this
-    /// bubblewrap (0.8 or later) can stop the sandbox making user
-    /// namespaces of its own.
-    Bwrap {
-        program: PathBuf,
-        disable_userns: bool,
-    },
-    /// Landlock, applied in a pre_exec hook (Linux only). `abi` is the
-    /// kernel's Landlock ABI, kept only for messages and tests.
-    Landlock { abi: i32 },
-}
-
-impl Sandbox {
-    /// The sandbox to use: bubblewrap when it can make its namespaces here,
-    /// else Landlock when the kernel has it (ABI
-    /// [`confine::MIN_ABI`](crate::backend::confine::MIN_ABI) or later), else
-    /// the reason neither is available. Runs `bwrap` once to see whether
-    /// this machine lets it, since a restricted kernel refuses it even when
-    /// it is installed.
-    pub async fn select(cancel: &CancellationToken) -> Result<Self, String> {
-        let mut why = Vec::new();
-        match which("bwrap") {
-            Some(bwrap) => {
-                let disable_userns = bwrap_version(&bwrap, cancel)
-                    .await
-                    .is_some_and(|v| v >= BWRAP_DISABLE_USERNS);
-                match probe_bwrap(&bwrap, disable_userns, cancel).await {
-                    Ok(()) => {
-                        return Ok(Sandbox::Bwrap {
-                            program: bwrap,
-                            disable_userns,
-                        });
-                    }
-                    Err(e) => why.push(format!("bubblewrap could not start a sandbox: {e}")),
-                }
-            }
-            None => why.push("bubblewrap (bwrap) is not installed".into()),
-        }
-        match landlock_choice() {
-            Ok(abi) => return Ok(Sandbox::Landlock { abi }),
-            Err(e) => why.push(e),
-        }
-        Err(format!(
-            "aispice runs xschem only inside a sandbox, and this machine has neither: {} (see docs/XSCHEM.md)",
-            why.join("; ")
-        ))
-    }
-}
-
-/// The kernel's Landlock ABI if it is usable (at least
-/// [`confine::MIN_ABI`](crate::backend::confine::MIN_ABI), which has the
-/// network rules), else why it is not. Off Linux there is no Landlock.
-#[cfg(target_os = "linux")]
-fn landlock_choice() -> Result<i32, String> {
-    landlock_choice_from(crate::backend::confine::abi())
-}
-
-/// Whether a given Landlock ABI is usable. Separate from the kernel probe so
-/// a test can check the floor without the kernel's real value.
-#[cfg(target_os = "linux")]
-fn landlock_choice_from(abi: i32) -> Result<i32, String> {
-    let min = crate::backend::confine::MIN_ABI;
-    match abi {
-        a if a >= min => Ok(a),
-        0 => Err("the kernel has no Landlock support".into()),
-        a => Err(format!(
-            "the kernel's Landlock ABI {a} is below {min}, which it needs to scope sockets and signals"
-        )),
-    }
-}
-#[cfg(not(target_os = "linux"))]
-fn landlock_choice() -> Result<i32, String> {
-    Err("this platform has no Landlock".into())
-}
-
-/// bubblewrap's version, from `bwrap --version` ("bubblewrap 0.9.0").
-async fn bwrap_version(bwrap: &Path, cancel: &CancellationToken) -> Option<(u32, u32, u32)> {
-    let mut spec = ProcessSpec::new(bwrap, std::env::temp_dir()).arg("--version");
-    spec.clear_env = true;
-    let out = process::run(&spec, Duration::from_secs(10), cancel)
-        .await
-        .ok()?;
-    parse_bwrap_version(&out.stdout)
-}
-
-fn parse_bwrap_version(text: &str) -> Option<(u32, u32, u32)> {
-    let v = text.split_whitespace().nth(1)?;
-    let mut parts = v.split('.').map(|p| p.parse::<u32>().ok());
-    Some((
-        parts.next()??,
-        parts.next()??,
-        parts.next().flatten().unwrap_or(0),
-    ))
-}
-
-/// Start an empty bubblewrap sandbox, with the flags a run would use, and
-/// run `true` in it: whether this machine lets it make its namespaces
-/// (some kernels restrict unprivileged user namespaces).
-async fn probe_bwrap(
-    bwrap: &Path,
-    disable_userns: bool,
-    cancel: &CancellationToken,
-) -> Result<(), String> {
-    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let rc = tmp.path().join("rc");
-    std::fs::write(&rc, "").map_err(|e| e.to_string())?;
-    let view = View {
-        read_only: Vec::new(),
-        out: tmp.path().to_path_buf(),
-        rc,
-    };
-    let truth = which("true").unwrap_or_else(|| PathBuf::from("/usr/bin/true"));
-    let mut spec = ProcessSpec::new(bwrap, tmp.path());
-    spec.args = bwrap_args(&view, &[], &truth, &[], disable_userns);
-    spec.clear_env = true;
-    let out = process::run(&spec, Duration::from_secs(10), cancel)
-        .await
-        .map_err(|e| e.to_string())?;
-    if out.success() {
-        Ok(())
-    } else {
-        Err(first_line(&out.combined()).unwrap_or_else(|| "bwrap failed".into()))
-    }
-}
-
-/// What one bubblewrap run shows besides the system folders.
-#[derive(Debug, Clone, Default)]
-pub struct View {
-    /// Folders and files shown read-only at their own paths.
-    pub read_only: Vec<PathBuf>,
-    /// The one writable folder, shown at [`SANDBOX_OUT`].
-    pub out: PathBuf,
-    /// The rc file, shown read-only at [`SANDBOX_RC`].
-    pub rc: PathBuf,
-}
-
-/// System folders shown read-only: programs, libraries, Tcl. The usual
-/// top-level links into `/usr` are recreated as links.
-const SYSTEM: &[&str] = &["/usr"];
-const SYSTEM_LINKS: &[&str] = &["/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32"];
-/// Single system files and folders the loader and `awk` need, when present.
-const SYSTEM_TRY: &[&str] = &[
-    "/etc/ld.so.cache",
-    "/etc/ld.so.conf",
-    "/etc/ld.so.conf.d",
-    "/etc/alternatives",
-];
-
-/// Whether `p` is already visible through a system folder.
-fn under_system(p: &Path) -> bool {
-    SYSTEM.iter().any(|s| p.starts_with(s))
-}
-
-/// The bubblewrap arguments that run `program args` seeing only `view`, the
-/// system folders and `env`. `disable_userns` adds bubblewrap's refusal of
-/// nested user namespaces and its check that it held.
-pub fn bwrap_args(
-    view: &View,
-    env: &[(String, OsString)],
-    program: &Path,
-    args: &[OsString],
-    disable_userns: bool,
-) -> Vec<OsString> {
-    let mut a: Vec<OsString> = Vec::new();
-    let mut push = |items: &[&dyn AsRef<std::ffi::OsStr>]| {
-        for i in items {
-            a.push(i.as_ref().to_os_string());
-        }
-    };
-    push(&[
-        &"--unshare-all",
-        &"--unshare-user",
-        &"--die-with-parent",
-        &"--new-session",
-        &"--clearenv",
-    ]);
-    if disable_userns {
-        push(&[&"--disable-userns", &"--assert-userns-disabled"]);
-    }
-    for (k, v) in env {
-        push(&[&"--setenv", k, v]);
-    }
-    for s in SYSTEM {
-        push(&[&"--ro-bind", s, s]);
-    }
-    for l in SYSTEM_LINKS {
-        let p = Path::new(l);
-        match std::fs::read_link(p) {
-            Ok(target) => push(&[&"--symlink", &target, l]),
-            Err(_) if p.is_dir() => push(&[&"--ro-bind", l, l]),
-            Err(_) => {}
-        }
-    }
-    for t in SYSTEM_TRY {
-        push(&[&"--ro-bind-try", t, t]);
-    }
-    let size = TMP_BYTES.to_string();
-    push(&[
-        &"--proc",
-        &"/proc",
-        &"--dev",
-        &"/dev",
-        &"--size",
-        &size,
-        &"--tmpfs",
-        &"/tmp",
-        &"--dir",
-        &SANDBOX_HOME,
-    ]);
-    let mut shown: Vec<&PathBuf> = Vec::new();
-    for p in &view.read_only {
-        if under_system(p) || shown.iter().any(|s| p.starts_with(s)) {
-            continue;
-        }
-        shown.push(p);
-        push(&[&"--ro-bind", p, p]);
-    }
-    push(&[
-        &"--ro-bind",
-        &view.rc,
-        &SANDBOX_RC,
-        &"--bind",
-        &view.out,
-        &SANDBOX_OUT,
-        &"--chdir",
-        &SANDBOX_OUT,
-        &"--",
-        &program,
-    ]);
-    a.extend(args.iter().cloned());
-    a
 }
 
 /// What one run reads besides the schematic, which aispice writes itself.
@@ -436,9 +177,7 @@ fn checked_name(name: &str) -> Result<&str, SimError> {
     }
 }
 
-/// The host folders one run uses. Where they appear to xschem depends on
-/// the sandbox: bubblewrap remaps them to the [`SANDBOX_OUT`] family inside
-/// its namespace, Landlock uses them as they are.
+/// The host folders one run uses, the same under either sandbox.
 #[derive(Debug, Clone)]
 pub struct Dirs {
     pub out: PathBuf,
@@ -451,11 +190,10 @@ pub struct Dirs {
 }
 
 /// The limits every xschem run gets, whichever sandbox is used.
-fn limits() -> Confinement {
-    Confinement {
-        landlock: None,
-        rlimit_fsize: Some(MAX_FILE),
-        rlimit_as: Some(MAX_MEMORY),
+fn limits() -> Limits {
+    Limits {
+        file_size: Some(MAX_FILE),
+        address_space: Some(MAX_MEMORY),
         nproc_headroom: Some(NPROC_HEADROOM),
     }
 }
@@ -505,108 +243,46 @@ fn run_env(home: &Path, tmp: &Path, out: &Path, run: &Run) -> Vec<(String, OsStr
     env
 }
 
-/// The binaries the Landlock domain lets xschem execute: itself and the
-/// helpers it runs while netlisting (a shell, awk, gzip), plus the dynamic
-/// loader, which the kernel opens for execution as every binary's
-/// interpreter. Each is resolved to its real path so the pinned descriptor
-/// is the binary, not a symlink. This keeps xschem from starting other
-/// programs by path, but it is not a boundary on its own: the loader can
-/// run any readable binary. What holds whatever code runs is the seccomp
-/// filter and the Landlock file, network and scope rules.
-fn exec_helpers(program: &Path) -> Vec<PathBuf> {
-    let mut v = vec![program.to_path_buf()];
-    for h in [
-        "/bin/sh",
-        "/usr/bin/awk",
-        "/usr/bin/gzip",
-        "/lib64/ld-linux-x86-64.so.2",
-        "/lib/ld-linux-aarch64.so.1",
-    ] {
-        if let Ok(real) = Path::new(h).canonicalize()
-            && !v.contains(&real)
-        {
-            v.push(real);
-        }
+/// The helpers xschem runs while netlisting: a shell, awk, gzip. The
+/// sandbox adds xschem itself and the loader.
+const HELPERS: &[&str] = &["/bin/sh", "/usr/bin/awk", "/usr/bin/gzip"];
+
+/// What one netlist run may touch. `dirs` are the folders aispice made for
+/// the run; `input` is the file it wrote there.
+pub fn netlist_plan(x: &Xschem, input: &Path, run: &Run, dirs: &Dirs) -> Plan {
+    let mut read: Vec<PathBuf> = x.share.iter().cloned().collect();
+    read.extend(trusted_roots(run));
+    read.push(dirs.staging.clone());
+    read.push(dirs.rc.clone());
+    Plan {
+        program: x.program.clone(),
+        args: xschem_args(&dirs.rc, &dirs.out, input),
+        env: run_env(&dirs.home, &dirs.tmp, &dirs.out, run)
+            .into_iter()
+            .map(|(k, v)| (OsString::from(k), v))
+            .collect(),
+        cwd: dirs.out.clone(),
+        read,
+        exec: HELPERS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+            .collect(),
+        write: vec![dirs.out.clone(), dirs.home.clone(), dirs.tmp.clone()],
+        profile: Profile::Denylist,
+        limits: limits(),
     }
-    v
 }
 
-/// The command for one netlist run, without running it. `dirs` are the host
-/// folders aispice made for the run; `input` is the file it wrote there.
+/// The command for one netlist run in `sandbox`, without running it.
 pub fn netlist_command(
     x: &Xschem,
     sandbox: &Sandbox,
     input: &Path,
     run: &Run,
     dirs: &Dirs,
-) -> ProcessSpec {
-    let program = x
-        .program
-        .canonicalize()
-        .unwrap_or_else(|_| x.program.clone());
-    let trusted = trusted_roots(run);
-    match sandbox {
-        Sandbox::Bwrap {
-            program: bwrap,
-            disable_userns,
-        } => {
-            // bubblewrap's own network, IPC and PID namespaces stand in for
-            // seccomp and Landlock; it shows xschem the private input folder
-            // and the trusted roots read-only.
-            let mut read_only: Vec<PathBuf> = vec![program.clone(), dirs.staging.clone()];
-            read_only.extend(x.share.iter().cloned());
-            read_only.extend(trusted.iter().cloned());
-            read_only.retain(|p| p.exists());
-            let view = View {
-                read_only,
-                out: dirs.out.clone(),
-                rc: dirs.rc.clone(),
-            };
-            let env = run_env(
-                Path::new(SANDBOX_HOME),
-                Path::new("/tmp"),
-                Path::new(SANDBOX_OUT),
-                run,
-            );
-            let args = xschem_args(Path::new(SANDBOX_RC), Path::new(SANDBOX_OUT), input);
-            let mut spec = ProcessSpec::new(bwrap, &dirs.out);
-            spec.args = bwrap_args(&view, &env, &program, &args, *disable_userns);
-            spec.clear_env = true;
-            spec.confine = Some(limits());
-            spec
-        }
-        Sandbox::Landlock { .. } => {
-            // xschem runs directly, confined before it starts: read the
-            // system, the library, the PDK and its input; execute only itself
-            // and its helpers; write only the private folders.
-            let mut read: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
-            read.extend(SYSTEM_TRY.iter().map(PathBuf::from));
-            read.extend(["/dev/urandom", "/dev/zero"].iter().map(PathBuf::from));
-            read.extend(x.share.iter().cloned());
-            read.extend(trusted.iter().cloned());
-            read.push(dirs.staging.clone());
-            read.push(dirs.rc.clone());
-            let write = vec![dirs.out.clone(), dirs.home.clone(), dirs.tmp.clone()];
-            let env = run_env(&dirs.home, &dirs.tmp, &dirs.out, run);
-            let args = xschem_args(&dirs.rc, &dirs.out, input);
-            let mut spec = ProcessSpec::new(&program, &dirs.out);
-            spec.args = args;
-            spec.env = env
-                .into_iter()
-                .map(|(k, v)| (OsString::from(k), v))
-                .collect();
-            spec.clear_env = true;
-            let mut confine = limits();
-            confine.landlock = Some(Landlock {
-                read,
-                exec: exec_helpers(&program),
-                write,
-                rw: vec![PathBuf::from("/dev/null")],
-            });
-            spec.confine = Some(confine);
-            spec
-        }
-    }
+) -> Result<ProcessSpec, SimError> {
+    sandbox.command(&netlist_plan(x, input, run, dirs))
 }
 
 /// Create a directory only its owner may use.
@@ -749,9 +425,38 @@ pub async fn netlist(
     make_private_dir(&dirs.staging).map_err(|e| SimError::Io(e.to_string()))?;
     write_new(&dirs.rc, RC.as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
     write_new(&input, text.as_str().as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
-    let spec = netlist_command(x, sandbox, &input, run, &dirs);
+    let spec = netlist_command(x, sandbox, &input, run, &dirs)?;
     let result = process::run(&spec, TIMEOUT, cancel).await?;
-    read_netlist(&dirs.out.join("netlist.spice"), &result.combined())
+    let log = result.combined();
+    let unfinished = |why: &str| {
+        SimError::NoOutput(format!(
+            "xschem did not finish: {why}{}",
+            first_line(&log)
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        ))
+    };
+    // xschem's exit code counts problems in the drawing, so it is not
+    // checked. One that dies of a signal, such as the abort when it cannot
+    // start a helper because its process limit is reached, leaves an empty
+    // or partial netlist behind. Run directly, a signal shows as no exit
+    // code; bubblewrap reports it as 128 and up.
+    let signalled = match result.code {
+        None => true,
+        Some(c) => sandbox.is_bwrap() && c >= 128,
+    };
+    if signalled {
+        return Err(unfinished("it was ended by a signal"));
+    }
+    let text = read_netlist(&dirs.out.join("netlist.spice"), &log)?;
+    // Every SPICE netlist xschem writes ends with `.end`.
+    match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+        None => Err(unfinished("its netlist is empty")),
+        Some(last) if !last.eq_ignore_ascii_case(".end") => {
+            Err(unfinished("its netlist stops before `.end`"))
+        }
+        Some(_) => Ok(text),
+    }
 }
 
 fn first_line(log: &str) -> Option<String> {
@@ -817,10 +522,7 @@ mod tests {
             program: tmp.path().join("no-xschem"),
             share: None,
         };
-        let sandbox = Sandbox::Bwrap {
-            program: tmp.path().join("no-bwrap"),
-            disable_userns: true,
-        };
+        let sandbox = Sandbox::bwrap_for_tests(tmp.path().join("no-bwrap"));
         let err = netlist(
             &x,
             &sandbox,
@@ -861,10 +563,7 @@ mod tests {
         };
         let err = netlist(
             &x,
-            &Sandbox::Bwrap {
-                program: broken,
-                disable_userns: false,
-            },
+            &Sandbox::bwrap_for_tests(broken),
             "tb.sch",
             &SchText::trusted_for_tests("v {xschem version=3.4.4 file_version=1.2}\n"),
             &Run::default(),
@@ -872,20 +571,26 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("xschem"), "{err}");
+        // Off Linux the confined run is refused before bwrap starts, with
+        // an error that names bwrap rather than xschem.
+        if cfg!(target_os = "linux") {
+            assert!(err.to_string().contains("xschem"), "{err}");
+        }
         assert!(!sentinel.exists());
     }
 
+    /// What a netlist run may touch, the same under either sandbox: read
+    /// xschem's install, the library and model folders, its input and rc;
+    /// execute only xschem and its helpers; write only the private output,
+    /// home and tmp, never the input's folder or the user's home; an
+    /// environment of a fixed allowlist; aispice's rc only, headless, the
+    /// schematic last.
     #[cfg(unix)]
     #[test]
-    fn the_bwrap_command_shows_only_what_the_run_needs() {
+    fn the_netlist_plan_shows_only_what_the_run_needs() {
         let x = Xschem {
             program: PathBuf::from("/usr/bin/xschem"),
             share: Some(PathBuf::from("/usr/share/xschem")),
-        };
-        let sandbox = Sandbox::Bwrap {
-            program: PathBuf::from("/usr/bin/bwrap"),
-            disable_userns: true,
         };
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
@@ -896,103 +601,33 @@ mod tests {
                 PathBuf::from("/usr/share/xschem/xschem_library"),
                 pdk.clone(),
             ],
-            ..Run::default()
-        };
-        let d = dirs(&dir);
-        std::fs::create_dir_all(&d.staging).unwrap();
-        let sch = d.staging.join("tb.sch");
-        std::fs::write(&sch, "").unwrap();
-        let spec = netlist_command(&x, &sandbox, &sch, &run, &d);
-        assert_eq!(spec.program, PathBuf::from("/usr/bin/bwrap"));
-        assert!(spec.clear_env && spec.env.is_empty());
-        // The limits ride along, now set in the pre_exec hook, not prlimit.
-        let confine = spec.confine.as_ref().unwrap();
-        assert!(confine.rlimit_fsize.is_some() && confine.rlimit_as.is_some());
-        assert!(confine.landlock.is_none());
-        let args: Vec<String> = spec
-            .args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        let has = |w: &[&str]| args.windows(w.len()).any(|x| x == w);
-        for flag in [
-            "--unshare-all",
-            "--unshare-user",
-            "--disable-userns",
-            "--assert-userns-disabled",
-            "--die-with-parent",
-            "--new-session",
-            "--clearenv",
-        ] {
-            assert!(args.contains(&flag.to_string()), "{flag}: {args:?}");
-        }
-        // The limits every run gets: file size, memory, process count.
-        assert!(confine.nproc_headroom.is_some());
-        // An older bubblewrap, without --disable-userns, gets neither flag.
-        let old = Sandbox::Bwrap {
-            program: PathBuf::from("/usr/bin/bwrap"),
-            disable_userns: false,
-        };
-        let old_args = netlist_command(&x, &old, &sch, &run, &d).args;
-        assert!(
-            !old_args
-                .iter()
-                .any(|a| a.to_string_lossy().contains("userns"))
-        );
-        // Read-only views of the system, the PDK and the private folder
-        // holding the input; the one writable folder; a private, bounded
-        // /tmp and home.
-        assert!(has(&["--ro-bind", "/usr", "/usr"]));
-        let s = |p: &Path| p.display().to_string();
-        assert!(has(&["--ro-bind", &s(&pdk), &s(&pdk)]));
-        assert!(has(&["--ro-bind", &s(&d.staging), &s(&d.staging)]));
-        assert!(has(&["--ro-bind", &s(&d.rc), SANDBOX_RC]));
-        assert!(has(&["--bind", &s(&d.out), SANDBOX_OUT]));
-        assert!(has(&["--tmpfs", "/tmp"]) && has(&["--dir", SANDBOX_HOME]));
-        assert!(has(&["--chdir", SANDBOX_OUT]));
-        assert!(has(&["--setenv", "HOME", SANDBOX_HOME]));
-        // The only writable bind is the output folder; the user's home and
-        // the working folder are not shown.
-        assert_eq!(args.iter().filter(|a| *a == "--bind").count(), 1);
-        if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy().into_owned();
-            assert!(!has(&["--ro-bind", &home, &home]));
-        }
-        let cwd = std::env::current_dir().unwrap().display().to_string();
-        assert!(!args.contains(&cwd), "{args:?}");
-        // xschem itself: headless, with aispice's rc only, the schematic last.
-        let tail = args.iter().position(|a| a == "--").unwrap();
-        assert_eq!(args[tail + 1], "/usr/bin/xschem");
-        let rest = &args[tail + 2..];
-        assert!(rest.windows(2).any(|w| w == ["--rcfile", SANDBOX_RC]));
-        assert!(rest.contains(&"-x".to_string()) && rest.contains(&"-q".to_string()));
-        assert_eq!(rest.last().unwrap(), &s(&sch));
-    }
-
-    /// The Landlock plan: xschem runs directly, confined to read and execute
-    /// the system and its install, read the inputs, and write only the
-    /// private folders, never the input's folder or the user's home.
-    #[cfg(unix)]
-    #[test]
-    fn the_landlock_plan_confines_to_what_the_run_needs() {
-        let x = Xschem {
-            program: PathBuf::from("/usr/bin/xschem"),
-            share: Some(PathBuf::from("/usr/share/xschem")),
-        };
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        let run = Run {
-            library: vec![PathBuf::from("/usr/share/xschem/xschem_library")],
             models_ngspice: Some(dir.join("models")),
             ..Run::default()
         };
         let d = dirs(&dir);
         let sch = d.staging.join("tb.sch");
-        let spec = netlist_command(&x, &Sandbox::Landlock { abi: 6 }, &sch, &run, &d);
-        // xschem runs directly, with the environment aispice sets.
-        assert_eq!(spec.program, PathBuf::from("/usr/bin/xschem"));
-        assert!(spec.clear_env);
-        let env: std::collections::HashMap<_, _> = spec
+        let plan = netlist_plan(&x, &sch, &run, &d);
+        assert_eq!(plan.program, PathBuf::from("/usr/bin/xschem"));
+        assert_eq!(plan.profile, Profile::Denylist);
+        assert_eq!(plan.limits, limits());
+        assert_eq!(plan.cwd, d.out);
+        assert_eq!(
+            plan.write,
+            vec![d.out.clone(), d.home.clone(), d.tmp.clone()]
+        );
+        assert!(!plan.write.contains(&dir));
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(!plan.write.contains(&PathBuf::from(home)));
+        }
+        for r in [&d.staging, &d.rc, &pdk, &PathBuf::from("/usr/share/xschem")] {
+            assert!(plan.read.contains(r), "{r:?}: {:?}", plan.read);
+        }
+        assert!(
+            plan.exec
+                .iter()
+                .all(|p| HELPERS.contains(&p.to_str().unwrap()))
+        );
+        let env: std::collections::HashMap<_, _> = plan
             .env
             .iter()
             .map(|(k, v)| {
@@ -1008,8 +643,6 @@ mod tests {
             env["AISPICE_XSCHEM_NETLIST_DIR"],
             d.out.display().to_string()
         );
-        // The environment is a fixed allowlist: nothing that could point the
-        // process at the user's session is carried over.
         for leaked in [
             "DBUS_SESSION_BUS_ADDRESS",
             "XDG_RUNTIME_DIR",
@@ -1019,7 +652,7 @@ mod tests {
         ] {
             assert!(!env.contains_key(leaked), "{leaked} reached the sandbox");
         }
-        let args: Vec<String> = spec
+        let args: Vec<String> = plan
             .args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1028,38 +661,8 @@ mod tests {
             args.windows(2)
                 .any(|w| w == ["--rcfile", &d.rc.display().to_string()])
         );
+        assert!(args.contains(&"-x".to_string()) && args.contains(&"-q".to_string()));
         assert_eq!(args.last().unwrap(), &sch.display().to_string());
-        let ll = spec.confine.as_ref().unwrap().landlock.as_ref().unwrap();
-        // Writable: only the private output, home and tmp, never the input's
-        // folder or the user's home; /dev/null is read-write.
-        assert!(
-            ll.write.contains(&d.out) && ll.write.contains(&d.home) && ll.write.contains(&d.tmp)
-        );
-        assert!(!ll.write.contains(&dir));
-        assert!(ll.rw.contains(&PathBuf::from("/dev/null")));
-        if let Some(home) = std::env::var_os("HOME") {
-            assert!(!ll.write.contains(&PathBuf::from(home)));
-        }
-        // Readable: the system and the private copy. Executable: only xschem
-        // and its helpers, never a directory of binaries like /usr/bin.
-        assert!(ll.read.contains(&PathBuf::from("/usr")));
-        assert!(ll.read.contains(&d.staging));
-        assert!(ll.exec.contains(&PathBuf::from("/usr/bin/xschem")));
-        assert!(
-            !ll.exec.contains(&PathBuf::from("/usr/bin"))
-                && !ll.exec.contains(&PathBuf::from("/usr"))
-        );
-    }
-
-    /// A sandbox that starts on this machine, or `None` with a note.
-    async fn working_sandbox() -> Option<Sandbox> {
-        match Sandbox::select(&CancellationToken::new()).await {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("skipped: no sandbox here: {e}");
-                None
-            }
-        }
     }
 
     /// Gated on xschem and a working sandbox: a small schematic netlists,
@@ -1071,39 +674,94 @@ mod tests {
             eprintln!("skipped: xschem is not installed");
             return;
         };
-        let Some(sandbox) = working_sandbox().await else {
-            return;
-        };
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        let sch = "v {xschem version=3.4.4 file_version=1.2}\nN 0 -30 0 -60 {}\nC {res.sym} 0 0 0 0 {name=R1 value=1k}\nC {gnd.sym} 0 30 0 0 {name=l1 lab=GND}\nC {lab_pin.sym} 0 -60 0 0 {name=p1 lab=out}\n";
-        // An rc in the working folder would leave a mark if xschem sourced it.
-        let mark = dir.join("rc-was-read");
-        let rc = format!("exec touch {}\n", mark.display());
-        let cwd = std::env::current_dir().unwrap();
-        let cwd_rc = cwd.join("xschemrc");
-        let wrote_cwd_rc = !cwd_rc.exists() && std::fs::write(&cwd_rc, &rc).is_ok();
-        let run = Run {
-            library: x.library(),
-            ..Run::default()
-        };
-        let text = netlist(
-            &x,
-            &sandbox,
-            "rc.sch",
-            &SchText::trusted_for_tests(sch),
-            &run,
-            &CancellationToken::new(),
-        )
-        .await;
-        if wrote_cwd_rc {
-            let _ = std::fs::remove_file(&cwd_rc);
+        for sandbox in crate::sandbox::every_available().await {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            let sch = "v {xschem version=3.4.4 file_version=1.2}\nN 0 -30 0 -60 {}\nC {res.sym} 0 0 0 0 {name=R1 value=1k}\nC {gnd.sym} 0 30 0 0 {name=l1 lab=GND}\nC {lab_pin.sym} 0 -60 0 0 {name=p1 lab=out}\n";
+            // An rc in the working folder would leave a mark if xschem sourced it.
+            let mark = dir.join("rc-was-read");
+            let rc = format!("exec touch {}\n", mark.display());
+            let cwd = std::env::current_dir().unwrap();
+            let cwd_rc = cwd.join("xschemrc");
+            let wrote_cwd_rc = !cwd_rc.exists() && std::fs::write(&cwd_rc, &rc).is_ok();
+            let run = Run {
+                library: x.library(),
+                ..Run::default()
+            };
+            let text = netlist(
+                &x,
+                &sandbox,
+                "rc.sch",
+                &SchText::trusted_for_tests(sch),
+                &run,
+                &CancellationToken::new(),
+            )
+            .await;
+            if wrote_cwd_rc {
+                let _ = std::fs::remove_file(&cwd_rc);
+            }
+            let text = text.unwrap();
+            // The resistor netlists between the named nets (xschem versions
+            // differ on whether they add `m=1`, so do not require it here).
+            assert!(
+                text.contains("R1 out GND 1k"),
+                "{}: {text}",
+                sandbox.describe()
+            );
+            assert!(!mark.exists());
         }
-        let text = text.unwrap();
-        // The resistor netlists between the named nets (xschem versions
-        // differ on whether they add `m=1`, so do not require it here).
-        assert!(text.contains("R1 out GND 1k"), "{text}");
-        assert!(!mark.exists());
+    }
+
+    /// A run that dies of a signal, or leaves an empty netlist or one cut
+    /// off before `.end`, netlisted nothing: xschem aborts and leaves an
+    /// empty file when it cannot start a helper (its process limit reached).
+    /// An exit code is not a failure, since xschem's counts problems in the
+    /// drawing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unfinished_netlist_is_an_error() {
+        for sandbox in crate::sandbox::every_available().await {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            for (script, want) in [
+                ("#!/bin/sh\n: > netlist.spice\n", "netlist is empty"),
+                (
+                    "#!/bin/sh\nprintf '** sch_path: tb.sch\\nR1 a b 1k\\n' > netlist.spice\n",
+                    "stops before `.end`",
+                ),
+                (
+                    "#!/bin/sh\nprintf '** sch_path: tb.sch\\n.end\\n' > netlist.spice\nkill -9 $$\n",
+                    "ended by a signal",
+                ),
+            ] {
+                let err = run_stand_in(&sandbox, &dir, script).await.unwrap_err();
+                assert!(
+                    err.to_string().contains(want),
+                    "{}: {err}",
+                    sandbox.describe()
+                );
+            }
+            let text = run_stand_in(
+                &sandbox,
+                &dir,
+                "#!/bin/sh\nprintf 'R1 a b 1k\\n.END\\n\\n' > netlist.spice\nexit 10\n",
+            )
+            .await
+            .unwrap();
+            assert_eq!(text, "R1 a b 1k\n.END\n\n", "{}", sandbox.describe());
+            // Run directly, a high exit code is still an exit code, not a
+            // signal; only bubblewrap reports a signal that way.
+            if !sandbox.is_bwrap() {
+                let text = run_stand_in(
+                    &sandbox,
+                    &dir,
+                    "#!/bin/sh\nprintf '.end\\n' > netlist.spice\nexit 200\n",
+                )
+                .await
+                .unwrap();
+                assert_eq!(text, ".end\n", "{}", sandbox.describe());
+            }
+        }
     }
 
     /// Write a stand-in in xschem's place that runs `script`, run it in
@@ -1138,39 +796,43 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_sandbox_holds() {
-        let Some(sandbox) = working_sandbox().await else {
-            return;
-        };
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        // A file the run does not allow reading, beside the input.
-        let decoy = dir.join("decoy");
-        std::fs::write(&decoy, "SECRET\n").unwrap();
-        // Marks outside the one writable folder: the input's folder, the
-        // user's home, the real /tmp.
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()));
-        let tag = format!("aispice-confinement-{}", std::process::id());
-        let marks = [
-            dir.join(&tag),
-            home.join(&tag),
-            PathBuf::from("/tmp").join(&tag),
-        ];
-        let mut script = String::from("#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n");
-        for m in &marks {
-            script.push_str(&format!("touch '{}' 2>/dev/null\n", m.display()));
+        for sandbox in crate::sandbox::every_available().await {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            // A file the run does not allow reading, beside the input.
+            let decoy = dir.join("decoy");
+            std::fs::write(&decoy, "SECRET\n").unwrap();
+            // Marks outside the one writable folder: the input's folder, the
+            // user's home, the real /tmp.
+            let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()));
+            let tag = format!("aispice-confinement-{}", std::process::id());
+            let marks = [
+                dir.join(&tag),
+                home.join(&tag),
+                PathBuf::from("/tmp").join(&tag),
+            ];
+            let mut script = String::from("#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n");
+            for m in &marks {
+                script.push_str(&format!("touch '{}' 2>/dev/null\n", m.display()));
+            }
+            script.push_str(&format!(
+                "cat '{}' >> netlist.spice 2>/dev/null\nprintf '.end\\n' >> netlist.spice\n",
+                decoy.display()
+            ));
+            let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
+            let escaped: Vec<&PathBuf> = marks.iter().filter(|m| m.exists()).collect();
+            for m in &escaped {
+                let _ = std::fs::remove_file(m);
+            }
+            assert!(escaped.is_empty(), "wrote outside the sandbox: {escaped:?}");
+            // No decoy content: the netlist is only what the stand-in wrote.
+            assert_eq!(
+                text,
+                "ok\n.end\n",
+                "{}: let something through",
+                sandbox.describe()
+            );
         }
-        script.push_str(&format!(
-            "cat '{}' >> netlist.spice 2>/dev/null\n",
-            decoy.display()
-        ));
-        let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
-        let escaped: Vec<&PathBuf> = marks.iter().filter(|m| m.exists()).collect();
-        for m in &escaped {
-            let _ = std::fs::remove_file(m);
-        }
-        assert!(escaped.is_empty(), "wrote outside the sandbox: {escaped:?}");
-        // No decoy content: the netlist is only what the stand-in wrote.
-        assert_eq!(text, "ok\n", "sandbox let something through");
     }
 
     /// Gated on Landlock being the sandbox here: from inside, a stand-in
@@ -1180,26 +842,30 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_landlock_sandbox_narrows_exec_and_signals() {
-        let Some(sandbox) = working_sandbox().await else {
-            return;
-        };
-        if !matches!(sandbox, Sandbox::Landlock { .. }) {
-            eprintln!("skipped: the sandbox here is not Landlock");
-            return;
-        }
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        // env, if it could run, would print the environment into the netlist;
-        // kill -0 of this test process, if allowed, would append `signalled`.
-        // Under Landlock both are denied, so the netlist stays `ok`.
-        let script = format!(
-            "#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n\
+        for sandbox in crate::sandbox::every_available().await {
+            if sandbox.is_bwrap() {
+                continue;
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            // env, if it could run, would print the environment into the netlist;
+            // kill -0 of this test process, if allowed, would append `signalled`.
+            // Under Landlock both are denied, so the netlist stays `ok`.
+            let script = format!(
+                "#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n\
              /usr/bin/env >> netlist.spice 2>/dev/null\n\
-             kill -0 {} 2>/dev/null && printf 'signalled\\n' >> netlist.spice\n",
-            std::process::id()
-        );
-        let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
-        assert_eq!(text, "ok\n", "exec or signal was not denied");
+             kill -0 {} 2>/dev/null && printf 'signalled\\n' >> netlist.spice\n\
+             printf '.end\\n' >> netlist.spice\n",
+                std::process::id()
+            );
+            let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
+            assert_eq!(
+                text,
+                "ok\n.end\n",
+                "{}: exec or signal was not denied",
+                sandbox.describe()
+            );
+        }
     }
 
     /// The netlist is read through one descriptor opened without following
@@ -1279,26 +945,5 @@ mod tests {
             tmp: dir.join("tmp"),
             staging: dir.join("in"),
         }
-    }
-
-    #[test]
-    fn bubblewrap_versions_parse() {
-        assert_eq!(parse_bwrap_version("bubblewrap 0.9.0\n"), Some((0, 9, 0)));
-        assert_eq!(parse_bwrap_version("bubblewrap 0.11.1"), Some((0, 11, 1)));
-        assert_eq!(parse_bwrap_version("bubblewrap 0.6"), Some((0, 6, 0)));
-        assert_eq!(parse_bwrap_version("nonsense"), None);
-        assert!(parse_bwrap_version("bubblewrap 0.8.0").unwrap() >= BWRAP_DISABLE_USERNS);
-        assert!(parse_bwrap_version("bubblewrap 0.7.0").unwrap() < BWRAP_DISABLE_USERNS);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn the_landlock_abi_floor_is_enforced() {
-        assert!(landlock_choice_from(0).is_err());
-        assert!(landlock_choice_from(crate::backend::confine::MIN_ABI - 1).is_err());
-        assert_eq!(
-            landlock_choice_from(crate::backend::confine::MIN_ABI),
-            Ok(crate::backend::confine::MIN_ABI)
-        );
     }
 }

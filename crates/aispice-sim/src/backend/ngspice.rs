@@ -20,13 +20,16 @@
 //! aispice holds, checked against their SHA-256, and loaded from there: OSDI
 //! files by `osdi` lines in the `.spiceinit`, co-simulation libraries by
 //! `d_cosim` model cards added to the deck after the netlist policy checked
-//! it. No path a deck or a project names is ever loaded.
+//! it. No path a deck or a project names is ever loaded. A run that loads
+//! any of them runs in a sandbox, since their code runs inside ngspice:
+//! see [`super::native_code`].
 //!
 //! ngspice refuses to evaluate `.meas` in batch mode when it writes a raw
 //! file, so a deck with measurements runs twice: once for the raw file and
 //! once, without it, for the measurements. ngspice runs take milliseconds;
 //! the job's timeout covers both.
 
+use super::native_code;
 use super::process::{self, ProcessSpec};
 use super::{
     Detection, SimError, SimId, SimJob, SimOutput, Simulator, Workspace, finish, read_raw_limited,
@@ -35,6 +38,7 @@ use super::{
 use crate::behavioral::{Library, LibraryKind, sha256_hex};
 use crate::log::parse_ngspice_output;
 use crate::pdk::PdkRun;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -281,14 +285,43 @@ impl Simulator for Ngspice {
             ".spiceinit",
             self.spiceinit_with(job.pdk.as_ref(), &osdi).as_bytes(),
         )?;
-        let mut spec = ProcessSpec::new(&exe, ws.path())
-            .env("HOME", ws.path())
-            .env("USERPROFILE", ws.path());
-        for a in Self::args(&stem) {
-            spec = spec.arg(a);
-        }
+        // Code the project compiled runs only in the sandbox, with the
+        // preloaded library that keeps ngspice's temporary file in the run
+        // folder.
+        let sandboxed = if job.libraries.is_empty() {
+            None
+        } else {
+            let sandbox = match &job.sandbox {
+                Some(s) => s.clone(),
+                None => native_code::ready(cancel).await.map_err(SimError::Config)?,
+            };
+            let preload = native_code::preload(cancel).await?;
+            native_code::place_preload(ws.path(), &preload)?;
+            let mut reads = job.reads.clone();
+            if let Some(pdk) = &job.pdk {
+                reads.extend(pdk.osdi.iter().cloned());
+            }
+            let plan = native_code::plan(&exe, ws.path(), &reads, Vec::new())?;
+            Some((sandbox, plan))
+        };
+        let command = |args: Vec<String>| match &sandboxed {
+            Some((sandbox, plan)) => {
+                let mut plan = plan.clone();
+                plan.args = args.into_iter().map(OsString::from).collect();
+                sandbox.command(&plan)
+            }
+            None => {
+                let mut spec = ProcessSpec::new(&exe, ws.path())
+                    .env("HOME", ws.path())
+                    .env("USERPROFILE", ws.path());
+                for a in args {
+                    spec = spec.arg(a);
+                }
+                Ok(spec)
+            }
+        };
         let started = std::time::Instant::now();
-        let out = process::run(&spec, job.timeout, cancel).await?;
+        let out = process::run(&command(Self::args(&stem))?, job.timeout, cancel).await?;
         let mut log = out.combined();
         let mut report = parse_ngspice_output(&log);
         if has_meas(&deck) && report.errors.is_empty() {
@@ -300,13 +333,7 @@ impl Simulator for Ngspice {
                 &format!("{stem}_meas.cir"),
                 measurement_deck(&deck).as_bytes(),
             )?;
-            let mut spec2 = ProcessSpec::new(&exe, ws.path())
-                .env("HOME", ws.path())
-                .env("USERPROFILE", ws.path());
-            for a in Self::meas_args(&stem) {
-                spec2 = spec2.arg(a);
-            }
-            let m = process::run(&spec2, left, cancel).await?;
+            let m = process::run(&command(Self::meas_args(&stem))?, left, cancel).await?;
             let mlog = m.combined();
             let mreport = parse_ngspice_output(&mlog);
             report.measurements = mreport.measurements;
