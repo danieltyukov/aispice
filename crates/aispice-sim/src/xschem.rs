@@ -542,7 +542,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("xschem"), "{err}");
+        // Off Linux the confined run is refused before bwrap starts, with
+        // an error that names bwrap rather than xschem.
+        if cfg!(target_os = "linux") {
+            assert!(err.to_string().contains("xschem"), "{err}");
+        }
         assert!(!sentinel.exists());
     }
 

@@ -354,9 +354,13 @@ async fn ngspice_runs_under_the_native_code_profile() {
     let pdk = std::env::var_os("AISPICE_PDK_IHP")
         .map(PathBuf::from)
         .filter(|p| p.join("libs.tech/ngspice/osdi/psp103.osdi").is_file());
+    let sandboxes = every_available().await;
+    if sandboxes.is_empty() {
+        return;
+    }
     let shim_dir = tempfile::tempdir().unwrap();
     let shim = tmpfile_shim(&shim_dir.path().canonicalize().unwrap());
-    for sandbox in every_available().await {
+    for sandbox in sandboxes {
         if shim.is_none() && !sandbox.is_bwrap() {
             eprintln!(
                 "skipped under {}: no C compiler for the tmpfile() shim",
