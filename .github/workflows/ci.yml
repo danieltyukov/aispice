@@ -160,6 +160,14 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
 
+      # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
+      # models is run under the native-code profile in each.
+      - name: Sandboxes
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
+
       # Only the PDK's sources are cached. The OSDI models are compiled on every
       # run instead: OpenVAF builds for the runner's own CPU, a cache restored on
       # another runner then holds code that stops ngspice before it writes any
