@@ -397,7 +397,7 @@ async fn compiled_code_in_a_sandboxed_ngspice_reaches_nothing_outside_its_run() 
         assert!(sockets.is_empty(), "{what}: sockets made: {sockets:?}");
         assert_eq!(
             environment_seen(&log),
-            ["HOME", "LC_ALL", "LD_PRELOAD", "PATH", "TMPDIR"],
+            ["HOME", "LC_ALL", "LD_PRELOAD", "PATH", "PWD", "TMPDIR"],
             "{what}:\n{log}"
         );
         assert!(!t.outside.exists(), "{what}: a file was written outside");
@@ -446,7 +446,7 @@ async fn the_probe_reaches_all_of_it_when_ngspice_runs_unconfined() {
             .any(|(w, a)| w.starts_with("socket-") && *a),
         "no socket was made:\n{log}"
     );
-    assert!(environment_seen(&log).len() > 5, "{log}");
+    assert!(environment_seen(&log).len() > 6, "{log}");
     assert!(t.outside.exists() && t.tmp_tag.exists());
     assert!(t.project.join("models/planted.txt").exists());
     assert!(sibling.alive());

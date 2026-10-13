@@ -447,11 +447,14 @@ pub(crate) fn place_preload(run: &Path, p: &Preload) -> Result<PathBuf, SimError
 }
 
 /// The environment of a confined run in `run`: these variables and nothing
-/// else. `LD_PRELOAD` names the library [`place_preload`] put there.
+/// else. `LD_PRELOAD` names the library [`place_preload`] put there. `PWD`
+/// is the run folder, as bubblewrap sets it when it enters the folder, so
+/// the environment is the same in every sandbox.
 pub fn environment(run: &Path) -> Vec<(OsString, OsString)> {
     vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("HOME".into(), run.into()),
+        ("PWD".into(), run.into()),
         ("TMPDIR".into(), run.into()),
         ("LC_ALL".into(), "C".into()),
         ("LD_PRELOAD".into(), run.join(PRELOAD_FILE).into()),

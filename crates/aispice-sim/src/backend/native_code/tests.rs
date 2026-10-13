@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::sandbox::{Scopes, SeccompPolicy, Signals};
 
 #[test]
@@ -98,9 +99,13 @@ fn a_run_folder_ld_preload_would_split_is_refused() {
 fn a_sandboxed_run_starts_from_a_fixed_environment() {
     let env = environment(Path::new("/tmp/run"));
     let keys: Vec<_> = env.iter().map(|(k, _)| k.to_str().unwrap()).collect();
-    assert_eq!(keys, ["PATH", "HOME", "TMPDIR", "LC_ALL", "LD_PRELOAD"]);
+    assert_eq!(
+        keys,
+        ["PATH", "HOME", "PWD", "TMPDIR", "LC_ALL", "LD_PRELOAD"]
+    );
     let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     assert_eq!(get("HOME"), Some("/tmp/run".into()));
+    assert_eq!(get("PWD"), Some("/tmp/run".into()));
     assert_eq!(get("TMPDIR"), Some("/tmp/run".into()));
     assert_eq!(
         get("LD_PRELOAD"),
