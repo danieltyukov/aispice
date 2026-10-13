@@ -19,6 +19,10 @@
 //!   profile's seccomp programs. At ABI 6 Landlock scopes signals and
 //!   abstract sockets; at 4 or 5 seccomp keeps signals to the process and
 //!   its group ([`Signals::SelfOnly`]), and every profile refuses sockets.
+//!
+//! [`Profile::NativeCode`] gets [`Signals::SelfOnly`] in every sandbox, at
+//! every ABI: a scope or namespace keeps a signal from arriving, but only
+//! seccomp makes `kill(-1, 0)` fail rather than report success.
 //!   This is the path on a kernel that restricts unprivileged user
 //!   namespaces without a bwrap AppArmor profile (Ubuntu 24.04's default).
 //! - else nothing runs, and `select` says why.
@@ -127,7 +131,7 @@ impl Sandbox {
             Err(e) => why.push(e),
         }
         Err(format!(
-            "no sandbox is available here: {} (see docs/XSCHEM.md)",
+            "no sandbox is available here: {} (see docs/SANDBOX.md)",
             why.join("; ")
         ))
     }
@@ -219,6 +223,29 @@ impl Sandbox {
         override_landlock_abi(abi)
     }
 
+    /// Tests only (feature `testing`): Landlock at `abi` for a test that
+    /// hands its sandbox to the code under test, with nothing changed for
+    /// the rest of the process. Prefer it to
+    /// [`Sandbox::use_landlock_abi_for_tests`] wherever a sandbox can be
+    /// handed in. Refused outside [`MIN_LANDLOCK_ABI`] to
+    /// [`MAX_LANDLOCK_ABI`], above the kernel's ABI, and on a system without
+    /// Landlock. No product build has this.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn landlock_at_abi_for_tests(abi: u8) -> Result<Sandbox, String> {
+        if !(MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI).contains(&abi) {
+            return Err(format!(
+                "aispice writes Landlock rulesets for ABI {MIN_LANDLOCK_ABI} to {MAX_LANDLOCK_ABI}, not {abi}"
+            ));
+        }
+        let here = landlock_abi_here()?;
+        if here < abi {
+            return Err(format!("the kernel's Landlock ABI is {here}, below {abi}"));
+        }
+        Ok(Sandbox {
+            kind: Kind::Landlock { abi },
+        })
+    }
+
     /// The ABI the Landlock ruleset is written against, under Landlock.
     pub fn landlock_abi(&self) -> Option<u8> {
         match self.kind {
@@ -233,8 +260,10 @@ impl Sandbox {
         let mut spec = match &self.kind {
             Kind::Bwrap(bwrap) => {
                 let mut spec = ProcessSpec::new(bwrap, &plan.cwd);
-                spec.args = bwrap_args(plan, &program);
-                spec.confine = Some(Confinement::for_bwrap(plan.limits, plan.profile));
+                let confine = Confinement::for_bwrap(plan.limits, plan.profile);
+                let programs = confine.seccomp().map_or(0, SeccompPolicy::programs);
+                spec.args = bwrap_args(plan, &program, programs);
+                spec.confine = Some(confine);
                 spec
             }
             Kind::Landlock { abi } => {
@@ -246,6 +275,14 @@ impl Sandbox {
                     .chain(DEVICES)
                     .map(PathBuf::from)
                     .collect();
+                // Without a merged /usr, /lib, /bin and the rest are real
+                // folders the loader and helpers come from.
+                read.extend(
+                    SYSTEM_LINKS
+                        .iter()
+                        .map(PathBuf::from)
+                        .filter(|p| p.is_dir() && !p.is_symlink()),
+                );
                 read.extend(plan.read.iter().cloned());
                 let landlock = LandlockPolicy {
                     read,
@@ -261,11 +298,7 @@ impl Sandbox {
                 };
                 let seccomp = SeccompPolicy {
                     profile: plan.profile,
-                    signals: if scoped {
-                        Signals::Unrestricted
-                    } else {
-                        Signals::SelfOnly
-                    },
+                    signals: plan.profile.signals(scoped),
                 };
                 let confine = Confinement::builder()
                     .landlock(landlock)
@@ -309,8 +342,9 @@ fn executables(program: &Path, others: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
-/// The bubblewrap arguments that run `plan` (its program at `program`).
-fn bwrap_args(plan: &Plan, program: &Path) -> Vec<OsString> {
+/// The bubblewrap arguments that run `plan` (its program at `program`),
+/// with `programs` seccomp programs to install.
+fn bwrap_args(plan: &Plan, program: &Path, programs: usize) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     let mut push = |items: &[&dyn AsRef<std::ffi::OsStr>]| {
         for i in items {
@@ -366,7 +400,7 @@ fn bwrap_args(plan: &Plan, program: &Path) -> Vec<OsString> {
     push(&[&"--chdir", &plan.cwd]);
     // The seccomp programs arrive as descriptors 3.. (backend::confine
     // moves them there); bubblewrap installs them before the program runs.
-    for i in 0..policy::PROFILE_PROGRAMS {
+    for i in 0..programs {
         push(&[&"--add-seccomp-fd", &(3 + i).to_string()]);
     }
     push(&[&"--", &program]);

@@ -86,6 +86,9 @@ const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
 const F_SETSIG: u32 = 10;
 const F_SETOWN_EX: u32 = 15;
 
+/// The pid of the program bubblewrap runs, in its PID namespace.
+const BWRAP_PROGRAM_PID: libc::pid_t = 2;
+
 /// The namespace flags `clone` must not carry.
 const CLONE_NEW: [libc::c_int; 8] = [
     libc::CLONE_NEWNS,
@@ -987,7 +990,18 @@ fn plan_seccomp(c: &Confinement) -> io::Result<Seccomp> {
     };
     let programs = profile_programs(profile)?;
     if c.seccomp_as_fds() {
-        let fds = programs
+        // bubblewrap runs the program as pid 2 of its PID namespace, under
+        // its reaper at pid 1, and makes it lead its own session and group
+        // (`--new-session`), so the signal program is written with that pid
+        // here and goes first, as below.
+        let mut all = Vec::new();
+        if signals == Signals::SelfOnly {
+            let mut s = SignalProgram::new();
+            s.patch(BWRAP_PROGRAM_PID);
+            all.push(s.bpf);
+        }
+        all.extend(programs);
+        let fds = all
             .iter()
             .map(|p| memfd_with(&bpf_bytes(p)))
             .collect::<io::Result<Vec<_>>>()?;
@@ -1460,6 +1474,20 @@ mod tests {
                 assert_eq!(back, bytes);
             }
         }
+        // Native code under bubblewrap: the signal program first, written
+        // with the program's pid in bubblewrap's namespace.
+        let c = Confinement::for_bwrap(Default::default(), Profile::NativeCode);
+        let Seccomp::Pass(fds) = plan_seccomp(&c).unwrap() else {
+            panic!("bubblewrap's programs are not handed over");
+        };
+        assert_eq!(fds.len(), PROFILE_PROGRAMS + 1);
+        let mut want = SignalProgram::new();
+        want.patch(BWRAP_PROGRAM_PID);
+        let mut back = Vec::new();
+        std::fs::File::from(fds.into_iter().next().unwrap())
+            .read_to_end(&mut back)
+            .unwrap();
+        assert_eq!(back, bpf_bytes(&want.bpf));
     }
 
     /// The process count covers at least this test's own threads, and the

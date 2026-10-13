@@ -427,7 +427,31 @@ pub async fn netlist(
     write_new(&input, text.as_str().as_bytes()).map_err(|e| SimError::Io(e.to_string()))?;
     let spec = netlist_command(x, sandbox, &input, run, &dirs)?;
     let result = process::run(&spec, TIMEOUT, cancel).await?;
-    read_netlist(&dirs.out.join("netlist.spice"), &result.combined())
+    let log = result.combined();
+    let unfinished = |why: &str| {
+        SimError::NoOutput(format!(
+            "xschem did not finish: {why}{}",
+            first_line(&log)
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        ))
+    };
+    // xschem's exit code counts problems in the drawing, so it is not
+    // checked. One that dies of a signal (128 and up through bubblewrap),
+    // such as the abort when it cannot start a helper because its process
+    // limit is reached, leaves an empty or partial netlist behind.
+    if result.code.is_none_or(|c| c >= 128) {
+        return Err(unfinished("it was ended by a signal"));
+    }
+    let text = read_netlist(&dirs.out.join("netlist.spice"), &log)?;
+    // Every SPICE netlist xschem writes ends with `.end`.
+    match text.lines().map(str::trim).rfind(|l| !l.is_empty()) {
+        None => Err(unfinished("its netlist is empty")),
+        Some(last) if !last.eq_ignore_ascii_case(".end") => {
+            Err(unfinished("its netlist stops before `.end`"))
+        }
+        Some(_) => Ok(text),
+    }
 }
 
 fn first_line(log: &str) -> Option<String> {
@@ -542,7 +566,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("xschem"), "{err}");
+        // Off Linux the confined run is refused before bwrap starts, with
+        // an error that names bwrap rather than xschem.
+        if cfg!(target_os = "linux") {
+            assert!(err.to_string().contains("xschem"), "{err}");
+        }
         assert!(!sentinel.exists());
     }
 
@@ -679,6 +707,46 @@ mod tests {
         }
     }
 
+    /// A run that dies of a signal, or leaves an empty netlist or one cut
+    /// off before `.end`, netlisted nothing: xschem aborts and leaves an
+    /// empty file when it cannot start a helper (its process limit reached).
+    /// An exit code is not a failure, since xschem's counts problems in the
+    /// drawing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unfinished_netlist_is_an_error() {
+        for sandbox in crate::sandbox::every_available().await {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            for (script, want) in [
+                ("#!/bin/sh\n: > netlist.spice\n", "netlist is empty"),
+                (
+                    "#!/bin/sh\nprintf '** sch_path: tb.sch\\nR1 a b 1k\\n' > netlist.spice\n",
+                    "stops before `.end`",
+                ),
+                (
+                    "#!/bin/sh\nprintf '** sch_path: tb.sch\\n.end\\n' > netlist.spice\nkill -9 $$\n",
+                    "ended by a signal",
+                ),
+            ] {
+                let err = run_stand_in(&sandbox, &dir, script).await.unwrap_err();
+                assert!(
+                    err.to_string().contains(want),
+                    "{}: {err}",
+                    sandbox.describe()
+                );
+            }
+            let text = run_stand_in(
+                &sandbox,
+                &dir,
+                "#!/bin/sh\nprintf 'R1 a b 1k\\n.END\\n\\n' > netlist.spice\nexit 10\n",
+            )
+            .await
+            .unwrap();
+            assert_eq!(text, "R1 a b 1k\n.END\n\n", "{}", sandbox.describe());
+        }
+    }
+
     /// Write a stand-in in xschem's place that runs `script`, run it in
     /// `sandbox` on an empty schematic, and return its netlist.
     #[cfg(unix)]
@@ -731,7 +799,7 @@ mod tests {
                 script.push_str(&format!("touch '{}' 2>/dev/null\n", m.display()));
             }
             script.push_str(&format!(
-                "cat '{}' >> netlist.spice 2>/dev/null\n",
+                "cat '{}' >> netlist.spice 2>/dev/null\nprintf '.end\\n' >> netlist.spice\n",
                 decoy.display()
             ));
             let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
@@ -743,7 +811,7 @@ mod tests {
             // No decoy content: the netlist is only what the stand-in wrote.
             assert_eq!(
                 text,
-                "ok\n",
+                "ok\n.end\n",
                 "{}: let something through",
                 sandbox.describe()
             );
@@ -769,13 +837,14 @@ mod tests {
             let script = format!(
                 "#!/bin/sh\nprintf 'ok\\n' > netlist.spice\n\
              /usr/bin/env >> netlist.spice 2>/dev/null\n\
-             kill -0 {} 2>/dev/null && printf 'signalled\\n' >> netlist.spice\n",
+             kill -0 {} 2>/dev/null && printf 'signalled\\n' >> netlist.spice\n\
+             printf '.end\\n' >> netlist.spice\n",
                 std::process::id()
             );
             let text = run_stand_in(&sandbox, &dir, &script).await.unwrap();
             assert_eq!(
                 text,
-                "ok\n",
+                "ok\n.end\n",
                 "{}: exec or signal was not denied",
                 sandbox.describe()
             );

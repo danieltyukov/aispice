@@ -39,10 +39,11 @@ landlock.workspace = true
 seccompiler.workspace = true
 
 [features]
-# Exposes `sandbox::Sandbox::use_landlock_abi_for_tests`, so tests on a newer
-# kernel can run under a real Landlock ruleset at an older ABI. Only
-# dev-dependencies enable it, this crate's own included (for its
-# integration tests); never on in a product build.
+# Exposes `sandbox::Sandbox::landlock_at_abi_for_tests` and
+# `use_landlock_abi_for_tests`, so tests on a newer kernel can run under a
+# real Landlock ruleset at an older ABI. Only dev-dependencies enable it,
+# this crate's own included (for its integration tests); CI checks that no
+# normal dependency path of a shipped binary does.
 testing = []
 
 [dev-dependencies]

@@ -103,7 +103,8 @@ fn the_bubblewrap_command_shows_only_the_plan() {
         .filter(|w| w[0] == "--add-seccomp-fd")
         .map(|w| &w[1])
         .collect();
-    let want: Vec<String> = (0..policy::PROFILE_PROGRAMS)
+    // Native code also gets the signal program.
+    let want: Vec<String> = (0..policy::PROFILE_PROGRAMS + 1)
         .map(|i| (3 + i).to_string())
         .collect();
     assert_eq!(fds, want.iter().collect::<Vec<_>>());
@@ -155,6 +156,14 @@ fn the_landlock_command_confines_to_the_plan() {
                 .iter()
                 .any(|p| p == Path::new("/usr/bin") || p == Path::new("/usr"))
         );
+        // Native code has its signals checked at every ABI.
+        plan.profile = Profile::NativeCode;
+        let spec = Sandbox::landlock_for_tests(abi).command(&plan).unwrap();
+        assert_eq!(
+            spec.confine.as_ref().unwrap().seccomp().unwrap().signals,
+            Signals::SelfOnly
+        );
+        plan.profile = Profile::Denylist;
     }
 }
 
@@ -258,6 +267,58 @@ async fn landlock_narrows_exec_and_signals() {
     }
 }
 
+/// Native code may signal itself and its group but not every process, in
+/// every sandbox here: `kill(-1, 0)` fails with an errno at Landlock ABI 6
+/// too, where the signal scope alone would let it report success, and under
+/// bubblewrap, whose namespace pid the signal program is written with.
+#[cfg(unix)]
+#[tokio::test]
+async fn native_code_cannot_signal_everyone() {
+    for sandbox in every_available().await {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let script = "#!/bin/sh\nprintf 'ok\\n' > result\n\
+            kill -0 $$ && printf 'self\\n' >> result\n\
+            kill -0 0 && printf 'group\\n' >> result\n\
+            kill -0 -$$ && printf 'own group\\n' >> result\n\
+            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n";
+        let text = run_script(&sandbox, &dir, script, Profile::NativeCode).await;
+        assert!(
+            text.starts_with("ok\nself\ngroup\nown group\n"),
+            "{}: {text}",
+            sandbox.describe()
+        );
+        assert!(!text.contains("everyone"), "{}: {text}", sandbox.describe());
+        assert!(
+            text.contains("not permitted"),
+            "{}: kill(-1, 0) did not fail with EPERM: {text}",
+            sandbox.describe()
+        );
+    }
+}
+
+/// The scoped test entry point gives Landlock at an ABI the kernel has,
+/// and refuses one it does not or that aispice does not write.
+#[cfg(target_os = "linux")]
+#[test]
+fn landlock_at_an_abi_for_tests() {
+    for abi in [0, 3, 7] {
+        assert!(Sandbox::landlock_at_abi_for_tests(abi).is_err(), "{abi}");
+    }
+    let Ok(kernel) = landlock_abi_here() else {
+        assert!(Sandbox::landlock_at_abi_for_tests(4).is_err());
+        return;
+    };
+    for abi in MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI {
+        let got = Sandbox::landlock_at_abi_for_tests(abi);
+        if abi <= kernel {
+            assert_eq!(got.unwrap().landlock_abi(), Some(abi));
+        } else {
+            assert!(got.is_err(), "{abi}");
+        }
+    }
+}
+
 /// A Landlock sandbox writes its ruleset against its own ABI, not the
 /// kernel's. ABI 5 added the right to use ioctl on a device, so `stty` on
 /// `/dev/null` (granted read and write, never that right) is refused from
@@ -354,9 +415,13 @@ async fn ngspice_runs_under_the_native_code_profile() {
     let pdk = std::env::var_os("AISPICE_PDK_IHP")
         .map(PathBuf::from)
         .filter(|p| p.join("libs.tech/ngspice/osdi/psp103.osdi").is_file());
+    let sandboxes = every_available().await;
+    if sandboxes.is_empty() {
+        return;
+    }
     let shim_dir = tempfile::tempdir().unwrap();
     let shim = tmpfile_shim(&shim_dir.path().canonicalize().unwrap());
-    for sandbox in every_available().await {
+    for sandbox in sandboxes {
         if shim.is_none() && !sandbox.is_bwrap() {
             eprintln!(
                 "skipped under {}: no C compiler for the tmpfile() shim",

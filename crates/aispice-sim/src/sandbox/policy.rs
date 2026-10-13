@@ -2,9 +2,10 @@
 //!
 //! A [`Confinement`] is only made by [`ConfinementBuilder::build`], which
 //! refuses a combination that leaves a gap: a Landlock ruleset older than
-//! ABI 4, Landlock scopes the ABI cannot enforce, or a ruleset below ABI 6
+//! ABI 4, Landlock scopes the ABI cannot enforce, a ruleset below ABI 6
 //! (which cannot scope signals and abstract UNIX sockets) without a seccomp
-//! policy that does both instead. The types are plain data on every
+//! policy that does both instead, or untrusted native code
+//! ([`Profile::NativeCode`]) whose signals seccomp does not check. The types are plain data on every
 //! platform; only Linux enforces them (`crate::backend::confine`), and
 //! running a confined process anywhere else is an error, never a silent
 //! unconfined run.
@@ -20,8 +21,10 @@ pub const SCOPED_LANDLOCK_ABI: u8 = 6;
 pub const MAX_LANDLOCK_ABI: u8 = 6;
 
 /// How many seccomp programs a [`Profile`] compiles to: the `clone3`
-/// program, on x86_64 the x32 program, and the profile. bubblewrap gets one
-/// descriptor for each, numbered from 3, and installs them in that order.
+/// program, on x86_64 the x32 program, and the profile. With
+/// [`Signals::SelfOnly`] the signal program comes first; see
+/// [`SeccompPolicy::programs`]. bubblewrap gets one descriptor for each,
+/// numbered from 3, and installs them in that order.
 pub(crate) const PROFILE_PROGRAMS: usize = if cfg!(target_arch = "x86_64") { 3 } else { 2 };
 
 /// How a child process is confined. Made by [`Confinement::builder`].
@@ -55,13 +58,15 @@ impl Confinement {
     }
 
     /// The limits, with `profile`'s programs handed to the program (which
-    /// is bubblewrap) as descriptors 3.. for it to install.
+    /// is bubblewrap) as descriptors 3.. for it to install. Its PID
+    /// namespace keeps signals in; [`Profile::NativeCode`] also gets the
+    /// signal program.
     pub(crate) fn for_bwrap(limits: Limits, profile: Profile) -> Self {
         Self {
             landlock: None,
             seccomp: Some(SeccompPolicy {
                 profile,
-                signals: Signals::Unrestricted,
+                signals: profile.signals(true),
             }),
             limits,
             seccomp_as_fds: true,
@@ -138,6 +143,13 @@ pub struct SeccompPolicy {
     pub signals: Signals,
 }
 
+impl SeccompPolicy {
+    /// How many seccomp programs this policy installs.
+    pub(crate) fn programs(&self) -> usize {
+        PROFILE_PROGRAMS + usize::from(self.signals == Signals::SelfOnly)
+    }
+}
+
 /// Which system calls a profile lets through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
@@ -153,6 +165,22 @@ pub enum Profile {
     /// Landlock allows). Everything else gets `ENOSYS`. For untrusted native
     /// code, such as ngspice loading a user's OSDI or `d_cosim` library.
     NativeCode,
+}
+
+impl Profile {
+    /// The signal policy the profile runs with when something else (a PID
+    /// namespace, or Landlock's signal scope) already keeps signals in:
+    /// [`Signals::SelfOnly`] for untrusted native code all the same, since
+    /// a signal scope still lets `kill(-1, 0)` succeed, so only seccomp can
+    /// show that nothing was broadcast. Without such a container every
+    /// profile needs [`Signals::SelfOnly`].
+    pub fn signals(self, contained: bool) -> Signals {
+        match self {
+            Profile::NativeCode => Signals::SelfOnly,
+            Profile::Denylist if contained => Signals::Unrestricted,
+            Profile::Denylist => Signals::SelfOnly,
+        }
+    }
 }
 
 /// To whom the process may send signals, enforced by seccomp.
@@ -209,6 +237,12 @@ impl ConfinementBuilder {
 
     /// The confinement, or why it would leave a gap.
     pub fn build(self) -> Result<Confinement, PolicyError> {
+        if self
+            .seccomp
+            .is_some_and(|s| s.profile == Profile::NativeCode && s.signals != Signals::SelfOnly)
+        {
+            return Err(PolicyError::NativeCodeSignalsUnchecked);
+        }
         if let Some(ll) = &self.landlock {
             let abi = ll.min_abi;
             if abi < MIN_LANDLOCK_ABI {
@@ -259,6 +293,8 @@ pub enum PolicyError {
         "with Landlock ABI {abi} and no abstract-socket scope, sockets need a seccomp policy, which refuses them"
     )]
     SocketsUnconfined { abi: u8 },
+    #[error("untrusted native code (Profile::NativeCode) needs Signals::SelfOnly at every ABI")]
+    NativeCodeSignalsUnchecked,
 }
 
 #[cfg(test)]
@@ -362,6 +398,42 @@ mod tests {
                 .unwrap_err(),
             PolicyError::AbiUnknown { abi: 7 }
         );
+    }
+
+    /// Native code gets seccomp's signal check whatever else holds signals:
+    /// with a Landlock signal scope, under bubblewrap, and with no Landlock.
+    #[test]
+    fn native_code_always_checks_signals() {
+        let unchecked = SeccompPolicy {
+            profile: Profile::NativeCode,
+            signals: Signals::Unrestricted,
+        };
+        for b in [
+            Confinement::builder().landlock(ll(6, Scopes::ALL)),
+            Confinement::builder(),
+        ] {
+            assert_eq!(
+                b.seccomp(unchecked).build().unwrap_err(),
+                PolicyError::NativeCodeSignalsUnchecked
+            );
+        }
+        assert!(
+            Confinement::builder()
+                .landlock(ll(6, Scopes::ALL))
+                .seccomp(SELF_ONLY)
+                .build()
+                .is_ok()
+        );
+        for contained in [true, false] {
+            assert_eq!(Profile::NativeCode.signals(contained), Signals::SelfOnly);
+        }
+        assert_eq!(Profile::Denylist.signals(true), Signals::Unrestricted);
+        assert_eq!(Profile::Denylist.signals(false), Signals::SelfOnly);
+        let bwrap = Confinement::for_bwrap(Limits::default(), Profile::NativeCode);
+        assert_eq!(bwrap.seccomp().unwrap().signals, Signals::SelfOnly);
+        assert_eq!(bwrap.seccomp().unwrap().programs(), PROFILE_PROGRAMS + 1);
+        let bwrap = Confinement::for_bwrap(Limits::default(), Profile::Denylist);
+        assert_eq!(bwrap.seccomp().unwrap().programs(), PROFILE_PROGRAMS);
     }
 
     #[test]

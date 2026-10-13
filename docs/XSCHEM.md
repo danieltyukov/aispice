@@ -69,7 +69,7 @@ xschem evaluates Tcl from the files it opens: `tcleval(...)` property values, `@
 
    It reaches no network, socket, other process or IPC, and it is killed with everything it started when it exits, times out or is cancelled. Nothing caps the total bytes written across its folders.
 
-   The netlist xschem writes is read back through one descriptor opened without following a symlink and without blocking, so a fifo left in its place is refused rather than waited on.
+   The netlist xschem writes is read back through one descriptor opened without following a symlink and without blocking, so a fifo left in its place is refused rather than waited on. A run that ends by a signal, or leaves a netlist that is empty or stops before its `.end`, did not finish (xschem aborts that way when it cannot start a helper), and its file is not taken for xschem's netlist.
 
    On Ubuntu 24.04 bubblewrap needs an AppArmor profile to start; [SANDBOX.md](SANDBOX.md#using-bubblewrap-on-ubuntu-2404) shows one.
 
