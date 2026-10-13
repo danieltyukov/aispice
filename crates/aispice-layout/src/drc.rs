@@ -390,7 +390,6 @@ pub async fn run(
     tools::check_path(out_dir)?;
     tools::check_name("cell", cell)?;
     std::fs::create_dir_all(out_dir).map_err(|e| LayoutError::Io(e.to_string()))?;
-    let run = RunDir::new()?;
     let access = tools::Access::new()
         .read(&files.root)
         .read(gds)
@@ -400,11 +399,12 @@ pub async fn run(
         let report = out_dir.join(format!("{name}.lyrdb"));
         let log = out_dir.join(format!("{name}.log"));
         let vars = switches(files, gds, cell, checks, table, &report, &log);
-        let dir = run.path().to_path_buf();
         let access = &access;
         async move {
-            let out = tools::klayout(programs, &dir, deck, &vars, access, cancel).await?;
-            if !out.success() || !report.is_file() {
+            // Each deck gets a fresh folder of its own.
+            let run = RunDir::new()?;
+            let out = tools::klayout(programs, &run, deck, &vars, access, cancel).await?;
+            if !out.success() || !tools::is_output(&report) {
                 return Err(LayoutError::Failed {
                     program: format!("KLayout DRC ({name} deck)"),
                     message: tools::tail(&out.combined(), 8),
@@ -425,15 +425,7 @@ pub async fn run(
     };
     let mut counts: BTreeMap<String, RuleCount> = BTreeMap::new();
     for path in &reports {
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        if size > MAX_REPORT_BYTES {
-            return Err(LayoutError::Input(format!(
-                "{} is larger than {} MiB",
-                path.display(),
-                MAX_REPORT_BYTES >> 20
-            )));
-        }
-        let text = std::fs::read_to_string(path).map_err(|e| LayoutError::Io(e.to_string()))?;
+        let text = tools::read_output_text(path, MAX_REPORT_BYTES)?;
         let (_, rules, violations) = parse_lyrdb(&text).map_err(LayoutError::Input)?;
         for r in rules {
             counts

@@ -26,5 +26,9 @@ tempfile.workspace = true
 roxmltree = "0.21"
 toml = "1"
 
+# Opening a run's files without following a link.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

@@ -147,19 +147,22 @@ pub fn clean(
     Ok((out, ports, counts, total_cap))
 }
 
+/// One Magic pass in a fresh folder of its own: the netlist it wrote, and
+/// the `.ext` file it left.
 #[allow(clippy::too_many_arguments)]
 async fn magic_pass(
     programs: &Programs,
     files: &PdkLayoutFiles,
-    run: &RunDir,
-    script: &Path,
     gds: &Path,
     cell: &str,
     resist: bool,
     unlabel: &str,
-    out: &Path,
     cancel: &CancellationToken,
-) -> Result<String, LayoutError> {
+) -> Result<(String, String), LayoutError> {
+    let run = RunDir::new()?;
+    let script = run.script("extract.tcl", SCRIPT)?;
+    let out = run.path().join(if resist { "r.spice" } else { "c.spice" });
+    let out = out.as_path();
     let env = [
         ("AISPICE_GDS", gds.display().to_string()),
         ("AISPICE_CELL", cell.to_string()),
@@ -174,15 +177,15 @@ async fn magic_pass(
         .write_file(out);
     let res = tools::magic(
         programs,
-        run.path(),
+        &run,
         &files.magicrc,
-        script,
+        &script,
         &env,
         &access,
         cancel,
     )
     .await?;
-    if !res.success() || !out.is_file() {
+    if !res.success() || !tools::is_output(out) {
         let why = if res.code.is_none() {
             "Magic crashed".to_string()
         } else {
@@ -193,14 +196,10 @@ async fn magic_pass(
             message: why,
         });
     }
-    let size = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
-    if size > MAX_BYTES {
-        return Err(LayoutError::Input(format!(
-            "the extracted netlist is larger than {} MiB",
-            MAX_BYTES >> 20
-        )));
-    }
-    std::fs::read_to_string(out).map_err(|e| LayoutError::Io(e.to_string()))
+    let netlist = tools::read_output_text(out, MAX_BYTES)?;
+    let ext = tools::read_output_text(&run.path().join(format!("{cell}.ext")), MAX_BYTES)
+        .map_err(|e| LayoutError::Io(format!("Magic's .ext file: {e}")))?;
+    Ok((netlist, ext))
 }
 
 /// Extract a cell with capacitance (and with `resistance`, resistor
@@ -219,32 +218,19 @@ pub async fn run(
     tools::check_name("cell", cell)?;
     files.check_magic()?;
     std::fs::create_dir_all(out_dir).map_err(|e| LayoutError::Io(e.to_string()))?;
-    let run = RunDir::new()?;
-    let script = run.script("extract.tcl", SCRIPT)?;
-    let c_out = run.path().join("c.spice");
-    let mut text = magic_pass(
-        programs, files, &run, &script, gds, cell, false, "", &c_out, cancel,
-    )
-    .await?;
+    let (mut text, ext) = magic_pass(programs, files, gds, cell, false, "", cancel).await?;
     let mut substrate = None;
     let mut notes = Vec::new();
     if resistance {
-        let ext = std::fs::read_to_string(run.path().join(format!("{cell}.ext")))
-            .map_err(|e| LayoutError::Io(format!("Magic's .ext file: {e}")))?;
         let unlabel = substrate_name(&ext)
             .filter(|n| !n.ends_with('#'))
             .unwrap_or_default();
         if !unlabel.is_empty() {
             tools::check_name("net", &unlabel)?;
         }
-        let r_out = run.path().join("r.spice");
-        text = magic_pass(
-            programs, files, &run, &script, gds, cell, true, &unlabel, &r_out, cancel,
-        )
-        .await?;
+        let (r_text, ext) = magic_pass(programs, files, gds, cell, true, &unlabel, cancel).await?;
+        text = r_text;
         if !unlabel.is_empty() {
-            let ext = std::fs::read_to_string(run.path().join(format!("{cell}.ext")))
-                .map_err(|e| LayoutError::Io(format!("Magic's .ext file: {e}")))?;
             if let Some(auto) = substrate_name(&ext) {
                 substrate = Some((auto, unlabel.clone()));
             }
@@ -260,7 +246,7 @@ pub async fn run(
     )
     .map_err(LayoutError::Input)?;
     let path = out_dir.join(format!("{cell}.extracted.spice"));
-    std::fs::write(&path, &text).map_err(|e| LayoutError::Io(e.to_string()))?;
+    tools::create_file(&path, text.as_bytes())?;
     Ok(Extracted {
         cell: cell.to_string(),
         ports,

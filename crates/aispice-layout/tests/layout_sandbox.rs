@@ -182,7 +182,7 @@ async fn klayout_runs_confined() {
     let script = run.script("escape.py", KLAYOUT_SCRIPT).unwrap();
     let out = tools::klayout(
         &programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("marks", marks(&s)),
@@ -243,7 +243,7 @@ async fn magic_runs_confined() {
     let rc = run.script("empty.magicrc", "").unwrap();
     let out = tools::magic(
         &programs,
-        run.path(),
+        &run,
         &rc,
         &script,
         &[
@@ -288,14 +288,6 @@ async fn paths_through_links_or_dot_dot_are_refused_before_the_run() {
     let outside = s.out.parent().unwrap().join("elsewhere");
     std::fs::create_dir_all(&outside).unwrap();
     std::os::unix::fs::symlink(&outside, project.join("link")).unwrap();
-    let run = RunDir::new().unwrap();
-    let ran = run.path().join("ran");
-    let script = run
-        .script(
-            "touch.py",
-            &format!("open('{}', 'w').write('x')\n", ran.display()),
-        )
-        .unwrap();
     let dotdot = PathBuf::from(format!("{}/../run-1", s.out.display()));
     for access in [
         Access::new().read(&s.victim).write(project.join("link")),
@@ -304,9 +296,17 @@ async fn paths_through_links_or_dot_dot_are_refused_before_the_run() {
             .write(&s.out),
         Access::new().read(&s.victim).write(&dotdot),
     ] {
+        let run = RunDir::new().unwrap();
+        let ran = run.path().join("ran");
+        let script = run
+            .script(
+                "touch.py",
+                &format!("open('{}', 'w').write('x')\n", ran.display()),
+            )
+            .unwrap();
         let err = tools::klayout(
             &programs,
-            run.path(),
+            &run,
             &script,
             &[],
             &access,

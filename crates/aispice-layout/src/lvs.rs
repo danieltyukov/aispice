@@ -366,7 +366,7 @@ pub async fn run(
     tools::check_name("cell", &schematic.cell)?;
     std::fs::create_dir_all(out_dir).map_err(|e| LayoutError::Io(e.to_string()))?;
     let sch = out_dir.join("schematic.cir");
-    std::fs::write(&sch, &schematic.text).map_err(|e| LayoutError::Io(e.to_string()))?;
+    tools::create_file(&sch, schematic.text.as_bytes())?;
     let lvsdb = out_dir.join("lvs.lvsdb");
     let extracted = out_dir.join("extracted.cir");
     let log = out_dir.join("lvs.log");
@@ -397,16 +397,8 @@ pub async fn run(
         .read(&files.root)
         .read(gds)
         .write(out_dir);
-    let out = tools::klayout(
-        programs,
-        run.path(),
-        &files.lvs_deck,
-        &vars,
-        &access,
-        cancel,
-    )
-    .await?;
-    if !lvsdb.is_file() {
+    let out = tools::klayout(programs, &run, &files.lvs_deck, &vars, &access, cancel).await?;
+    if !tools::is_output(&lvsdb) {
         let all = out.combined();
         let tail: Vec<&str> = all
             .lines()
@@ -420,7 +412,7 @@ pub async fn run(
     }
     let mut report = read_lvsdb(programs, &lvsdb, out_dir, cancel).await?;
     report.cell = schematic.cell.clone();
-    report.extracted = extracted.is_file().then_some(extracted);
+    report.extracted = tools::is_output(&extracted).then_some(extracted);
     report.lvsdb = Some(lvsdb);
     report.schematic = Some(sch);
     Ok(report)
@@ -438,7 +430,7 @@ pub async fn read_lvsdb(
     let json = out_dir.join("lvs.json");
     let out = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("db", lvsdb.display().to_string()),
@@ -448,8 +440,7 @@ pub async fn read_lvsdb(
         cancel,
     )
     .await?;
-    let size = std::fs::metadata(&json).map(|m| m.len()).unwrap_or(0);
-    if !out.success() || size == 0 {
+    if !out.success() || !tools::is_output(&json) {
         return Err(LayoutError::Failed {
             program: "KLayout (reading the LVS result)".into(),
             message: out
@@ -461,12 +452,13 @@ pub async fn read_lvsdb(
                 .join("\n"),
         });
     }
-    if size > MAX_JSON_BYTES {
-        return Err(LayoutError::Input(
-            "the LVS result is too large to read".into(),
-        ));
+    let text = tools::read_output_text(&json, MAX_JSON_BYTES)?;
+    if text.is_empty() {
+        return Err(LayoutError::Failed {
+            program: "KLayout (reading the LVS result)".into(),
+            message: "it wrote an empty result".into(),
+        });
     }
-    let text = std::fs::read_to_string(&json).map_err(|e| LayoutError::Io(e.to_string()))?;
     parse_report(&text).map_err(LayoutError::Input)
 }
 

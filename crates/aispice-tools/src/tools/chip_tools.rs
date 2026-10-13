@@ -143,20 +143,9 @@ struct Loaded {
 }
 
 /// Read a file of a package, refusing one past `limit` or that is not a
-/// plain file.
+/// plain file (opened without following a link).
 fn read_capped(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{} is not a plain file", path.display()));
-    }
-    if meta.len() > limit {
-        return Err(format!(
-            "{} is larger than {} MiB",
-            path.display(),
-            limit >> 20
-        ));
-    }
-    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+    ltools::read_output(path, limit).map_err(|e| e.to_string())
 }
 
 /// A package folder of the project whose every entry stays inside it.
@@ -319,7 +308,7 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
                     m.package
                 ));
             }
-            std::fs::write(&gds, bytes).map_err(|e| e.to_string())?;
+            ltools::create_file(&gds, &bytes).map_err(|e| e.to_string())?;
         }
         let spice_name = manifest.file("spice");
         let spice = String::from_utf8(read_capped(&dir.join(&spice_name), MAX_VIEW_BYTES)?)
@@ -476,7 +465,9 @@ impl ChipTool {
         };
         let lvs_text = netlist::chip_netlist(&l.spec, &blocks, stdcells.as_deref(), VERSION)?;
         let lvs_path = out.join(format!("{}.lvs.spice", l.spec.name));
-        std::fs::write(&lvs_path, &lvs_text).map_err(|e| e.to_string())?;
+        // The chip folder is one KLayout wrote: a new file, never through
+        // whatever a run left there.
+        ltools::create_file(&lvs_path, lvs_text.as_bytes()).map_err(|e| e.to_string())?;
         let mut t = format!("Drawn and filled in {drawn:.0} s.\n");
         let mut result = json!({"gds": format!("{folder}/{}.gds", l.spec.name)});
         let mut checks: Option<(DrcReport, LvsReport)> = None;
@@ -558,15 +549,15 @@ impl ChipTool {
             "result": result,
         });
         let report_path = out.join(format!("{}.chip.json", l.spec.name));
-        std::fs::write(
+        ltools::create_file(
             &report_path,
-            serde_json::to_string_pretty(&report).unwrap_or_default() + "\n",
+            (serde_json::to_string_pretty(&report).unwrap_or_default() + "\n").as_bytes(),
         )
         .map_err(|e| e.to_string())?;
         files.push((format!("{}.chip.json", l.spec.name), report_path));
         let mut writes = Vec::new();
         for (name, path) in &files {
-            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let bytes = read_capped(path, gds::MAX_BYTES)?;
             writes.push(FileWrite {
                 rel: format!("{folder}/{name}"),
                 bytes,

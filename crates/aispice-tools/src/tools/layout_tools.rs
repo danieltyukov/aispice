@@ -473,7 +473,10 @@ impl LayoutTool {
         };
 
         let summary = generated.summary();
-        let bytes = tri!(std::fs::read(&tmp));
+        let bytes = tri!(aispice_layout::tools::read_output(
+            &tmp,
+            aispice_layout::gds::MAX_BYTES
+        ));
         let meta_json = serde_json::to_string_pretty(&generated.meta).unwrap_or_default();
         let files = [
             FileWrite {

@@ -160,11 +160,15 @@ impl PdkLayoutFiles {
     }
 }
 
-/// A private folder for one run of a layout program.
+/// A private folder for one run of a layout program. aispice writes its
+/// scripts there before the run and never after: a folder serves one run
+/// only ([`klayout`] and [`magic`] refuse a used one), so aispice never
+/// writes into a folder a run could have written.
 pub struct RunDir {
     _dir: tempfile::TempDir,
     /// Its real path on Linux, where a sandbox grants it by that path.
     path: PathBuf,
+    used: std::sync::atomic::AtomicBool,
 }
 
 impl RunDir {
@@ -180,19 +184,122 @@ impl RunDir {
         } else {
             dir.path().to_path_buf()
         };
-        Ok(Self { _dir: dir, path })
+        Ok(Self {
+            _dir: dir,
+            path,
+            used: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Mark the folder used by a run; an error when a run had it already.
+    fn claim(&self) -> Result<(), LayoutError> {
+        if self.used.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err(LayoutError::Io(format!(
+                "{} served a run already; each run gets a fresh folder",
+                self.path.display()
+            )));
+        }
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Write one of aispice's scripts into the folder.
+    /// Write one of aispice's scripts into the folder, before its run.
     pub fn script(&self, name: &str, text: &str) -> Result<PathBuf, LayoutError> {
+        self.file(name, text.as_bytes())
+    }
+
+    /// Write one of aispice's files into the folder, before its run, as a
+    /// new file ([`create_file`]).
+    pub fn file(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, LayoutError> {
+        if self.used.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(LayoutError::Io(format!(
+                "{} served a run already; aispice writes nothing into it after",
+                self.path.display()
+            )));
+        }
         let p = self.path().join(name);
-        std::fs::write(&p, text).map_err(|e| LayoutError::Io(format!("{}: {e}", p.display())))?;
+        create_file(&p, bytes)?;
         Ok(p)
     }
+}
+
+/// Create `path` holding `bytes`, refusing whatever is there already: a
+/// file, a link (never followed) or a fifo (`O_CREAT|O_EXCL|O_NOFOLLOW`).
+/// For aispice's own files beside a run's.
+pub fn create_file(path: &Path, bytes: &[u8]) -> Result<(), LayoutError> {
+    use std::io::Write as _;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut f = o
+        .open(path)
+        .map_err(|e| LayoutError::Io(format!("{}: {e}", path.display())))?;
+    f.write_all(bytes)
+        .map_err(|e| LayoutError::Io(format!("{}: {e}", path.display())))
+}
+
+/// Whether a run left a plain file at `path`; a link is not one.
+pub fn is_output(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// A file a layout run wrote: opened without following a link and without
+/// blocking on a fifo, and read only when it is a plain file of at most
+/// `limit` bytes. A run could have left anything at that name.
+pub fn read_output(path: &Path, limit: u64) -> Result<Vec<u8>, LayoutError> {
+    use std::io::Read as _;
+    let io = |e: std::io::Error| LayoutError::Io(format!("{}: {e}", path.display()));
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_file()) {
+        return Err(LayoutError::Io(format!(
+            "{} is not a plain file",
+            path.display()
+        )));
+    }
+    let f = o.open(path).map_err(io)?;
+    let meta = f.metadata().map_err(io)?;
+    if !meta.is_file() {
+        return Err(LayoutError::Io(format!(
+            "{} is not a plain file",
+            path.display()
+        )));
+    }
+    let too_large = || {
+        LayoutError::Input(format!(
+            "{} is larger than {} MiB",
+            path.display(),
+            limit >> 20
+        ))
+    };
+    if meta.len() > limit {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    f.take(limit + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
+/// [`read_output`] of a text file.
+pub fn read_output_text(path: &Path, limit: u64) -> Result<String, LayoutError> {
+    String::from_utf8(read_output(path, limit)?)
+        .map_err(|_| LayoutError::Input(format!("{} is not text", path.display())))
 }
 
 /// How long a layout program may run.
@@ -429,12 +536,14 @@ fn plan_unchecked(run: &Run<'_>) -> Plan {
     }
 }
 
-/// The folders of a program installed outside `/usr` (which every
-/// sandboxed program reads): its own folder, and beside it the `lib`,
-/// `lib64` and `share` folders of its install. Never `/`, the home folder
-/// or a folder above it; and where the install is the home or its
-/// `.local`, which other programs share, only the `lib/<name>` and
-/// `share/<name>` folders of the program itself.
+/// What of a program installed outside `/usr` (which every sandboxed
+/// program reads) a run may read: the program file itself, and where it
+/// sits in a real install, `<prefix>/bin` with `lib`, `lib64` or `share`
+/// beside it, that install's `bin`, `lib`, `lib64` and `share`. A program
+/// anywhere else (`~/Downloads`, `~/bin`) brings only its own file. Never
+/// `/`, the home folder or a folder above it as a prefix; and the home's
+/// `.local`, which other programs share, brings only the program's own
+/// `lib/<name>` and `share/<name>`, not its `bin`.
 fn install_folders(program: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     // Both sides of every comparison are real paths: a home reached
     // through a link is still the home.
@@ -444,26 +553,37 @@ fn install_folders(program: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     if real.starts_with("/usr") {
         return Vec::new();
     }
-    let holds_home = |p: &Path| p.parent().is_none() || home.is_some_and(|h| h.starts_with(p));
-    let Some(bin) = real.parent().filter(|b| !holds_home(b)) else {
-        return Vec::new();
+    let mut v = vec![real.clone()];
+    let Some(bin) = real
+        .parent()
+        .filter(|b| b.file_name() == Some(std::ffi::OsStr::new("bin")))
+    else {
+        return v;
     };
-    let mut v = vec![bin.to_path_buf()];
+    let holds_home = |p: &Path| p.parent().is_none() || home.is_some_and(|h| h.starts_with(p));
     let Some(prefix) = bin.parent().filter(|p| !holds_home(p)) else {
         return v;
     };
     let shared = home.is_some_and(|h| prefix == h.join(".local"));
     let name = real.file_name().unwrap_or_default();
-    for sub in ["lib", "lib64", "share"] {
-        let p = if shared {
-            prefix.join(sub).join(name)
-        } else {
-            prefix.join(sub)
-        };
-        if p.is_dir() {
-            v.push(p);
-        }
+    let beside: Vec<PathBuf> = ["lib", "lib64", "share"]
+        .iter()
+        .map(|sub| {
+            if shared {
+                prefix.join(sub).join(name)
+            } else {
+                prefix.join(sub)
+            }
+        })
+        .filter(|p| p.is_dir())
+        .collect();
+    if beside.is_empty() {
+        return v;
     }
+    if !shared {
+        v.push(bin.to_path_buf());
+    }
+    v.extend(beside);
     v
 }
 
@@ -490,22 +610,25 @@ fn magic_helpers(program: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// Run `klayout -b -r <script> -rd k=v ...` in `dir`, with `access`.
+/// Run `klayout -b -r <script> -rd k=v ...` in the fresh folder `run`,
+/// with `access`.
 pub async fn klayout(
     programs: &Programs,
-    dir: &Path,
+    run: &RunDir,
     script: &Path,
     vars: &[(&str, String)],
     access: &Access,
     cancel: &CancellationToken,
 ) -> Result<ProcessOutput, LayoutError> {
     let program = programs.klayout()?;
+    let dir = run.path();
+    let python = no_psutil(dir)?;
+    run.claim()?;
     let mut args: Vec<OsString> = vec!["-b".into(), "-r".into(), script.into()];
     for (k, v) in vars {
         args.push("-rd".into());
         args.push(format!("{k}={v}").into());
     }
-    let python = no_psutil(dir)?;
     let env = vec![
         ("HOME".into(), dir.into()),
         ("KLAYOUT_HOME".into(), dir.into()),
@@ -551,30 +674,23 @@ fn no_psutil(dir: &Path) -> Result<PathBuf, LayoutError> {
     let io = |e: std::io::Error| LayoutError::Io(format!("cannot prepare KLayout's Python: {e}"));
     let python = dir.join("aispice-python");
     let module = python.join("psutil");
-    std::fs::create_dir_all(&module).map_err(io)?;
-    let init = module.join("__init__.py");
-    if !init.is_file() {
-        // Runs in one folder may start together: write aside, then rename,
-        // so no run sees a half-written module.
-        static PARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = PARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let part = module.join(format!("__init__.{}.{n}.part", std::process::id()));
-        std::fs::write(
-            &part,
-            "raise ImportError('psutil is not available to KLayout under aispice')\n",
-        )
-        .map_err(io)?;
-        std::fs::rename(&part, &init).map_err(io)?;
-    }
+    // New folders in the run's fresh folder, before the run.
+    std::fs::create_dir(&python).map_err(io)?;
+    std::fs::create_dir(&module).map_err(io)?;
+    create_file(
+        &module.join("__init__.py"),
+        b"raise ImportError('psutil is not available to KLayout under aispice')\n",
+    )?;
     Ok(python)
 }
 
-/// Run Magic without graphics on a Tcl script of aispice's, with the
-/// PDK's start-up file, the given environment and `access`.
+/// Run Magic without graphics on a Tcl script of aispice's in the fresh
+/// folder `run`, with the PDK's start-up file, the given environment and
+/// `access`.
 #[allow(clippy::too_many_arguments)]
 pub async fn magic(
     programs: &Programs,
-    dir: &Path,
+    run: &RunDir,
     rcfile: &Path,
     script: &Path,
     env: &[(&str, String)],
@@ -582,6 +698,8 @@ pub async fn magic(
     cancel: &CancellationToken,
 ) -> Result<ProcessOutput, LayoutError> {
     let program = programs.magic()?;
+    let dir = run.path();
+    run.claim()?;
     let args: Vec<OsString> = vec![
         "-dnull".into(),
         "-noconsole".into(),
@@ -752,9 +870,11 @@ mod tests {
         assert_eq!(langs[0].1, "C");
     }
 
-    /// A program outside /usr brings its own folder and the lib, lib64 and
-    /// share folders beside it; never a folder holding the home, and from
-    /// the home's shared `.local` only the program's own subfolders.
+    /// A program outside /usr brings its own file, and from a real install
+    /// (`<prefix>/bin` beside `lib`, `lib64` or `share`) that install's
+    /// folders; never a folder holding the home, nothing from a folder that
+    /// is not an install, and from the home's shared `.local` only the
+    /// program's own subfolders.
     #[test]
     fn install_folders_stop_short_of_home() {
         let tmp = tempfile::tempdir().unwrap();
@@ -767,17 +887,39 @@ mod tests {
         std::fs::write(&program, "").unwrap();
         assert_eq!(
             install_folders(&program, None),
-            [prefix.join("bin"), prefix.join("lib"), prefix.join("share")]
+            [
+                program.clone(),
+                prefix.join("bin"),
+                prefix.join("lib"),
+                prefix.join("share")
+            ]
         );
-        // The install is the home: only the program's folder.
+        // The install is the home, or the home is below the program.
         assert_eq!(
             install_folders(&program, Some(&prefix)),
-            [prefix.join("bin")]
+            std::slice::from_ref(&program)
         );
-        // The program sits in the home itself, or the home is below it.
-        assert!(install_folders(&program, Some(&prefix.join("bin"))).is_empty());
-        assert!(install_folders(&program, Some(&prefix.join("bin/x"))).is_empty());
-        // ~/.local: its own lib and share folders only.
+        assert_eq!(
+            install_folders(&program, Some(&prefix.join("bin/x"))),
+            std::slice::from_ref(&program)
+        );
+        // A program outside a bin folder, or in a bin folder with nothing
+        // beside it, brings only its own file.
+        let downloads = root.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("klayout"), "").unwrap();
+        assert_eq!(
+            install_folders(&downloads.join("klayout"), None),
+            [downloads.join("klayout")]
+        );
+        let bare = root.join("bare/bin");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("magic"), "").unwrap();
+        assert_eq!(
+            install_folders(&bare.join("magic"), None),
+            [bare.join("magic")]
+        );
+        // ~/.local: its own lib and share folders only, not ~/.local/bin.
         let home = root.join("home");
         let local = home.join(".local");
         for d in ["bin", "lib/klayout", "share/klayout", "share/keyrings"] {
@@ -788,10 +930,18 @@ mod tests {
         assert_eq!(
             install_folders(&program, Some(&home)),
             [
-                local.join("bin"),
+                program.clone(),
                 local.join("lib/klayout"),
                 local.join("share/klayout")
             ]
+        );
+        // ~/bin: the home is the prefix, so only the file.
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        std::fs::write(home.join("bin/klayout"), "").unwrap();
+        assert_eq!(
+            install_folders(&home.join("bin/klayout"), Some(&home)),
+            [home.join("bin/klayout")]
         );
         assert!(install_folders(Path::new("/usr/bin/klayout"), None).is_empty());
         // A home reached through a link is the home all the same.
@@ -800,8 +950,63 @@ mod tests {
             let link = root.join("home-link");
             std::os::unix::fs::symlink(&prefix, &link).unwrap();
             let program = prefix.join("bin/klayout");
-            assert_eq!(install_folders(&program, Some(&link)), [prefix.join("bin")]);
+            assert_eq!(
+                install_folders(&program, Some(&link)),
+                std::slice::from_ref(&program)
+            );
         }
+    }
+
+    /// A link a run left in its folder is never followed: not when aispice
+    /// reads what the run wrote, not when it writes a file of its own there,
+    /// and a used run folder takes no more of aispice's files.
+    #[cfg(unix)]
+    #[test]
+    fn planted_links_are_refused_on_read_and_on_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let victim = root.join("bashrc");
+        std::fs::write(&victim, "SECRET").unwrap();
+        let out = root.join("run");
+        std::fs::create_dir(&out).unwrap();
+        let planted = out.join("chip.lvs.spice");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        // Read: refused, and not read through.
+        assert!(!is_output(&planted));
+        let err = read_output(&planted, 1 << 20).unwrap_err().to_string();
+        assert!(!err.contains("SECRET"), "{err}");
+        assert!(read_output_text(&planted, 1 << 20).is_err());
+        // Write: refused, and the target is untouched.
+        assert!(create_file(&planted, b"overwritten").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "SECRET");
+        // A dangling link is refused too.
+        let dangling = out.join("layout.png");
+        std::os::unix::fs::symlink(root.join("nowhere"), &dangling).unwrap();
+        assert!(create_file(&dangling, b"x").is_err());
+        assert!(!root.join("nowhere").exists());
+        // A fifo is refused without blocking.
+        let fifo = out.join("report.lyrdb");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(read_output(&fifo, 1 << 20).is_err());
+        // Plain files work, within their limit.
+        let plain = out.join("plain.txt");
+        create_file(&plain, b"hello").unwrap();
+        assert!(is_output(&plain));
+        assert_eq!(read_output_text(&plain, 5).unwrap(), "hello");
+        assert!(read_output(&plain, 4).is_err());
+        assert!(create_file(&plain, b"again").is_err());
+        // A run folder serves one run, and takes no files after it.
+        let run = RunDir::new().unwrap();
+        run.script("a.py", "").unwrap();
+        run.claim().unwrap();
+        assert!(run.claim().is_err());
+        assert!(run.script("b.py", "").is_err());
     }
 
     /// A sandboxed run takes real paths only: a `..`, a `.`, a trailing

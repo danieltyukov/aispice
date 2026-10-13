@@ -352,12 +352,10 @@ pub async fn draw(
     }
     let run = RunDir::new()?;
     let script = run.script("draw.py", DRAW_SCRIPT)?;
-    let json = run.path().join("plan.json");
-    std::fs::write(&json, plan.to_draw_json().to_string())
-        .map_err(|e| LayoutError::Io(e.to_string()))?;
+    let json = run.file("plan.json", plan.to_draw_json().to_string().as_bytes())?;
     let out = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("pdk_python", files.python.display().to_string()),
@@ -368,7 +366,7 @@ pub async fn draw(
         cancel,
     )
     .await?;
-    if !out.success() || !gds.is_file() {
+    if !out.success() || !tools::is_output(gds) {
         return Err(LayoutError::Failed {
             program: "KLayout (drawing the layout)".into(),
             message: tools::tail(&out.combined(), 12),

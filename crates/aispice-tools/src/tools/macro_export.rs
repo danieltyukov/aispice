@@ -293,9 +293,11 @@ fn spec_entries(
     out
 }
 
+/// A new file of aispice's in the package folder, which KLayout and Magic
+/// wrote into before: never through whatever a run left there.
 fn write(dir: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
     let p = dir.join(name);
-    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    aispice_layout::tools::create_file(&p, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(p)
 }
 
@@ -313,7 +315,7 @@ fn package_files(dir: &Path, folder: &str) -> Result<Vec<FileWrite>, String> {
         let mut names: Vec<PathBuf> = list.filter_map(Result::ok).map(|e| e.path()).collect();
         names.sort();
         for p in names {
-            if !p.is_file() {
+            if !aispice_layout::tools::is_output(&p) {
                 continue;
             }
             let file = p
@@ -321,7 +323,8 @@ fn package_files(dir: &Path, folder: &str) -> Result<Vec<FileWrite>, String> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let bytes = aispice_layout::tools::read_output(&p, aispice_layout::gds::MAX_BYTES)
+                .map_err(|e| e.to_string())?;
             out.push(FileWrite {
                 rel: format!("{folder}/{prefix}{file}"),
                 bytes,
