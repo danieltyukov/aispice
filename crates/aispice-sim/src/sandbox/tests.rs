@@ -258,6 +258,51 @@ async fn landlock_narrows_exec_and_signals() {
     }
 }
 
+/// A Landlock sandbox writes its ruleset against its own ABI, not the
+/// kernel's. ABI 5 added the right to use ioctl on a device, so `stty` on
+/// `/dev/null` (granted read and write, never that right) is refused from
+/// ABI 5 and finds no terminal at ABI 4. Checked at every ABI from 4 to the
+/// kernel's, capped at 6.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn landlock_rulesets_are_written_at_the_sandboxes_abi() {
+    let (Some(stty), Ok(kernel)) = (which("stty"), landlock_abi_here()) else {
+        eprintln!("skipped: no stty or no Landlock here");
+        return;
+    };
+    for abi in MIN_LANDLOCK_ABI..=kernel {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let program = dir.join("stand-in");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nprintf 'ok\\n' > result\nstty -F /dev/null 2>> result\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let mut plan = plan_in(&out, &program, Profile::NativeCode);
+        plan.exec = vec![PathBuf::from("/bin/sh"), stty.clone()];
+        let sandbox = Sandbox::landlock_for_tests(abi);
+        let spec = sandbox.command(&plan).unwrap();
+        process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(out.join("result")).unwrap();
+        let want = if abi >= 5 {
+            "Permission denied"
+        } else {
+            "Inappropriate ioctl"
+        };
+        assert!(
+            text.starts_with("ok\n") && text.contains(want),
+            "ABI {abi}: {text}"
+        );
+    }
+}
+
 /// A `tmpfile()` that makes its unnamed file in `TMPDIR`. glibc's always
 /// uses `/tmp`, which no sandbox grants under Landlock, and ngspice calls it
 /// at start in every mode, so a caller has to preload one like this.

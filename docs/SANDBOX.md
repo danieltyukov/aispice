@@ -33,6 +33,10 @@ With **`Signals::SelfOnly`** (Landlock below ABI 6), a further program lets a si
 - Executing is limited to the plan's programs and the loader. That keeps a program from starting others by path, but it is not a boundary on its own, since the loader can run any readable binary. seccomp and Landlock's file, network and scope rules are what hold.
 - Nothing is granted in the real `/tmp` under Landlock. glibc's `tmpfile()` always makes its file there, whatever `TMPDIR` says, and ngspice calls it at start in every mode. bubblewrap gives each run a private `/tmp`, so it works there; under Landlock the caller has to give the program a `tmpfile()` of its own, such as a preloaded one that makes the file in `TMPDIR` (one of the `write` folders). The sandbox tests run ngspice that way.
 
+## Testing at an older Landlock ABI
+
+A kernel at ABI 6 or later can still enforce a ruleset written against ABI 4 or 5. aispice-sim's own tests run their Landlock checks at ABI 4 as well as at the kernel's. Tests in other crates, where `Sandbox::select` is called deep inside the code under test, can turn on the `testing` feature of `aispice-sim` in their dev-dependencies and call `Sandbox::use_landlock_abi_for_tests(4)`: for the rest of that test process `select` skips bubblewrap and gives Landlock at ABI 4, with seccomp's signal program in place of the scopes. It is process-wide, so such tests belong in a test binary of their own. No product build has the feature.
+
 ## Using bubblewrap on Ubuntu 24.04
 
 The default kernel refuses bubblewrap its user namespace (`kernel.apparmor_restrict_unprivileged_userns=1`) unless bwrap has an AppArmor profile, so aispice uses Landlock there. To use bubblewrap instead, add a profile that allows the namespace (this needs root), for example in `/etc/apparmor.d/bwrap`:

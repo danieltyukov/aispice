@@ -113,6 +113,10 @@ impl Sandbox {
     /// and seccomp programs a real run uses, since a restricted kernel
     /// refuses it even when it is installed.
     pub async fn select(cancel: &CancellationToken) -> Result<Self, String> {
+        #[cfg(all(target_os = "linux", feature = "testing"))]
+        if crate::backend::confine::abi_override_for_tests().is_some() {
+            return Self::landlock();
+        }
         let mut why = Vec::new();
         match Self::bwrap(cancel).await {
             Ok(s) => return Ok(s),
@@ -199,6 +203,20 @@ impl Sandbox {
 
     pub fn is_bwrap(&self) -> bool {
         matches!(self.kind, Kind::Bwrap(_))
+    }
+
+    /// Tests only (feature `testing`, which only dev-dependencies enable):
+    /// for the rest of this process, [`Sandbox::select`] skips bubblewrap
+    /// and picks Landlock at `abi`, so a test on a newer kernel runs under
+    /// a real ruleset written against that ABI (at 4 or 5 with seccomp's
+    /// signal program in place of the scopes), also where `select` is called
+    /// deep inside the code under test. It is process-wide, so tests that use
+    /// it belong in a test binary of their own. Refused outside
+    /// [`MIN_LANDLOCK_ABI`] to [`MAX_LANDLOCK_ABI`], above the kernel's ABI,
+    /// and on a system without Landlock. No product build has this.
+    #[cfg(feature = "testing")]
+    pub fn use_landlock_abi_for_tests(abi: u8) -> Result<(), String> {
+        override_landlock_abi(abi)
     }
 
     /// The ABI the Landlock ruleset is written against, under Landlock.
@@ -386,6 +404,16 @@ fn landlock_abi_here() -> Result<u8, String> {
 #[cfg(not(target_os = "linux"))]
 fn landlock_abi_here() -> Result<u8, String> {
     Err("this platform has no Landlock".into())
+}
+
+#[cfg(all(target_os = "linux", feature = "testing"))]
+fn override_landlock_abi(abi: u8) -> Result<(), String> {
+    crate::backend::confine::override_abi_for_tests(abi)
+}
+
+#[cfg(all(not(target_os = "linux"), feature = "testing"))]
+fn override_landlock_abi(abi: u8) -> Result<(), String> {
+    Err(format!("this platform has no Landlock for ABI {abi}"))
 }
 
 /// [`landlock_abi_here`] for a given kernel ABI.

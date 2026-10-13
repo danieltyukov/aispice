@@ -99,10 +99,57 @@ const CLONE_NEW: [libc::c_int; 8] = [
 ];
 
 /// Landlock's ABI version on this machine, or 0 when the kernel has no
-/// Landlock. Read from the kernel with the version probe of
+/// Landlock. A test build may lower it ([`override_abi_for_tests`]).
+pub fn abi() -> i32 {
+    let kernel = kernel_abi();
+    #[cfg(feature = "testing")]
+    if let Some(abi) = abi_override_for_tests() {
+        return kernel.min(i32::from(abi));
+    }
+    kernel
+}
+
+/// Tests only (feature `testing`): the Landlock ABI [`abi`] reports in
+/// place of the kernel's, or 0 for none.
+#[cfg(feature = "testing")]
+static ABI_FOR_TESTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Tests only (feature `testing`, which only dev-dependencies enable): make
+/// [`abi`] report `abi` for the rest of this process, so a test on a newer
+/// kernel gets Landlock at that ABI and a real ruleset written against it.
+/// Refused outside the ABIs aispice writes rulesets for or above the
+/// kernel's own. No product build has this.
+#[cfg(feature = "testing")]
+pub(crate) fn override_abi_for_tests(abi: u8) -> Result<(), String> {
+    use crate::sandbox::policy::{MAX_LANDLOCK_ABI, MIN_LANDLOCK_ABI};
+    if !(MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI).contains(&abi) {
+        return Err(format!(
+            "aispice writes Landlock rulesets for ABI {MIN_LANDLOCK_ABI} to {MAX_LANDLOCK_ABI}, not {abi}"
+        ));
+    }
+    let kernel = kernel_abi();
+    if kernel < i32::from(abi) {
+        return Err(format!(
+            "the kernel's Landlock ABI is {kernel}, below {abi}"
+        ));
+    }
+    ABI_FOR_TESTS.store(abi, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// The ABI a test set with [`override_abi_for_tests`], if any.
+#[cfg(feature = "testing")]
+pub(crate) fn abi_override_for_tests() -> Option<u8> {
+    match ABI_FOR_TESTS.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        abi => Some(abi),
+    }
+}
+
+/// The kernel's own Landlock ABI, from the version probe of
 /// `landlock_create_ruleset`, since the crate does not expose a runtime
 /// value on purpose.
-pub fn abi() -> i32 {
+fn kernel_abi() -> i32 {
     const VERSION: u32 = 1;
     let r = unsafe {
         libc::syscall(

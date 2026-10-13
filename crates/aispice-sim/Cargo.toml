@@ -35,8 +35,16 @@ libc.workspace = true
 landlock.workspace = true
 seccompiler.workspace = true
 
+[features]
+# Exposes `sandbox::Sandbox::use_landlock_abi_for_tests`, so tests on a newer
+# kernel can run under a real Landlock ruleset at an older ABI. Only
+# dev-dependencies enable it, this crate's own included (for its
+# integration tests); never on in a product build.
+testing = []
+
 [dev-dependencies]
 aispice-core = { workspace = true, features = ["testing"] }
+aispice-sim = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true
