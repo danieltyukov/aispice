@@ -273,3 +273,48 @@ async fn magic_runs_confined() {
         .stdin(std::process::Stdio::null());
     unconfined_control(cmd, &c);
 }
+
+/// A sandboxed run refuses, before KLayout starts, an output folder or an
+/// input reached through a link or a `..`: the grant would be on the real
+/// path while the program opens the written one.
+#[tokio::test]
+async fn paths_through_links_or_dot_dot_are_refused_before_the_run() {
+    let programs = Programs::default();
+    if !gate(programs.klayout().is_ok(), "KLayout").await {
+        return;
+    }
+    let s = setup("links");
+    let project = s.victim.parent().unwrap().to_path_buf();
+    let outside = s.out.parent().unwrap().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("link")).unwrap();
+    let run = RunDir::new().unwrap();
+    let ran = run.path().join("ran");
+    let script = run
+        .script(
+            "touch.py",
+            &format!("open('{}', 'w').write('x')\n", ran.display()),
+        )
+        .unwrap();
+    let dotdot = PathBuf::from(format!("{}/../run-1", s.out.display()));
+    for access in [
+        Access::new().read(&s.victim).write(project.join("link")),
+        Access::new()
+            .read(project.join("link/../victim.gds"))
+            .write(&s.out),
+        Access::new().read(&s.victim).write(&dotdot),
+    ] {
+        let err = tools::klayout(
+            &programs,
+            run.path(),
+            &script,
+            &[],
+            &access,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("real path"), "{err}");
+        assert!(!ran.exists(), "KLayout ran");
+    }
+}

@@ -162,7 +162,9 @@ impl PdkLayoutFiles {
 
 /// A private folder for one run of a layout program.
 pub struct RunDir {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    /// Its real path on Linux, where a sandbox grants it by that path.
+    path: PathBuf,
 }
 
 impl RunDir {
@@ -171,11 +173,18 @@ impl RunDir {
             .prefix("aispice-layout-")
             .tempdir()
             .map_err(|e| LayoutError::Io(format!("cannot create a run folder: {e}")))?;
-        Ok(Self { dir })
+        let path = if cfg!(target_os = "linux") {
+            dir.path()
+                .canonicalize()
+                .map_err(|e| LayoutError::Io(format!("cannot resolve the run folder: {e}")))?
+        } else {
+            dir.path().to_path_buf()
+        };
+        Ok(Self { _dir: dir, path })
     }
 
     pub fn path(&self) -> &Path {
-        self.dir.path()
+        &self.path
     }
 
     /// Write one of aispice's scripts into the folder.
@@ -217,7 +226,8 @@ const LAYOUT_SYSTEM: &[&str] = &["/etc/fonts"];
 /// What one layout run may touch besides the system, the program's install
 /// and its private folder (which it may write): the files and folders it
 /// reads, such as the PDK and its input layouts, and the folders it writes
-/// its results into.
+/// its results into. Each path must be the real path of what it names
+/// ([`resolved`]) for a sandboxed run.
 #[derive(Debug, Clone, Default)]
 pub struct Access {
     read: Vec<PathBuf>,
@@ -231,13 +241,13 @@ impl Access {
 
     /// Let the run read `p`, a file or a folder.
     pub fn read(mut self, p: impl AsRef<Path>) -> Self {
-        self.read.push(real(p.as_ref()));
+        self.read.push(p.as_ref().to_path_buf());
         self
     }
 
     /// Let the run write in the folder `p`, which must exist.
     pub fn write(mut self, p: impl AsRef<Path>) -> Self {
-        self.write.push(real(p.as_ref()));
+        self.write.push(p.as_ref().to_path_buf());
         self
     }
 
@@ -248,6 +258,36 @@ impl Access {
             None => self,
         }
     }
+}
+
+/// `p` itself, when it is the real path of what it names: absolute, with no
+/// `.` or `..`, no trailing separator and no link in any component, so it
+/// equals its real path byte for byte. A grant is given by real path, and
+/// the program opens the path as written; were the two different, a grant
+/// through a link would cover what the link points at, and `run/../x`
+/// would read as inside `run`. Such a path is refused, never mended.
+fn resolved(p: &Path) -> Result<PathBuf, String> {
+    if !p.is_absolute() {
+        return Err(format!("{} is not an absolute path", p.display()));
+    }
+    let written = p.to_string_lossy();
+    if written.split(['/', '\\']).any(|c| c == "." || c == "..") {
+        return Err(format!(
+            "{} has a `.` or `..` in it; a layout run takes real paths only",
+            p.display()
+        ));
+    }
+    let real = p
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", p.display()))?;
+    if real.as_os_str() != p.as_os_str() {
+        return Err(format!(
+            "{} is not the real path of what it names ({}); a layout run takes real paths only",
+            p.display(),
+            real.display()
+        ));
+    }
+    Ok(real)
 }
 
 /// `p` with links resolved, so a rule or bind names the file itself.
@@ -312,13 +352,15 @@ async fn run(run: Run<'_>, cancel: &CancellationToken) -> Result<ProcessOutput, 
         program: run.name.into(),
         message,
     };
-    let plan = plan(&run);
     let spec = match sandbox().await {
-        Ok(sandbox) => sandbox.command(&plan).map_err(|e| failed(e.to_string()))?,
+        Ok(sandbox) => {
+            let plan = plan(&run).map_err(LayoutError::Input)?;
+            sandbox.command(&plan).map_err(|e| failed(e.to_string()))?
+        }
         Err(why) => {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| tracing::warn!("KLayout and Magic run without a sandbox: {why}"));
-            unconfined(&plan)
+            unconfined(&plan_unchecked(&run))
         }
     };
     process::run(&spec, run.timeout, cancel)
@@ -338,8 +380,19 @@ fn unconfined(plan: &Plan) -> ProcessSpec {
 
 /// The sandbox plan of a run: the `Denylist` profile, the program's
 /// install, fonts and the run's [`Access`] to read, its private folder and
-/// the run's folders to write.
-fn plan(run: &Run<'_>) -> Plan {
+/// the run's folders to write. Its folder and every path of its access must
+/// be real paths ([`resolved`]).
+fn plan(run: &Run<'_>) -> Result<Plan, String> {
+    resolved(run.dir)?;
+    for p in run.access.read.iter().chain(&run.access.write) {
+        resolved(p)?;
+    }
+    Ok(plan_unchecked(run))
+}
+
+/// [`plan`] without checking the paths, for a run without a sandbox, which
+/// grants nothing.
+fn plan_unchecked(run: &Run<'_>) -> Plan {
     let mut env: Vec<(OsString, OsString)> = PASSED_ENV
         .iter()
         .filter_map(|k| std::env::var_os(k).map(|v| (OsString::from(k), v)))
@@ -356,7 +409,7 @@ fn plan(run: &Run<'_>) -> Plan {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     read.extend(install_folders(&run.program, home.as_deref()));
     read.extend(run.access.read.iter().cloned());
-    let dir = real(run.dir);
+    let dir = run.dir.to_path_buf();
     let mut write = vec![dir.clone()];
     write.extend(run.access.write.iter().cloned());
     Plan {
@@ -383,6 +436,10 @@ fn plan(run: &Run<'_>) -> Plan {
 /// `.local`, which other programs share, only the `lib/<name>` and
 /// `share/<name>` folders of the program itself.
 fn install_folders(program: &Path, home: Option<&Path>) -> Vec<PathBuf> {
+    // Both sides of every comparison are real paths: a home reached
+    // through a link is still the home.
+    let home = home.map(real);
+    let home = home.as_deref();
     let real = real(program);
     if real.starts_with("/usr") {
         return Vec::new();
@@ -678,7 +735,7 @@ mod tests {
             exec: Vec::new(),
             timeout: TIMEOUT,
         };
-        let p = plan(&run);
+        let p = plan(&run).unwrap();
         assert_eq!(p.profile, Profile::Denylist);
         assert_eq!(p.cwd, dir);
         assert_eq!(p.write, vec![dir.clone(), out.clone()]);
@@ -737,6 +794,90 @@ mod tests {
             ]
         );
         assert!(install_folders(Path::new("/usr/bin/klayout"), None).is_empty());
+        // A home reached through a link is the home all the same.
+        #[cfg(unix)]
+        {
+            let link = root.join("home-link");
+            std::os::unix::fs::symlink(&prefix, &link).unwrap();
+            let program = prefix.join("bin/klayout");
+            assert_eq!(install_folders(&program, Some(&link)), [prefix.join("bin")]);
+        }
+    }
+
+    /// A sandboxed run takes real paths only: a `..`, a `.`, a trailing
+    /// separator or a link in an input path or in an output folder is
+    /// refused, since the grant (by real path) and what the program opens
+    /// (the path as written) would differ.
+    #[cfg(unix)]
+    #[test]
+    fn a_sandboxed_run_takes_real_paths_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let project = root.join("project");
+        let run_folder = project.join(".aispice/layout/run-1");
+        let outside = root.join("outside");
+        for d in [&run_folder, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let input = project.join("in.gds");
+        std::fs::write(&input, "").unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("link")).unwrap();
+        std::fs::write(outside.join("in.gds"), "").unwrap();
+        let dir = root.join("private");
+        std::fs::create_dir(&dir).unwrap();
+        let plan_with = |access: Access| {
+            let run = Run {
+                name: "KLayout",
+                program: PathBuf::from("/usr/bin/klayout"),
+                args: Vec::new(),
+                env: Vec::new(),
+                dir: &dir,
+                access: &access,
+                exec: Vec::new(),
+                timeout: TIMEOUT,
+            };
+            plan(&run).map(|_| ())
+        };
+        assert!(plan_with(Access::new().read(&input).write(&run_folder)).is_ok());
+        let up = |p: &Path, rest: &str| PathBuf::from(format!("{}/{rest}", p.display()));
+        for (what, access) in [
+            (
+                "input with ..",
+                Access::new().read(up(&run_folder, "../../../in.gds")),
+            ),
+            ("input with .", Access::new().read(up(&project, "./in.gds"))),
+            (
+                "input through a link",
+                Access::new().read(project.join("link/in.gds")),
+            ),
+            ("relative input", Access::new().read("in.gds")),
+            (
+                "output with ..",
+                Access::new().write(up(&run_folder, "../../..")),
+            ),
+            (
+                "output through a link",
+                Access::new().write(project.join("link")),
+            ),
+            (
+                "output with a trailing separator",
+                Access::new().write(up(&run_folder, "")),
+            ),
+        ] {
+            assert!(plan_with(access).is_err(), "{what}");
+        }
+        // The run's own folder too.
+        let run = Run {
+            name: "KLayout",
+            program: PathBuf::from("/usr/bin/klayout"),
+            args: Vec::new(),
+            env: Vec::new(),
+            dir: &up(&dir, "."),
+            access: &Access::new(),
+            exec: Vec::new(),
+            timeout: TIMEOUT,
+        };
+        assert!(plan(&run).is_err());
     }
 
     /// Without a sandbox a run keeps its private working folder and exactly
@@ -756,7 +897,7 @@ mod tests {
             exec: Vec::new(),
             timeout: TIMEOUT,
         };
-        let p = plan(&run);
+        let p = plan_unchecked(&run);
         let spec = unconfined(&p);
         assert!(spec.clear_env);
         assert_eq!(spec.cwd, dir);
