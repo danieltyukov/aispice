@@ -16,8 +16,8 @@ use crate::workspace::{FileWrite, Workspace};
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
 use aispice_core::macropkg::{
-    CheckOptions, Corner, Direction, Domain, Evidence, MANIFEST, MacroKind, Manifest, Pdk, PinKind,
-    Producer, SCHEMA_VERSION, Size, Status, check_package,
+    CheckOptions, Corner, Direction, Domain, Evidence, MANIFEST, MacroKind, Manifest, Pdk, PdkLibs,
+    PinKind, Producer, SCHEMA_VERSION, Size, Status, check_package,
 };
 use aispice_layout::drc::{self, DrcChecks};
 use aispice_layout::extract;
@@ -164,7 +164,8 @@ impl Tool for MacroExport {
             built.files.len()
         );
         t.push_str(&built.text);
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": built.data}))
+        ToolOutput::text(crate::layout::noted(t).await)
+            .with_data(json!({"kind": "generic", "value": built.data}))
     }
 }
 
@@ -292,9 +293,11 @@ fn spec_entries(
     out
 }
 
+/// A new file of aispice's in the package folder, which KLayout and Magic
+/// wrote into before: never through whatever a run left there.
 fn write(dir: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
     let p = dir.join(name);
-    std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    aispice_layout::tools::create_file(&p, text.as_bytes()).map_err(|e| e.to_string())?;
     Ok(p)
 }
 
@@ -312,7 +315,7 @@ fn package_files(dir: &Path, folder: &str) -> Result<Vec<FileWrite>, String> {
         let mut names: Vec<PathBuf> = list.filter_map(Result::ok).map(|e| e.path()).collect();
         names.sort();
         for p in names {
-            if !p.is_file() {
+            if !aispice_layout::tools::is_output(&p) {
                 continue;
             }
             let file = p
@@ -320,7 +323,8 @@ fn package_files(dir: &Path, folder: &str) -> Result<Vec<FileWrite>, String> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let bytes = aispice_layout::tools::read_output(&p, aispice_layout::gds::MAX_BYTES)
+                .map_err(|e| e.to_string())?;
             out.push(FileWrite {
                 rel: format!("{folder}/{prefix}{file}"),
                 bytes,
@@ -421,8 +425,8 @@ async fn build(
     let env = layout::env(ws)?;
     // A macro named like a cell of the PDK would clash with it in a chip and
     // in SPICE, which ignores case.
-    let pdk_cells = mx::pdk_cell_names(&env.files.root)?;
-    if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
+    let pdk_libs = PdkLibs::load(&env.files.root)?;
+    if let Some(why) = mx::pdk_name_clash(&name, &pdk_libs.names) {
         return Err(format!("{why}; choose another name with `name`"));
     }
     let p = env.project.clone();
@@ -846,7 +850,7 @@ async fn build(
         &pkg,
         &CheckOptions {
             pdk: Some(format!("{}@{commit}", pdk.name)),
-            pdk_cells,
+            pdk_libs: Some(pdk_libs),
             ..Default::default()
         },
     )

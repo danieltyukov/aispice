@@ -1,0 +1,14 @@
+// A behavioural comparator: out swings between 0 and vdd as inp - inn
+// passes zero, with a finite gain so the transition is smooth enough for
+// the simulator.
+`include "disciplines.vams"
+`include "constants.vams"
+
+module comparator_va(inp, inn, out);
+  input inp, inn;
+  output out;
+  electrical inp, inn, out;
+  parameter real vdd = 1.0;
+  parameter real gain = 1e3;
+  analog V(out) <+ 0.5 * vdd * (1 + tanh(gain * V(inp, inn)));
+endmodule

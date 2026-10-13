@@ -146,6 +146,10 @@ pub fn parse(text: &str) -> Netlist {
         .trim_start_matches('\u{feff}')
         .trim()
         .to_string();
+    // Lines of a `.control` block are control-language commands, not
+    // netlist lines: they are kept as written (a `$` there substitutes a
+    // variable), and the netlist policy checks them against its allowlist.
+    let mut in_control = false;
     for raw in lines {
         let line = raw.trim_end_matches('\r');
         let trimmed = line.trim();
@@ -153,10 +157,25 @@ pub fn parse(text: &str) -> Netlist {
             && let Some(last) = logical.last_mut()
         {
             last.push(' ');
-            last.push_str(strip_inline_comment(cont).trim());
+            if in_control {
+                last.push_str(cont.trim());
+            } else {
+                last.push_str(strip_inline_comment(cont).trim());
+            }
             continue;
         }
         if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with(".control") {
+            in_control = true;
+        }
+        if in_control {
+            if lower.starts_with(".endc") {
+                in_control = false;
+            }
+            logical.push(trimmed.to_string());
             continue;
         }
         if trimmed.starts_with('*') {
@@ -183,7 +202,21 @@ fn parse_block(
 ) -> Vec<Line> {
     let in_subckt = depth > 0;
     let mut items = Vec::new();
+    let mut in_control = false;
     while let Some(line) = iter.next() {
+        // A `.control` block, `.control` and `.endc` included, is kept line
+        // by line as written, never read as elements.
+        let lower_start = line.to_ascii_lowercase();
+        if lower_start.starts_with(".control") {
+            in_control = true;
+        }
+        if in_control {
+            if lower_start.starts_with(".endc") {
+                in_control = false;
+            }
+            items.push(Line::Directive { text: line });
+            continue;
+        }
         if let Some(c) = line.strip_prefix('*') {
             items.push(Line::Comment {
                 text: c.trim().to_string(),
@@ -414,6 +447,29 @@ fn write_block(out: &mut String, items: &[Line]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A control block is kept line by line as written: its commands are
+    /// not read as elements, and a `$` there is a variable, not a comment.
+    #[test]
+    fn a_control_block_round_trips_as_written() {
+        let text = "t\nV1 a 0 1\nR1 a 0 1k\n.op\n.control\nrun\nmeas op va find v(a)\nlet x = v(a) * 2\nforeach t 1 2\necho $t\nend\nwrdata out.txt v(a)\n.endc\nR2 a 0 2k\n.end\n";
+        let n = parse(text);
+        let out = write(&n);
+        for line in [
+            ".control",
+            "run",
+            "meas op va find v(a)",
+            "let x = v(a) * 2",
+            "echo $t",
+            "wrdata out.txt v(a)",
+            ".endc",
+        ] {
+            assert!(out.lines().any(|l| l == line), "{line}: {out}");
+        }
+        // The netlist after the block is read as a netlist again.
+        assert!(n.element("R2").is_some(), "{out}");
+        assert!(n.element("run").is_none() && n.element("echo").is_none());
+    }
 
     #[test]
     fn parses_devices_and_directives() {

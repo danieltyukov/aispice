@@ -34,7 +34,6 @@ version = "0.2.0"
 dependencies = [
  "aispice-agent",
  "aispice-core",
- "aispice-layout",
  "aispice-tools",
  "anyhow",
  "assert_cmd",
@@ -120,6 +119,7 @@ dependencies = [
  "aispice-core",
  "aispice-sim",
  "futures",
+ "libc",
  "roxmltree 0.21.1",
  "schemars 1.2.2",
  "serde",
@@ -129,6 +129,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -136,6 +137,7 @@ name = "aispice-sim"
 version = "0.2.0"
 dependencies = [
  "aispice-core",
+ "aispice-sim",
  "async-trait",
  "dirs",
  "futures",
@@ -145,6 +147,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

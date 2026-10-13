@@ -673,3 +673,122 @@ pub(super) fn get(reference: &str) -> Option<(&'static str, &'static str)> {
         .find(|(name, _)| *name == r || name.strip_prefix("devices/") == Some(r))
         .copied()
 }
+
+/// The symbols above that xschem 3.4.5 to 3.4.8 write differently, as 3.4.8
+/// has them. The built-ins are 3.4.4's, the release Ubuntu 24.04 packages;
+/// the drift test accepts an installed symbol that matches either, and the
+/// netlist tests show aispice netlists both alike.
+#[cfg(test)]
+pub(super) const LATER: &[(&str, &str)] = &[
+    (
+        "devices/vsource.sym",
+        r#"K {type=vsource
+format="@name @pinlist @value@savecurrent"
+template="name=V1 value=3 savecurrent=false"}
+B 4 -15 -15 15 15 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=inout}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=inout}
+"#,
+    ),
+    (
+        "devices/ammeter.sym",
+        r#"K {type=ammeter
+format="@name @pinlist 0 @savecurrent"
+template="name=Vmeas savecurrent=true spice_ignore=0"}
+B 4 -10 -15 10 15 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=plus dir=inout propag=1}
+B 5 -2.5 27.5 2.5 32.5 {name=minus dir=inout propag=0}
+"#,
+    ),
+    (
+        "devices/cccs.sym",
+        r#"K {type=cccs
+format="@name @pinlist @vnam @value"
+template="name=F1 vnam=v1 value=1"}
+B 4 -15 -20 15 20 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=in}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=in}
+"#,
+    ),
+    (
+        "devices/ccvs.sym",
+        r#"K {type=ccvs
+format="@name @pinlist @vnam @value"
+template="name=H1 vnam=v1 value=1"}
+B 4 -15 -20 15 20 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=inout}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=inout}
+"#,
+    ),
+    (
+        "devices/bsource.sym",
+        r#"K {type=source
+format="@name @pinlist @VAR = @FUNC m=@m"
+template="name=B1 VAR=I FUNC=\\"'pwl(V(plus,minus),0,0, 1,10m, 2, 100m)'\\" m=1"}
+B 4 -15 -15 15 15 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=inout}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=inout}
+"#,
+    ),
+    (
+        "devices/gnd.sym",
+        r#"K {type=label
+function0="L"
+global=ground
+format="*.alias @lab"
+template="name=l1 lab=0"}
+B 5 -2.5 -2.5 2.5 2.5 {name=p dir=inout goto=0}
+"#,
+    ),
+    (
+        "devices/capa-2.sym",
+        r#"K {type=polarized_capacitor
+format="@name @pinlist @value m=@m"
+template="name=C1
+m=1
+value=1p
+footprint=1206
+device=polarized_capacitor"
+}
+B 4 -10 -5 10 5 {}
+B 5 -2.5 -32.5 2.5 -27.5 {name=p dir=inout propag=1 pinnumber=1}
+B 5 -2.5 27.5 2.5 32.5 {name=m dir=inout propag=0 pinnumber=2}
+"#,
+    ),
+    (
+        "devices/simulator_commands.sym",
+        r#"K {type=netlist_commands
+template="name=COMMANDS
+simulator=ngspice
+only_toplevel=false
+value=\\"
+* ngspice commands
+\\""
+format="tcleval(
+[if \{[catch \{sim_is_@simulator \} retval] \} \{
+  return \{\} \} elseif \{$retval\} \{ return \{
+@value
+\}
+\} else \{ return \{\} \}
+])"}
+"#,
+    ),
+    (
+        "devices/simulator_commands_shown.sym",
+        r#"K {type=netlist_commands
+template="name=COMMANDS
+simulator=ngspice
+only_toplevel=false
+value=\\"
+* ngspice commands
+\\""
+format="tcleval(
+[if \{[catch \{sim_is_@simulator \} retval] \} \{
+  return \{\} \} elseif \{$retval\} \{ return \{
+@value
+\}
+\} else \{ return \{\} \}
+])"}
+"#,
+    ),
+];

@@ -108,8 +108,64 @@ fn the_bubblewrap_command_shows_only_the_plan() {
         .map(|i| (3 + i).to_string())
         .collect();
     assert_eq!(fds, want.iter().collect::<Vec<_>>());
+    // The program runs through `env -u PWD`, which removes the PWD
+    // bubblewrap sets after every other variable; a plan that sets PWD
+    // gets its own value back.
     let tail = args.iter().position(|a| a == "--").unwrap();
-    assert_eq!(args[tail + 1..], ["/usr/bin/true", "--flag"]);
+    let env = which("env").unwrap().canonicalize().unwrap();
+    assert_eq!(
+        args[tail + 1..],
+        [
+            env.display().to_string().as_str(),
+            "-u",
+            "PWD",
+            "/usr/bin/true",
+            "--flag"
+        ]
+    );
+    plan.env.push(("PWD".into(), "/elsewhere".into()));
+    let args = strings(&sandbox.command(&plan).unwrap().args);
+    let tail = args.iter().position(|a| a == "--").unwrap();
+    assert_eq!(args[tail + 2], "PWD=/elsewhere", "{args:?}");
+}
+
+/// In every sandbox here, the program sees exactly the plan's environment:
+/// nothing of aispice's, and under bubblewrap not the PWD it sets.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_program_sees_exactly_the_plans_environment() {
+    let Some(env) = which("env") else {
+        eprintln!("skipped: no env");
+        return;
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            // Without PWD, and with a PWD of the plan's own.
+            for pwd in [None, Some("/somewhere/else")] {
+                let mut plan = plan_in(&dir, &env, profile);
+                plan.env.push(("AISPICE_PROBE".into(), "1 2".into()));
+                if let Some(p) = pwd {
+                    plan.env.push(("PWD".into(), p.into()));
+                }
+                let spec = sandbox.command(&plan).unwrap();
+                let out = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                    .await
+                    .unwrap();
+                assert!(out.success(), "{}: {}", sandbox.describe(), out.combined());
+                let mut seen: Vec<String> = out.stdout.lines().map(str::to_string).collect();
+                let mut want: Vec<String> = plan
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+                    .collect();
+                seen.sort();
+                want.sort();
+                assert_eq!(seen, want, "{} {profile:?}", sandbox.describe());
+            }
+        }
+    }
 }
 
 /// Under Landlock: the program runs directly with the plan's environment;
@@ -343,6 +399,72 @@ async fn no_metadata_change_outside_and_no_limits_of_others() {
     assert_eq!(
         std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
         0o600
+    );
+}
+
+/// In every sandbox here, under either profile, a program makes no link
+/// and no node in its own folder: under bubblewrap its folder is a plain
+/// bind, and a link left there would point what aispice later reads or
+/// writes in it somewhere else. The same commands work unconfined.
+#[cfg(unix)]
+#[tokio::test]
+async fn no_link_or_node_is_made_in_a_write_folder() {
+    let (Some(ln), Some(mkfifo)) = (which("ln"), which("mkfifo")) else {
+        eprintln!("skipped: no ln or mkfifo");
+        return;
+    };
+    let script = |dir: &Path| {
+        format!(
+            "#!/bin/sh\nprintf 'ok\\n' > result\nprintf x > file\n\
+             ln -s {home} soft 2>/dev/null && printf 'symlink\\n' >> result\n\
+             ln file hard 2>/dev/null && printf 'hard link\\n' >> result\n\
+             mkfifo fifo 2>/dev/null && printf 'fifo\\n' >> result\n",
+            home = dir.display()
+        )
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            let program = dir.join("stand-in");
+            std::fs::write(&program, script(&dir)).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            let mut plan = plan_in(&out, &program, profile);
+            plan.exec = vec![PathBuf::from("/bin/sh"), ln.clone(), mkfifo.clone()];
+            let spec = sandbox.command(&plan).unwrap();
+            let run = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                .await
+                .unwrap();
+            let text = std::fs::read_to_string(out.join("result")).unwrap_or_else(|_| {
+                panic!("{}: no result: {}", sandbox.describe(), run.combined())
+            });
+            assert_eq!(text, "ok\n", "{} {profile:?}", sandbox.describe());
+            for name in ["soft", "hard", "fifo"] {
+                assert!(
+                    std::fs::symlink_metadata(out.join(name)).is_err(),
+                    "{} {profile:?}: {name} was made",
+                    sandbox.describe()
+                );
+            }
+        }
+    }
+    // Unconfined, the same script makes all three.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    std::fs::write(dir.join("s.sh"), script(&dir)).unwrap();
+    let ok = std::process::Command::new("/bin/sh")
+        .arg(dir.join("s.sh"))
+        .current_dir(&dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("result")).unwrap(),
+        "ok\nsymlink\nhard link\nfifo\n"
     );
 }
 
@@ -583,8 +705,9 @@ async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
     let dir = tmp.path().canonicalize().unwrap();
     let ran = dir.join("ran");
     let fake = dir.join("bwrap");
+    let source = dir.join("bwrap.sh");
     std::fs::write(
-        &fake,
+        &source,
         format!(
             "#!/bin/sh\ntouch '{}'\n\
              if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi\n\
@@ -595,7 +718,16 @@ async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Made by another process: a file this test process wrote could still
+    // be open for writing in a child another test forked meanwhile, and
+    // running it then fails with ETXTBSY.
+    let installed = std::process::Command::new("install")
+        .args(["-m", "0755"])
+        .arg(&source)
+        .arg(&fake)
+        .status()
+        .unwrap();
+    assert!(installed.success());
     let cancel = CancellationToken::new();
     let err = Sandbox::bwrap_at(fake.clone(), &cancel).await.unwrap_err();
     assert!(err.contains("NativeCode"), "{err}");

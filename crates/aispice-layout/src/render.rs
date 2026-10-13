@@ -31,7 +31,7 @@ pub async fn png(
     };
     let res = tools::klayout(
         programs,
-        run.path(),
+        &run,
         &script,
         &[
             ("gds", gds.display().to_string()),
@@ -41,20 +41,22 @@ pub async fn png(
             ("width", w.to_string()),
             ("height", h.to_string()),
         ],
+        &tools::Access::new().read(&files.root).read(gds),
         cancel,
     )
     .await?;
-    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
-    if !res.success() || size == 0 {
+    if !res.success() || !tools::is_output(&out) {
         return Err(LayoutError::Failed {
             program: "KLayout (rendering)".into(),
             message: tools::tail(&res.combined(), 8),
         });
     }
-    if size > MAX_PNG {
-        return Err(LayoutError::Input(
-            "the rendered picture is too large".into(),
-        ));
+    let png = tools::read_output(&out, MAX_PNG)?;
+    if png.is_empty() {
+        return Err(LayoutError::Failed {
+            program: "KLayout (rendering)".into(),
+            message: "it wrote an empty picture".into(),
+        });
     }
-    std::fs::read(&out).map_err(|e| LayoutError::Io(e.to_string()))
+    Ok(png)
 }

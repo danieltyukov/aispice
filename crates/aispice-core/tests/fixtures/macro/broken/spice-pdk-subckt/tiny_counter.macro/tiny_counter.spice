@@ -1,0 +1,15 @@
+* tiny_counter: 2-bit counter with enable and active-low reset. Synthetic test fixture.
+* Cell-level netlist; the cells are the IHP SG13G2 standard cells, defined in the PDK.
+.SUBCKT tiny_counter clk rst_n en q[0] q[1]
++ VDD VSS
+*.PININFO clk:I rst_n:I en:I q[0]:O q[1]:O VDD:B VSS:B
+Xff0 q[0] qn0 clk d0 rst_n VDD VSS sg13g2_dfrbp_1
+Xff1 q[1] qn1 clk d1 rst_n VDD VSS sg13g2_dfrbp_1
+Xx0 d0 q[0] en VDD VSS sg13g2_xor2_1
+Xa0 c0 q[0] en VDD VSS sg13g2_and2_1
+Xx1 d1 q[1] c0 VDD VSS sg13g2_xor2_1
+.ENDS tiny_counter
+.SUBCKT sg13g2_inv_1 A Y VDD VSS
+MN0 Y A VSS VSS sg13_lv_nmos w=0.74u l=0.13u
+MP0 Y A VDD VDD sg13_lv_pmos w=1.12u l=0.13u
+.ENDS sg13g2_inv_1

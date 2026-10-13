@@ -844,13 +844,18 @@ mod tests {
         }
     }
 
-    /// Gated on `AISPICE_PDK_IHP`: IHP's own test benches pass the scan.
+    /// Gated on `AISPICE_PDK_IHP` and an installed xschem: IHP's own test
+    /// benches pass the scan.
     #[test]
     fn ihp_test_benches_pass() {
         let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {
             return;
         };
-        let share = PathBuf::from("/usr/share/xschem/xschem_library");
+        let Some(share) = crate::xschem::installed_library() else {
+            eprintln!("skipped: xschem is not installed");
+            return;
+        };
+        let share = share.unwrap_or_else(|e| panic!("{e}"));
         let xschem = pdk.join("libs.tech/xschem");
         let r = Resolver::new(
             vec![share.join("devices"), share.clone(), xschem.clone()],

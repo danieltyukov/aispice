@@ -38,6 +38,17 @@ pub struct Config {
     /// Magic, for parasitic extraction, when it is not `magic` on PATH.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub magic_path: Option<PathBuf>,
+    /// ngspice, when it is not `ngspice` on PATH (a newer build kept beside
+    /// the system one, say).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ngspice_path: Option<PathBuf>,
+    /// OpenVAF, for Verilog-A models, when it is not `openvaf` on PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub openvaf_path: Option<PathBuf>,
+    /// Verilator, for co-simulated Verilog, when it is not `verilator` on
+    /// PATH.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verilator_path: Option<PathBuf>,
     /// Simulate with aispice's embedded models and the project's own files
     /// only, never with models or symbols from an installed LTspice library,
     /// so results do not depend on the machine.
@@ -68,6 +79,9 @@ impl Default for Config {
             xyce_path: None,
             klayout_path: None,
             magic_path: None,
+            ngspice_path: None,
+            openvaf_path: None,
+            verilator_path: None,
             embedded_models_only: false,
             edit_mode: EditMode::Apply,
             agent: AgentSettings::default(),

@@ -228,10 +228,12 @@ async fn the_ota_and_the_comparator_export_as_packages_both_tools_accept() {
         .map(PathBuf::from)
         .unwrap()
         .join("libs.ref/sg13g2_sram/lef");
+    // An SRAM cell of the checkout is refused too; its name begins with
+    // rm_ihpsg13, so that rule is the one that names it.
     if sram.is_dir() {
         names.push((
             "rm_ihpsg13_1p_1024x16_c2_bm_bist",
-            "cell of the PDK's libraries",
+            "begins with rm_ihpsg13,",
         ));
     }
     for (name, why) in names {

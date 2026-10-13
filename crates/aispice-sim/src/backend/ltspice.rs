@@ -534,6 +534,7 @@ impl Simulator for Ltspice {
     }
 
     async fn run(&self, job: &SimJob, cancel: &CancellationToken) -> Result<SimOutput, SimError> {
+        job.ngspice_only(SimId::Ltspice)?;
         let install = self
             .find()
             .ok_or_else(|| SimError::NotFound("LTspice".into()))?;

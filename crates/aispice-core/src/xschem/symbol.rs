@@ -512,33 +512,80 @@ mod tests {
         }
     }
 
-    /// Gated on an installed xschem and IHP PDK (`AISPICE_PDK_IHP`): every
-    /// built-in definition has the installed symbol's type, format,
-    /// template and pins.
+    /// How `theirs` differs from `ours` in what netlisting and wiring read:
+    /// `type`, `format`, `global`, `spice_ignore`, `place`, the template's
+    /// pairs and the pins, white space aside.
+    fn differences(ours: &XSymbol, theirs: &XSymbol) -> Vec<String> {
+        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut d = Vec::new();
+        for key in ["type", "format", "global", "spice_ignore", "place"] {
+            let (a, b) = (ours.attr(key), theirs.attr(key));
+            if a.as_deref().map(norm) != b.as_deref().map(norm) {
+                d.push(format!("{key} {a:?} vs {b:?}"));
+            }
+        }
+        let pairs = |s: &XSymbol| {
+            let mut p: Vec<(String, String)> = props::pairs(&s.template())
+                .into_iter()
+                .map(|(k, v)| (k, norm(&v)))
+                .collect();
+            p.sort();
+            p
+        };
+        if pairs(ours) != pairs(theirs) {
+            d.push(format!("template {:?} vs {:?}", pairs(ours), pairs(theirs)));
+        }
+        let pins = |s: &XSymbol| -> Vec<(String, f64, f64)> {
+            s.pins.iter().map(|p| (p.name.clone(), p.x, p.y)).collect()
+        };
+        if pins(ours) != pins(theirs) {
+            d.push(format!("pins {:?} vs {:?}", pins(ours), pins(theirs)));
+        }
+        d
+    }
+
+    /// Every later form is of a built-in, and differs from it.
+    #[test]
+    fn later_forms_replace_built_ins() {
+        for (name, text) in builtin::LATER {
+            let (_, ours) = builtin::get(name).unwrap_or_else(|| panic!("{name}"));
+            let ours = XSymbol::parse(name, ours, Origin::Builtin).unwrap();
+            let later = XSymbol::parse(name, text, Origin::Builtin).unwrap();
+            assert!(!differences(&ours, &later).is_empty(), "{name}");
+        }
+    }
+
+    /// Gated on an installed xschem, found as aispice finds it to run it:
+    /// every built-in definition of xschem's own symbols has the installed
+    /// symbol's type, format, template and pins, as xschem 3.4.4 or as a
+    /// later release ([`builtin::LATER`]) has them. With `AISPICE_PDK_IHP`
+    /// also IHP's `sg13g2_pr` symbols. xschem found without its library is a
+    /// failure, not a skip.
     #[test]
     fn builtins_match_installed_symbols() {
-        let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {
-            return;
+        let share = match crate::xschem::installed_library() {
+            None => {
+                eprintln!("skipped: xschem is not installed");
+                return;
+            }
+            Some(found) => found.unwrap_or_else(|e| panic!("{e}")),
         };
-        let share = std::env::var_os("AISPICE_XSCHEM_SHAREDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/usr/share/xschem"));
-        let library = vec![
-            share.join("xschem_library/devices"),
-            share.join("xschem_library"),
-            pdk.join("libs.tech/xschem"),
-        ];
-        if !library[0].is_dir() {
-            return;
+        let mut library = vec![share.join("devices"), share.clone()];
+        let pdk = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from);
+        if let Some(pdk) = &pdk {
+            library.push(pdk.join("libs.tech/xschem"));
         }
         let r = Resolver {
             library: library.clone(),
             builtins: false,
             ..Resolver::default()
         };
-        let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut problems = Vec::new();
+        let mut compared = 0;
         for name in builtin_references() {
+            if !name.starts_with("devices/") && pdk.is_none() {
+                continue;
+            }
             let (_, text) = builtin::get(name).unwrap();
             let ours = XSymbol::parse(name, text, Origin::Builtin).unwrap();
             let theirs = match r.resolve(name, &library[0]) {
@@ -548,34 +595,21 @@ mod tests {
                     continue;
                 }
             };
-            for key in ["type", "format", "global", "spice_ignore", "place"] {
-                let (a, b) = (ours.attr(key), theirs.attr(key));
-                if a.as_deref().map(norm) != b.as_deref().map(norm) {
-                    problems.push(format!("{name}: {key} {a:?} vs {b:?}"));
-                }
+            compared += 1;
+            let found = differences(&ours, &theirs);
+            if found.is_empty() {
+                continue;
             }
-            let mut ta = props::pairs(&ours.template());
-            let mut tb = props::pairs(&theirs.template());
-            ta.sort();
-            tb.sort();
-            if ta
+            let later = builtin::LATER
                 .iter()
-                .map(|(k, v)| (k, norm(v)))
-                .ne(tb.iter().map(|(k, v)| (k, norm(v))))
-            {
-                problems.push(format!("{name}: template {ta:?} vs {tb:?}"));
+                .find(|(n, _)| n == &name)
+                .map(|(n, t)| XSymbol::parse(n, t, Origin::Builtin).unwrap());
+            if later.is_some_and(|l| differences(&l, &theirs).is_empty()) {
+                continue;
             }
-            let pins = |s: &XSymbol| -> Vec<(String, f64, f64)> {
-                s.pins.iter().map(|p| (p.name.clone(), p.x, p.y)).collect()
-            };
-            if pins(&ours) != pins(&theirs) {
-                problems.push(format!(
-                    "{name}: pins {:?} vs {:?}",
-                    pins(&ours),
-                    pins(&theirs)
-                ));
-            }
+            problems.extend(found.into_iter().map(|d| format!("{name}: {d}")));
         }
+        assert!(compared > 20, "{compared}");
         assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
