@@ -40,6 +40,7 @@ use super::process::{self, ProcessSpec};
 use super::{RAW_SIZE_LIMIT, SimError};
 use crate::behavioral::sha256_hex;
 use crate::sandbox::{Limits, Plan, Profile, Sandbox};
+use aispice_core::netlist::LinkedInclude;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -156,6 +157,48 @@ pub async fn ready(cancel: &CancellationToken) -> Result<Sandbox, String> {
         Ok(_) => Err(refusal(None, true)),
         Err(why) => Err(refusal(Some(&why), no_compiler)),
     }
+}
+
+/// Refuse, under bubblewrap, a deck that includes a file through a symbolic
+/// link outside the folders the sandbox shows whole (`whole`, such as the
+/// project's PDK, and the system). bubblewrap shows every other file the
+/// deck reads at its resolved path only, so ngspice could not open the
+/// link and would stop with an include error; this names the include, the
+/// link and the fix instead. Landlock grants the file itself, which ngspice
+/// reaches through the link, so it needs no such check.
+pub fn check_links(
+    sandbox: &Sandbox,
+    linked: &[LinkedInclude],
+    whole: &[PathBuf],
+) -> Result<(), String> {
+    if !sandbox.is_bwrap() {
+        return Ok(());
+    }
+    for l in linked {
+        let link = first_link(&l.path).unwrap_or_else(|| l.path.clone());
+        let shown = |d: &Path| link.starts_with(d.canonicalize().unwrap_or_else(|_| d.into()));
+        if shown(Path::new("/usr")) || whole.iter().any(|d| shown(d)) {
+            continue;
+        }
+        return Err(format!(
+            "the include `{}` reaches {} through the symbolic link {}, which ngspice cannot follow in the bubblewrap sandbox that runs the project's compiled models (it shows each file the deck reads at its real path only). Include {} itself, or replace the link with the file.",
+            l.include,
+            l.file.display(),
+            link.display(),
+            l.file.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The first symbolic link on the way from `/` to `p`, if any.
+fn first_link(p: &Path) -> Option<PathBuf> {
+    let mut ancestors: Vec<&Path> = p.ancestors().collect();
+    ancestors.reverse();
+    ancestors
+        .into_iter()
+        .find(|a| std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()))
+        .map(Path::to_path_buf)
 }
 
 /// The message for a run whose compiled models are not loaded: what is

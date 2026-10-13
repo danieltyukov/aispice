@@ -174,6 +174,60 @@ fn every_sandbox_starts_ngspice_from_the_fixed_environment() {
     assert_eq!(set, want);
 }
 
+/// bubblewrap shows the files a deck reads at their resolved paths only,
+/// so an include through a link outside a folder it shows whole is refused
+/// before ngspice runs, naming the include, the link and the fix. Landlock
+/// grants the file and ngspice follows the link to it.
+#[cfg(unix)]
+#[test]
+fn bubblewrap_refuses_an_include_through_a_link_and_names_it() {
+    let d = tempfile::tempdir().unwrap();
+    let p = real(d.path());
+    std::fs::create_dir_all(p.join("models/sub")).unwrap();
+    std::fs::create_dir_all(p.join("shared")).unwrap();
+    std::fs::write(p.join("shared/vref.inc"), "V2 b 0 2\n").unwrap();
+    std::os::unix::fs::symlink("../../shared/vref.inc", p.join("models/sub/link.inc")).unwrap();
+    std::os::unix::fs::symlink("../shared", p.join("models/linked")).unwrap();
+    let linked = |include: &str, path: &str| LinkedInclude {
+        include: include.into(),
+        path: p.join(path),
+        file: p.join("shared/vref.inc"),
+    };
+    let file_link = [linked("sub/link.inc", "models/sub/link.inc")];
+    let bwrap = Sandbox::bwrap_for_tests(PathBuf::from("/usr/bin/bwrap"));
+    let e = check_links(&bwrap, &file_link, &[]).unwrap_err();
+    for part in [
+        "the include `sub/link.inc`".to_string(),
+        format!(
+            "through the symbolic link {}",
+            p.join("models/sub/link.inc").display()
+        ),
+        format!(
+            "Include {} itself, or replace the link with the file.",
+            p.join("shared/vref.inc").display()
+        ),
+    ] {
+        assert!(e.contains(&part), "{e}");
+    }
+    // A linked folder on the way is the link named.
+    let folder_link = [linked("linked/vref.inc", "models/linked/vref.inc")];
+    let e = check_links(&bwrap, &folder_link, &[]).unwrap_err();
+    assert!(
+        e.contains(&format!(
+            "through the symbolic link {},",
+            p.join("models/linked").display()
+        )),
+        "{e}"
+    );
+    // A link inside a folder bubblewrap shows whole is there to follow.
+    assert!(check_links(&bwrap, &file_link, &[p.join("models")]).is_ok());
+    for abi in [4, 6] {
+        let landlock = Sandbox::landlock_for_tests(abi);
+        assert!(check_links(&landlock, &file_link, &[]).is_ok());
+        assert!(check_links(&landlock, &folder_link, &[]).is_ok());
+    }
+}
+
 #[test]
 fn the_cache_key_follows_the_source_the_compiler_and_its_version() {
     let a = cache_key(Path::new("/nonexistent/a/cc"), "cc (GCC) 13.2.0");

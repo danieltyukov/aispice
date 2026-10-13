@@ -162,13 +162,35 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
     check_reads(text, policy).0
 }
 
-/// [`check`], and the files a simulator running the deck reads: every file
-/// it includes, resolved and followed into the files those include, as
-/// [`check`] follows them, and every existing file a value on a line names
-/// (`file=...`). Symbolic links are resolved. With no violations, these are
-/// all the files of the project and the model folders the deck can make a
-/// simulator open; a sandbox grants reading them and nothing else there.
-pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, Vec<PathBuf>) {
+/// What a simulator running a deck reads, from [`check_reads`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeckReads {
+    /// Every file the deck includes, followed into the files those include,
+    /// and every existing file a value on a line names (`file=...`), with
+    /// symbolic links resolved, sorted.
+    pub files: Vec<PathBuf>,
+    /// The includes that reach their file through a symbolic link.
+    pub linked: Vec<LinkedInclude>,
+}
+
+/// An include whose path, as written, goes through a symbolic link: the
+/// simulator opens `path` and the file it reads is `file`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedInclude {
+    /// The path as the include line writes it.
+    pub include: String,
+    /// That path made absolute, without resolving links.
+    pub path: PathBuf,
+    /// The file it resolves to.
+    pub file: PathBuf,
+}
+
+/// [`check`], and what a simulator running the deck reads ([`DeckReads`]),
+/// with includes followed as [`check`] follows them. With no violations,
+/// `files` are all the files of the project and the model folders the deck
+/// can make a simulator open; a sandbox grants reading them and nothing
+/// else there.
+pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, DeckReads) {
     let mut out = Vec::new();
     let mut seen = Vec::new();
     let cx = Cx {
@@ -176,6 +198,7 @@ pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, Vec<PathBuf>
         trusted: canonical_dirs(&policy.trusted_dirs),
         read: std::cell::Cell::new(0),
         named: std::cell::RefCell::new(Vec::new()),
+        linked: std::cell::RefCell::new(Vec::new()),
     };
     check_inner(
         &cx,
@@ -197,7 +220,8 @@ pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, Vec<PathBuf>
     files.extend(cx.named.into_inner());
     files.sort();
     files.dedup();
-    (unique, files)
+    let linked = cx.linked.into_inner();
+    (unique, DeckReads { files, linked })
 }
 
 struct Cx<'a> {
@@ -208,6 +232,33 @@ struct Cx<'a> {
     read: std::cell::Cell<u64>,
     /// Existing files that values on checked lines name.
     named: std::cell::RefCell<Vec<PathBuf>>,
+    /// Includes reached through a symbolic link.
+    linked: std::cell::RefCell<Vec<LinkedInclude>>,
+}
+
+impl Cx<'_> {
+    /// Note an include of `file`, written `include` in a file in `base`,
+    /// when the path as written goes through a symbolic link.
+    fn note_link(&self, include: &str, base: &Path, file: &Path) {
+        let written = Path::new(include.trim());
+        let path: PathBuf = if written.is_absolute() {
+            written.components().collect()
+        } else {
+            std::fs::canonicalize(base)
+                .unwrap_or_else(|_| base.to_path_buf())
+                .join(written)
+                .components()
+                .collect()
+        };
+        let mut linked = self.linked.borrow_mut();
+        if path != file && !linked.iter().any(|l| l.path == path) {
+            linked.push(LinkedInclude {
+                include: include.trim().to_string(),
+                path,
+                file: file.to_path_buf(),
+            });
+        }
+    }
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -471,7 +522,11 @@ fn check_lines(
             });
             continue;
         }
-        match resolve(arg, base, policy) {
+        let resolved = resolve(arg, base, policy);
+        if let Ok(Some(file)) = &resolved {
+            cx.note_link(arg, base, file);
+        }
+        match resolved {
             Err(reason) => out.push(Violation {
                 line: line.clone(),
                 reason,
@@ -1372,8 +1427,10 @@ mod tests {
         .unwrap();
         std::fs::write(d.join("stim.txt"), "0 0\n1u 1\n").unwrap();
         let deck = "t\n.include models/top.lib\nV1 a 0 PWL file=stim.txt\nD1 a 0 D1\n";
-        let (v, files) = check_reads(deck, &policy_at(&d));
+        let (v, reads) = check_reads(deck, &policy_at(&d));
         assert!(v.is_empty(), "{v:?}");
+        assert!(reads.linked.is_empty(), "{:?}", reads.linked);
+        let files = reads.files;
         let real = |p: &str| d.join(p).canonicalize().unwrap();
         let mut want = vec![
             real("models/top.lib"),
@@ -1383,6 +1440,40 @@ mod tests {
         want.sort();
         assert_eq!(files, want);
         assert_eq!(check(deck, &policy_at(&d)), v);
+    }
+
+    /// An include whose path goes through a link inside the project is
+    /// allowed and reported with the path as written and the file it
+    /// reaches; the deck's own includes, rewritten to the resolved file, are
+    /// not.
+    #[cfg(unix)]
+    #[test]
+    fn includes_through_a_link_are_reported() {
+        let d = temp("linked").canonicalize().unwrap();
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join("shared")).unwrap();
+        std::fs::write(d.join("shared/vref.inc"), "V2 b 0 2\n").unwrap();
+        let link = d.join("models/sub/link.inc");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("../../shared/vref.inc", &link).unwrap();
+        std::fs::write(d.join("models/bias.inc"), "* bias\n.include sub/link.inc\n").unwrap();
+        let policy = policy_at(&d);
+        let deck = canonical_includes("t\n.include models/bias.inc\n", &policy);
+        let (v, reads) = check_reads(&deck, &policy);
+        assert!(v.is_empty(), "{v:?}");
+        assert_eq!(
+            reads.linked,
+            vec![LinkedInclude {
+                include: "sub/link.inc".into(),
+                path: link.clone(),
+                file: d.join("shared/vref.inc"),
+            }]
+        );
+        assert!(reads.files.contains(&d.join("shared/vref.inc")));
+        assert!(!reads.files.contains(&link));
+        // A deck naming the link itself is rewritten to the file.
+        let deck = canonical_includes("t\n.include models/sub/link.inc\n", &policy);
+        assert!(check_reads(&deck, &policy).1.linked.is_empty(), "{deck}");
     }
 
     #[cfg(unix)]

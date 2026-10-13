@@ -690,10 +690,17 @@ impl Runner {
             .unwrap_or_else(|| "deck".into());
         // Compiled only now, for a deck the policy accepted, and only where
         // ngspice can run them in a sandbox.
+        let pdk_roots: Vec<PathBuf> = pdk.iter().map(|p| p.root.clone()).collect();
         let (libraries, sandbox) = if uses_behavioral {
             let sandbox = aispice_sim::backend::native_code::ready(cancel)
                 .await
                 .map_err(RunError::Netlist)?;
+            aispice_sim::backend::native_code::check_links(
+                &sandbox,
+                &deck_reads.linked,
+                &pdk_roots,
+            )
+            .map_err(RunError::Netlist)?;
             let libraries = self
                 .behavioral_build(project, netlist, &declared, cancel)
                 .await?;
@@ -707,8 +714,8 @@ impl Runner {
         // What a sandboxed run may read of the user's: the files the deck
         // reads, as the policy resolved them, and the project's PDK. Not the
         // project folder, which holds aispice's own state under `.aispice/`.
-        job.reads = deck_reads;
-        job.reads.extend(pdk.iter().map(|p| p.root.clone()));
+        job.reads = deck_reads.files;
+        job.reads.extend(pdk_roots);
         for lib in &libraries {
             notes.push(format!(
                 "loaded {} built by aispice from the project's {} (SHA-256 {})",

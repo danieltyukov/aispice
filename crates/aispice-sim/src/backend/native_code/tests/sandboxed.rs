@@ -185,10 +185,10 @@ impl Targets {
     /// What the runner grants the run: the files the policy says the deck
     /// reads, here the one model file.
     fn reads(&self) -> Vec<PathBuf> {
-        let (violations, files) = aispice_core::netlist::check_reads(&self.deck(), &self.policy());
+        let (violations, reads) = aispice_core::netlist::check_reads(&self.deck(), &self.policy());
         assert!(violations.is_empty(), "{violations:?}");
-        assert_eq!(files, vec![self.project.join("models/r.lib")]);
-        files
+        assert_eq!(reads.files, vec![self.project.join("models/r.lib")]);
+        reads.files
     }
 }
 
@@ -450,6 +450,57 @@ async fn the_probe_reaches_all_of_it_when_ngspice_runs_unconfined() {
     assert!(t.outside.exists() && t.tmp_tag.exists());
     assert!(t.project.join("models/planted.txt").exists());
     assert!(sibling.alive());
+}
+
+/// A deck whose include reaches its file through a link in the project:
+/// under Landlock ngspice follows the link to the file it was granted, and
+/// the run reads it; under bubblewrap the run is refused before it starts,
+/// naming the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_include_through_a_link_runs_under_landlock_and_is_refused_under_bubblewrap() {
+    let Some((_, cc, sandboxes)) = setup().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let t = Targets::new(dir.path(), 97);
+    let p = &t.project;
+    std::fs::create_dir_all(p.join("models/sub")).unwrap();
+    std::fs::create_dir_all(p.join("shared")).unwrap();
+    std::fs::write(p.join("shared/vref.inc"), "V2 b 0 2\nR2 b 0 1k\n").unwrap();
+    std::os::unix::fs::symlink("../../shared/vref.inc", p.join("models/sub/link.inc")).unwrap();
+    std::fs::write(p.join("models/bias.inc"), "* bias\n.include sub/link.inc\n").unwrap();
+    let policy = t.policy();
+    let deck = aispice_core::netlist::canonical_includes(
+        "* linked\nV1 a 0 1\nR1 a 0 1k\n.include models/bias.inc\n.op\n.end\n",
+        &policy,
+    );
+    let (violations, reads) = aispice_core::netlist::check_reads(&deck, &policy);
+    assert!(violations.is_empty(), "{violations:?}");
+    assert_eq!(reads.linked.len(), 1, "{:?}", reads.linked);
+    let lib = probe(&cc, dir.path(), &t, std::process::id(), 0);
+    for (n, sandbox) in sandboxes.iter().enumerate() {
+        let what = sandbox.describe();
+        let checked = check_links(sandbox, &reads.linked, &[]);
+        if sandbox.is_bwrap() {
+            let e = checked.unwrap_err();
+            assert!(e.contains("`sub/link.inc`"), "{e}");
+            continue;
+        }
+        checked.unwrap();
+        let mut job = SimJob::new(deck.clone(), dir.path().join(format!("runs-{n}")));
+        job.libraries = vec![Arc::new(lib.clone())];
+        job.reads = reads.files.clone();
+        job.sandbox = Some(sandbox.clone());
+        let out = Ngspice::default()
+            .run(&job, &CancellationToken::new())
+            .await
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert!(
+            out.datasets.iter().any(|d| d.vector("b").is_some()),
+            "{what}: the linked file was not read:\n{}",
+            out.log
+        );
+    }
 }
 
 /// A ruleset below ABI 4 is never written: the run is refused before
