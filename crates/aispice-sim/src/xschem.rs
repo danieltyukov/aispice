@@ -59,8 +59,15 @@ const MAX_FILE: u64 = 64 << 20;
 /// xschem's address space (`RLIMIT_AS`).
 const MAX_MEMORY: u64 = 4 << 30;
 /// Processes and threads xschem and its helpers may add to what the user
-/// runs (`RLIMIT_NPROC`, relative): a shell, awk and gzip need a handful.
-const NPROC_HEADROOM: u64 = 128;
+/// runs (`RLIMIT_NPROC`). The kernel counts every process and thread of the
+/// user, not only the run's, so the limit is set relative to what the user
+/// runs when xschem starts. The margin has to absorb the user's other work
+/// growing meanwhile (a build starting compiler threads): at 128 that ate
+/// it, xschem could not start a helper and aborted, leaving an empty
+/// netlist. xschem with a shell, awk and gzip needs a handful, and 1024
+/// still stops a fork bomb within a second, long before it slows the
+/// machine.
+const NPROC_HEADROOM: u64 = 1024;
 
 /// The rc file every run uses. It never contains a path: those come from
 /// the environment.

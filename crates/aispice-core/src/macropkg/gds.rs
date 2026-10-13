@@ -13,7 +13,9 @@
 
 use super::limits::{LimitError, Limits, ReadError, read_capped};
 use super::text::quote;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -79,6 +81,18 @@ pub struct GdsLibrary {
 impl GdsLibrary {
     pub fn has_cell(&self, name: &str) -> bool {
         self.cells.contains_key(name)
+    }
+
+    /// The cells a cell places, each once, in the order of its references.
+    pub fn children(&self, cell: &str) -> Vec<String> {
+        let mut seen = HashSet::new();
+        self.cells.get(cell).map_or_else(Vec::new, |c| {
+            c.refs
+                .iter()
+                .filter(|r| seen.insert(r.cell.as_str()))
+                .map(|r| r.cell.clone())
+                .collect()
+        })
     }
 
     /// Every cell, in file order.
@@ -408,7 +422,7 @@ fn need<const N: usize>(body: &[u8], what: &str) -> Result<[u8; N], GdsError> {
     }
 }
 
-fn name_of(body: &[u8]) -> String {
+pub(crate) fn name_of(body: &[u8]) -> String {
     let end = body.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     // Latin-1: every byte is the code point of the same value.
     body[..end].iter().map(|&b| char::from(b)).collect()
@@ -781,4 +795,87 @@ pub fn read_gds(path: &Path) -> Result<GdsLibrary, GdsError> {
         ReadError::Io(e) => GdsError::Syntax(e.to_string()),
     })?;
     parse_gds_with(&data, &limits)
+}
+
+/// Each structure of a GDS stream, read one record at a time: its name as
+/// written (one NUL pads an odd length) and its identity, what macro/v1's
+/// `pdk.cell_name` and a chip's merges compare. The identity is the file's
+/// UNITS record and the SHA-256 of the structure's records from BGNSTR to
+/// ENDSTR, each with its four-byte header, BGNSTR's body (the dates) left
+/// out: every other record a tool reads, its STRCLASS, properties and the
+/// order of its elements, counts. In a file whose UNITS record is not its
+/// only one, before its first structure, every identity is empty, which
+/// matches nothing. ChipLeap's `chipleap.macro.gds.structure_identities` is
+/// the same definition. Fails when a record runs past the end.
+pub fn structure_identities(stream: impl Read) -> std::io::Result<Vec<(Vec<u8>, String)>> {
+    let mut r = std::io::BufReader::new(stream);
+    let mut units: Vec<Vec<u8>> = Vec::new();
+    // The first UNITS record came before any BGNSTR.
+    let (mut units_first, mut started) = (false, false);
+    let mut out: Vec<(Vec<u8>, String)> = Vec::new();
+    let mut current: Option<(Option<Vec<u8>>, Sha256)> = None;
+    let mut head = [0u8; 4];
+    let mut body = Vec::new();
+    let mut pos = 0u64;
+    loop {
+        match r.read_exact(&mut head) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+        let length = usize::from(u16::from_be_bytes([head[0], head[1]]));
+        let bad = || std::io::Error::other(format!("bad record length {length} at byte {pos}"));
+        if length < 4 {
+            return Err(bad());
+        }
+        body.resize(length - 4, 0);
+        r.read_exact(&mut body).map_err(|e| match e.kind() {
+            ErrorKind::UnexpectedEof => bad(),
+            _ => e,
+        })?;
+        pos += length as u64;
+        match head[2] {
+            0x03 => {
+                units_first = units_first || (units.is_empty() && !started);
+                units.push([&head[..], &body[..]].concat());
+            }
+            0x05 => {
+                let mut h = Sha256::new();
+                h.update(head);
+                current = Some((None, h));
+                started = true;
+                continue;
+            }
+            _ => {}
+        }
+        if let Some((name, h)) = &mut current {
+            h.update(head);
+            h.update(&body);
+            if head[2] == 0x06 && name.is_none() {
+                *name = Some(body.strip_suffix(&[0]).unwrap_or(&body).to_vec());
+            }
+        }
+        if head[2] == 0x07
+            && let Some((Some(name), h)) = current.take()
+        {
+            let hex = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            out.push((name, hex));
+        }
+        if head[2] == 0x04 {
+            break;
+        }
+    }
+    let prefix = match &units[..] {
+        [one] if units_first => one.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        _ => {
+            return Ok(out
+                .into_iter()
+                .map(|(name, _)| (name, String::new()))
+                .collect());
+        }
+    };
+    Ok(out
+        .into_iter()
+        .map(|(name, digest)| (name, format!("{prefix}:{digest}")))
+        .collect())
 }

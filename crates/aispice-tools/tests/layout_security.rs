@@ -88,6 +88,11 @@ fn every_tool_declares_what_it_does_to_files() {
         ("pdk", Edit),
         ("gm_id", ReadOnly),
         ("check_macro", ReadOnly),
+        // Builds write only aispice's record under `.aispice/build/`.
+        ("behavioral_models", ReadOnly),
+        // Saves block specs files when asked.
+        ("budget", Edit),
+        ("trim_check", ReadOnly),
         // Writes a package into the project after one approval.
         ("macro_export", Edit),
         // Writes the chip, its netlist and evidence after one approval.

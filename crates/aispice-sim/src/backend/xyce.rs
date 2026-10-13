@@ -113,6 +113,7 @@ impl Simulator for Xyce {
     }
 
     async fn run(&self, job: &SimJob, cancel: &CancellationToken) -> Result<SimOutput, SimError> {
+        job.ngspice_only(SimId::Xyce)?;
         let exe = self
             .exe()
             .ok_or_else(|| SimError::NotFound("Xyce".into()))?;

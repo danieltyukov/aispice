@@ -275,8 +275,11 @@ fn build_landlock(ll: &LandlockPolicy) -> io::Result<OwnedFd> {
     let read = AccessFs::ReadFile | AccessFs::ReadDir;
     let exec = AccessFs::Execute | AccessFs::ReadFile;
     // Write: plain files and folders only. No symlink, socket, fifo or
-    // device may be made in the writable folders, so nothing there can
-    // point a later reader elsewhere, and nothing written can be executed.
+    // device may be made in the writable folders, and nothing written can
+    // be executed. Under bubblewrap, whose binds Landlock does not narrow,
+    // the seccomp profiles refuse making links and nodes instead; either
+    // way, readers of a run's files still open them without following a
+    // link.
     let write = AccessFs::ReadFile
         | AccessFs::ReadDir
         | AccessFs::WriteFile
@@ -394,6 +397,13 @@ fn denied_syscalls() -> Vec<libc::c_long> {
         // a program may read.
         libc::SYS_inotify_add_watch,
         libc::SYS_fanotify_mark,
+        // Links and device nodes. Landlock withholds making them in the
+        // write folders; bubblewrap's binds do not, and a link left in a
+        // run's folder would point what aispice later reads or writes
+        // there somewhere else.
+        libc::SYS_symlinkat,
+        libc::SYS_linkat,
+        libc::SYS_mknodat,
     ];
     // The older forms x86_64 still has.
     #[cfg(target_arch = "x86_64")]
@@ -404,6 +414,9 @@ fn denied_syscalls() -> Vec<libc::c_long> {
         libc::SYS_utime,
         libc::SYS_utimes,
         libc::SYS_futimesat,
+        libc::SYS_symlink,
+        libc::SYS_link,
+        libc::SYS_mknod,
     ]);
     v
 }
@@ -1281,7 +1294,8 @@ mod tests {
     }
 
     /// The denylist refuses changing any file's mode, owner, extended
-    /// attributes or times and watching files, and lets limits, scheduling
+    /// attributes or times, making links and nodes, and watching files, and
+    /// lets limits, scheduling
     /// and priority change only for the process itself. Each change works
     /// on the same file without the program, so the refusal is the program's.
     #[test]
@@ -1299,6 +1313,9 @@ mod tests {
         );
         let file = std::fs::File::open(&path).unwrap();
         let fd = file.as_raw_fd();
+        let beside =
+            |n: &str| std::ffi::CString::new(tmp.path().join(n).as_os_str().as_bytes()).unwrap();
+        let (soft, hard, node) = (beside("soft"), beside("hard"), beside("node"));
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let programs = profile_programs(Profile::Denylist).unwrap();
         let code = in_child(|| {
@@ -1322,6 +1339,10 @@ mod tests {
             } as _);
             let unxattr =
                 refused(unsafe { libc::removexattr(c.as_ptr(), c"user.aispice".as_ptr()) } as _);
+            let soft = refused(unsafe { libc::symlink(c"/etc".as_ptr(), soft.as_ptr()) } as _);
+            let hard = refused(unsafe { libc::link(c.as_ptr(), hard.as_ptr()) } as _);
+            let node =
+                refused(unsafe { libc::mknod(node.as_ptr(), libc::S_IFIFO | 0o600, 0) } as _);
             let inotify = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
             let watch = inotify >= 0
                 && refused(unsafe {
@@ -1371,6 +1392,9 @@ mod tests {
                 times,
                 xattr,
                 unxattr,
+                soft,
+                hard,
+                node,
                 watch,
                 other_limits,
                 own_limits,
@@ -1384,10 +1408,11 @@ mod tests {
             ])
         });
         // 1 applied, 2 fchmodat, 3 fchmodat2, 4 fchmod, 5 fchownat, 6 fchown,
-        // 7 utimensat, 8 setxattr, 9 removexattr, 10 inotify_add_watch,
-        // 11 prlimit other, 12 prlimit own, 13 affinity other, 14 affinity
-        // own, 15 setpriority other, 16 setpriority user, 17 setpriority
-        // own, 18 ioprio other, 19 ioprio own.
+        // 7 utimensat, 8 setxattr, 9 removexattr, 10 symlink, 11 link,
+        // 12 mknod, 13 inotify_add_watch, 14 prlimit other, 15 prlimit own,
+        // 16 affinity other, 17 affinity own, 18 setpriority other,
+        // 19 setpriority user, 20 setpriority own, 21 ioprio other,
+        // 22 ioprio own.
         assert_eq!(code, Some(0), "denylist check {code:?} did not hold");
         let mode = std::fs::metadata(&path).unwrap().permissions();
         use std::os::unix::fs::PermissionsExt;

@@ -80,6 +80,12 @@ pub struct RunnerConfig {
     /// KLayout and Magic for the layout tools; found on PATH when unset.
     #[serde(default)]
     pub layout_programs: aispice_layout::tools::Programs,
+    /// OpenVAF for Verilog-A models; `openvaf` on PATH when unset.
+    #[serde(default)]
+    pub openvaf_exe: Option<PathBuf>,
+    /// Verilator for co-simulated Verilog; `verilator` on PATH when unset.
+    #[serde(default)]
+    pub verilator_exe: Option<PathBuf>,
 }
 
 impl Default for RunnerConfig {
@@ -97,6 +103,8 @@ impl Default for RunnerConfig {
             pdks_error: None,
             gmid_cache_dir: None,
             layout_programs: Default::default(),
+            openvaf_exe: None,
+            verilator_exe: None,
         }
     }
 }
@@ -137,6 +145,8 @@ pub struct Runner {
     detected: OnceCell<Vec<(SimId, Detection)>>,
     runs: Mutex<VecDeque<Arc<StoredRun>>>,
     counter: std::sync::atomic::AtomicU64,
+    /// Behavioural model libraries this process built.
+    behavioral: crate::behavioral::Builder,
 }
 
 impl std::fmt::Debug for Runner {
@@ -158,7 +168,120 @@ impl Runner {
             detected: OnceCell::new(),
             runs: Mutex::new(VecDeque::new()),
             counter: Default::default(),
+            behavioral: Default::default(),
         }
+    }
+
+    /// The project's declared behavioural models, read and checked but not
+    /// built, with whether this netlist uses any. Nothing compiles before
+    /// the deck has passed the netlist policy.
+    fn behavioral_plan(
+        &self,
+        project: &Project,
+        netlist: &Netlist,
+    ) -> Result<(crate::behavioral::Declared, bool), RunError> {
+        let cfg = ProjectConfig::load(project.root()).map_err(RunError::Pdk)?;
+        if cfg.veriloga.is_empty() && cfg.cosim.is_empty() {
+            return Ok((Default::default(), false));
+        }
+        let declared = crate::behavioral::declared(project).map_err(RunError::Netlist)?;
+        let (va, cosim) = crate::behavioral::used(netlist, &declared);
+        let uses = !(va.is_empty() && cosim.is_empty());
+        if uses {
+            aispice_sim::behavioral::check_run_size(netlist).map_err(RunError::Netlist)?;
+        }
+        Ok((declared, uses))
+    }
+
+    /// Build what a netlist uses of the declared models (or take what this
+    /// process built before).
+    async fn behavioral_build(
+        &self,
+        project: &Project,
+        netlist: &Netlist,
+        declared: &crate::behavioral::Declared,
+        sandbox: &aispice_sim::sandbox::Sandbox,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Arc<aispice_sim::behavioral::Library>>, RunError> {
+        let (va, cosim) = crate::behavioral::used(netlist, declared);
+        let c = self.config();
+        let tools = crate::behavioral::Tools {
+            openvaf: c.openvaf_exe,
+            verilator: c.verilator_exe,
+            ngspice: c.ngspice_exe,
+        };
+        let jail = aispice_sim::behavioral::Jail::new(sandbox.clone());
+        self.behavioral
+            .build(project, &tools, &va, &cosim, &jail, cancel)
+            .await
+            .map_err(RunError::Netlist)
+    }
+
+    /// Build the project's declared behavioural models (or the one named,
+    /// a Verilog-A file or a co-simulation model), whether or not a deck
+    /// uses them yet.
+    pub async fn build_behavioral(
+        &self,
+        project: &Project,
+        only: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<Arc<aispice_sim::behavioral::Library>>, String> {
+        let declared = crate::behavioral::declared(project)?;
+        let pick = |name: &str| only.is_none_or(|o| o.eq_ignore_ascii_case(name));
+        let va: Vec<_> = declared
+            .veriloga
+            .iter()
+            .filter(|v| pick(&v.source.name))
+            .collect();
+        let cosim: Vec<_> = declared.cosim.iter().filter(|c| pick(&c.model)).collect();
+        if va.is_empty() && cosim.is_empty() {
+            return Err(match only {
+                Some(o) => {
+                    format!("aispice.toml declares no Verilog-A file or co-simulation model {o}")
+                }
+                None => {
+                    "aispice.toml declares no behavioural models (veriloga = [...] or [[cosim]])"
+                        .into()
+                }
+            });
+        }
+        let c = self.config();
+        let tools = crate::behavioral::Tools {
+            openvaf: c.openvaf_exe,
+            verilator: c.verilator_exe,
+            ngspice: c.ngspice_exe,
+        };
+        // The compilers run in the same sandbox a run gets, so building is
+        // refused where a run would be (not Linux, no sandbox, no compiler).
+        let sandbox = aispice_sim::backend::native_code::ready(cancel).await?;
+        let jail = aispice_sim::behavioral::Jail::new(sandbox);
+        self.behavioral
+            .build(project, &tools, &va, &cosim, &jail, cancel)
+            .await
+    }
+
+    /// The compilers and sources behavioural models need, for `doctor`.
+    pub async fn behavioral_toolchain(&self) -> aispice_sim::behavioral::Toolchain {
+        let c = self.config();
+        aispice_sim::behavioral::Toolchain::detect(
+            c.openvaf_exe.as_deref(),
+            c.verilator_exe.as_deref(),
+            c.ngspice_exe.as_deref(),
+        )
+        .await
+    }
+
+    /// The sandbox a run that loads compiled models runs in, or what this
+    /// machine lacks for one, for `doctor`.
+    pub async fn behavioral_sandbox(&self) -> Result<String, String> {
+        aispice_sim::backend::native_code::ready(&CancellationToken::new())
+            .await
+            .map(|s| s.describe())
+    }
+
+    /// The behavioural libraries this process has built.
+    pub async fn behavioral_built(&self) -> Vec<Arc<aispice_sim::behavioral::Library>> {
+        self.behavioral.built().await
     }
 
     pub fn config(&self) -> RunnerConfig {
@@ -421,7 +544,29 @@ impl Runner {
         {
             return Err(RunError::Pdk(msg));
         }
+        // The behavioural models' checks and run limits come first: a
+        // refusal must not depend on which simulators are installed.
+        let (declared, uses_behavioral) = self.behavioral_plan(project, netlist)?;
         let mut id = self.choose_for(simulator, pdk.as_ref()).await?;
+        // Verilog-A and co-simulated Verilog run on ngspice only: the other
+        // simulators cannot load what aispice builds for them.
+        if uses_behavioral && id != SimId::Ngspice {
+            let asked = simulator.is_some() || self.config().simulator != "auto";
+            if asked || !self.available(SimId::Ngspice).await {
+                return Err(RunError::Netlist(format!(
+                    "this circuit uses the project's Verilog-A or co-simulated models, which run on ngspice only, not on {}",
+                    id.name()
+                )));
+            }
+            id = SimId::Ngspice;
+        }
+        let cosim = declared.cosim_names();
+        // A deck may not define a model under a declared co-simulation name,
+        // or one model name as two XSPICE types: either could make the
+        // translator keep an instance for code the policy did not approve.
+        if let Some(reason) = aispice_sim::dialect::behavioral_conflicts(netlist, &cosim) {
+            return Err(RunError::Policy(format!("  {reason}")));
+        }
         let lib_dirs = self.model_lib_dirs();
         let base = Self::base_dir(project, circuit)?;
         let policy = self.policy_for(project, &base);
@@ -433,7 +578,15 @@ impl Runner {
         // their full path from here on. The policy checks those paths below.
         let netlist = &canonical_netlist_includes(netlist, &policy);
         let mut notes = Vec::new();
-        let mut text = self.deck_for(id, netlist, std_libs, &lib_dirs, &mut notes, pdk.as_ref());
+        let mut text = self.deck_for_with(
+            id,
+            netlist,
+            std_libs,
+            &lib_dirs,
+            &mut notes,
+            pdk.as_ref(),
+            &cosim,
+        );
         if let Some(t) = &text.1 {
             // ngspice or Xyce cannot run this deck; LTspice can, if present
             // and its library may be used. Not for a PDK, whose models
@@ -506,8 +659,8 @@ impl Runner {
         };
         let deck = netlist::canonical_includes(&deck, &policy);
         // Check again after the rewrites, so the deck the simulator receives
-        // is exactly a deck the policy accepted.
-        let violations = netlist::check_policy(&deck, &policy);
+        // is exactly a deck the policy accepted, and note the files it reads.
+        let (violations, deck_reads) = netlist::check_reads(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations
                 .iter()
@@ -547,8 +700,83 @@ impl Runner {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "deck".into());
+        // Compiled only now, for a deck the policy accepted, and only where
+        // ngspice can run them in a sandbox.
+        let pdk_roots: Vec<PathBuf> = pdk.iter().map(|p| p.root.clone()).collect();
+        let (libraries, sandbox) = if uses_behavioral {
+            let sandbox = aispice_sim::backend::native_code::ready(cancel)
+                .await
+                .map_err(RunError::Netlist)?;
+            aispice_sim::backend::native_code::check_links(
+                &sandbox,
+                &deck_reads.linked,
+                &pdk_roots,
+            )
+            .map_err(RunError::Netlist)?;
+            let libraries = self
+                .behavioral_build(project, netlist, &declared, &sandbox, cancel)
+                .await?;
+            (libraries, Some(sandbox))
+        } else {
+            (Vec::new(), None)
+        };
+        // With control blocks enabled, every ngspice run goes in the
+        // sandbox, whether or not aispice saw a control command in the deck,
+        // so the decision never rests on aispice reading every spelling the
+        // way ngspice does; without a sandbox nothing runs on ngspice.
+        // Control commands it did see run on ngspice only.
+        let control_on = policy.allow_control_blocks;
+        if deck_reads.control && id != SimId::Ngspice {
+            return Err(RunError::Netlist(format!(
+                "the deck has control commands, which run on ngspice only (in a sandbox), not on {}",
+                id.name()
+            )));
+        }
+        let sandboxed_control = id == SimId::Ngspice && (control_on || deck_reads.control);
+        let sandbox = if sandboxed_control {
+            let sandbox = match sandbox {
+                Some(s) => s,
+                None => aispice_sim::backend::native_code::ready_for(
+                    aispice_sim::backend::native_code::Purpose::ControlCommands,
+                    cancel,
+                )
+                .await
+                .map_err(RunError::Netlist)?,
+            };
+            aispice_sim::backend::native_code::check_links(
+                &sandbox,
+                &deck_reads.linked,
+                &pdk_roots,
+            )
+            .map_err(RunError::Netlist)?;
+            notes.push(
+                "ran ngspice in a sandbox, since control blocks are enabled in the settings".into(),
+            );
+            Some(sandbox)
+        } else {
+            sandbox
+        };
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
+        job.control = sandboxed_control;
+        job.sandbox = sandbox;
+        // What a sandboxed run may read of the user's: the files the deck
+        // reads, as the policy resolved them, and the project's PDK. Not the
+        // project folder, which holds aispice's own state under `.aispice/`.
+        job.reads = deck_reads.files;
+        job.reads.extend(pdk_roots);
+        for lib in &libraries {
+            notes.push(format!(
+                "loaded {} built by aispice from the project's {} (SHA-256 {})",
+                lib.file_name(),
+                match lib.kind {
+                    aispice_sim::behavioral::LibraryKind::Osdi => "Verilog-A",
+                    aispice_sim::behavioral::LibraryKind::Cosim => "Verilog",
+                },
+                &lib.sha256[..16]
+            ));
+        }
+        job.libraries = libraries;
         job.timeout = Duration::from_secs(self.config().timeout_secs);
         // A deck that includes PDK files by hand in a project that names no
         // PDK runs without the PDK's compiled models; say why if it fails.
@@ -638,6 +866,22 @@ impl Runner {
         notes: &mut Vec<String>,
         pdk: Option<&Pdk>,
     ) -> (String, Option<String>) {
+        self.deck_for_with(id, netlist, std_libs, lib_dirs, notes, pdk, &[])
+    }
+
+    /// As [`deck_for`](Self::deck_for), with the co-simulation models the
+    /// project declares, whose XSPICE instances ngspice keeps.
+    #[allow(clippy::too_many_arguments)]
+    fn deck_for_with(
+        &self,
+        id: SimId,
+        netlist: &Netlist,
+        std_libs: &[String],
+        lib_dirs: &[PathBuf],
+        notes: &mut Vec<String>,
+        pdk: Option<&Pdk>,
+        cosim: &[String],
+    ) -> (String, Option<String>) {
         let target = id.target();
         let source = if target == Target::Ltspice {
             single_analysis(netlist, "LTspice", notes)
@@ -683,7 +927,7 @@ impl Runner {
                 resolved.netlist
             }
         };
-        let t = dialect::translate(&source, target);
+        let t = dialect::translate_with(&source, target, cosim);
         notes.extend(t.notes.iter().cloned());
         let blocked = (!t.unsupported.is_empty()).then(|| t.unsupported.join("; "));
         (t.text, blocked)
@@ -1209,6 +1453,136 @@ mod tests {
             Ok(id) => assert!(matches!(id, SimId::Ngspice | SimId::Xyce), "{id:?}"),
             Err(e) => assert!(matches!(e, RunError::NoSimulator), "{e}"),
         }
+    }
+
+    /// Every deck form that would make ngspice load compiled code or run a
+    /// program is refused before any run, so it never reaches an
+    /// unconfined ngspice. The sandbox is only for the models aispice
+    /// builds from a project's declared sources, loaded outside the deck;
+    /// a deck can reach native code no other way. Gated on ngspice, so the
+    /// run gets past simulator selection to the policy.
+    #[tokio::test]
+    async fn a_deck_cannot_make_an_unconfined_ngspice_load_code() {
+        if aispice_sim::backend::which("ngspice").is_none() {
+            eprintln!("skipped: ngspice is not installed");
+            return;
+        }
+        let (dir, runner, project, _) = pdk_setup(None);
+        // A library and a program the deck might try to name.
+        std::fs::write(project.root().join("evil.so"), b"").unwrap();
+        std::fs::write(project.root().join("evil.osdi"), b"").unwrap();
+        std::fs::write(project.root().join("evil.cm"), b"").unwrap();
+        std::fs::write(project.root().join("prog"), b"").unwrap();
+        let _ = dir;
+        for deck in [
+            // Commands that load a shared library or a code model.
+            "t\nV1 a 0 1\nosdi evil.osdi\n.op\n.end\n",
+            "t\nV1 a 0 1\npre_osdi evil.osdi\n.op\n.end\n",
+            "t\nV1 a 0 1\ncodemodel evil.cm\n.op\n.end\n",
+            // An XSPICE model that loads a library or runs a program, in a
+            // spelling and inside a subcircuit.
+            "t\nV1 a 0 1\nA1 [a] [b] null cnt\n.model cnt d_cosim simulation=\"evil.so\"\n.op\n.end\n",
+            "t\nV1 a 0 1\nA1 [a] a null [b] p\n.model p d_process process_file=\"prog\"\n.op\n.end\n",
+            "t\nV1 a 0 1\n.model cnt d_cosim,simulation=\"evil.so\"\n.op\n.end\n",
+            // A deck ngspice reads as a control script.
+            "*ng_script\nosdi evil.osdi\n",
+            // Loading code from inside a control block (off by default, and
+            // refused even when on: see the policy tests).
+            "t\nV1 a 0 1\n.control\nosdi evil.osdi\n.endc\n.op\n.end\n",
+            // Including the library as a netlist file.
+            "t\nV1 a 0 1\n.include evil.so\n.op\n.end\n",
+        ] {
+            let netlist = netlist::parse(deck);
+            let err = runner
+                .run_netlist(
+                    &project,
+                    "deck.cir",
+                    &netlist,
+                    &[],
+                    None,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, RunError::Policy(_) | RunError::Netlist(_)),
+                "{deck:?} was not refused: {err:?}"
+            );
+        }
+        // Nothing ran: no run was kept.
+        assert!(runner.latest("deck.cir").is_none());
+    }
+
+    /// With control blocks enabled, a control script on the allowlist runs,
+    /// and runs in a sandboxed ngspice; one off the list is refused before
+    /// anything runs. Gated on ngspice and a sandbox.
+    #[tokio::test]
+    async fn an_allowed_control_script_runs_sandboxed_and_others_are_refused() {
+        if aispice_sim::backend::which("ngspice").is_none() {
+            eprintln!("skipped: ngspice is not installed");
+            return;
+        }
+        let cancel = CancellationToken::new();
+        if let Err(e) = aispice_sim::backend::native_code::ready_for(
+            aispice_sim::backend::native_code::Purpose::ControlCommands,
+            &cancel,
+        )
+        .await
+        {
+            assert!(
+                std::env::var_os("AISPICE_REQUIRE_SANDBOXES").is_none(),
+                "a sandbox is required here: {e}"
+            );
+            eprintln!("skipped: {e}");
+            return;
+        }
+        let (_d, runner, project, _) = pdk_setup(None);
+        let mut cfg = runner.config();
+        cfg.allow_control_blocks = true;
+        runner.set_config(cfg);
+        let script = netlist::parse(
+            "t\nV1 a 0 1\nR1 a 0 1k\n.op\n.control\nrun\nlet x = v(a)\nif x gt 0.5\necho CONTROL-HIGH\nelse\necho CONTROL-LOW\nend\n.endc\n.end\n",
+        );
+        let run = runner
+            .run_netlist(&project, "deck.cir", &script, &[], Some("ngspice"), &cancel)
+            .await
+            .unwrap();
+        assert!(
+            run.notes.iter().any(|n| n.contains("ngspice in a sandbox")),
+            "{:?}",
+            run.notes
+        );
+        assert!(
+            run.output.log.contains("CONTROL-HIGH"),
+            "{}",
+            run.output.log
+        );
+        // With the setting on, a deck with no control block aispice can see
+        // runs in the sandbox all the same.
+        let plain = netlist::parse("t\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n");
+        let run = runner
+            .run_netlist(&project, "deck.cir", &plain, &[], Some("ngspice"), &cancel)
+            .await
+            .unwrap();
+        assert!(
+            run.notes.iter().any(|n| n.contains("ngspice in a sandbox")),
+            "{:?}",
+            run.notes
+        );
+        // A command off the list is refused, the run never starts.
+        let refused = netlist::parse("t\nV1 a 0 1\n.op\n.control\nshell id\n.endc\n.end\n");
+        let err = runner
+            .run_netlist(
+                &project,
+                "deck.cir",
+                &refused,
+                &[],
+                Some("ngspice"),
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Policy(_)), "{err:?}");
     }
 
     #[tokio::test]

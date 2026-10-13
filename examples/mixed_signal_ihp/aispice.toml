@@ -1,0 +1,6 @@
+# Register IHP SG13G2 under this name first: aispice pdk add ihp-sg13g2 <path>
+pdk = "ihp-sg13g2"
+
+[[cosim]]
+model = "counter"
+sources = ["rtl/counter.v"]

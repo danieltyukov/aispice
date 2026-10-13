@@ -42,8 +42,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run and saved only by pushes to master (the last step):
+      # GitHub keeps 10 GB of caches per repository, and a cache per pull request
+      # evicted master's. A pull request starts from master's cache, by its exact
+      # key or by restore-keys when Cargo.lock changed, and saves nothing.
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -110,6 +115,19 @@ jobs:
       - name: Tests
         run: cargo test --no-fail-fast
 
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # The IC path against the real IHP SG13G2 PDK, fetched at a pinned commit
   # (only its ngspice models, Verilog-A sources, KLayout decks and pcells;
   # nothing is committed) with its OSDI models compiled by OpenVAF. Not a
@@ -134,8 +152,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run, saved only by pushes to master (see the engine job).
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -145,10 +165,20 @@ jobs:
           key: cargo-pdk-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-pdk-
 
-      - name: Install ngspice
+      # Verilator builds the co-simulated Verilog of the mixed-signal tests;
+      # g++ and make are on the runner already.
+      - name: Install ngspice and Verilator
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ngspice
+          sudo apt-get install --no-install-recommends -y ngspice verilator
+
+      # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
+      # models is run under the native-code profile in each.
+      - name: Sandboxes
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
 
       # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
       # models is run under the native-code profile in each.
@@ -203,6 +233,8 @@ jobs:
           for m in psp103 psp103_nqs r3_cmc mosvar; do
             test -s "../ngspice/osdi/$m.osdi" || { echo "missing $m.osdi"; exit 1; }
           done
+          # The mixed-signal tests compile Verilog-A with the same OpenVAF.
+          echo "$RUNNER_TEMP/openvaf" >> "$GITHUB_PATH"
 
       # www.klayout.org has timed out on CI, so the package is fetched once
       # per version and kept in the cache.
@@ -253,6 +285,10 @@ jobs:
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
           cargo test -p aispice-tools --test templates_ihp -- --nocapture
           cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
+          cargo test -p aispice-tools --test mixed_signal -- --nocapture
+          cargo test -p aispice-tools --test mixed_signal_landlock4 -- --nocapture
+          cargo test -p aispice-sim --test xspice_policy -- --nocapture
+          cargo test -p aispice-sim --lib native_code -- --nocapture
 
       # One DRC deck on a synthetic layout, then a generated current mirror
       # through DRC and LVS, the broken-layout checks, blocks with their pins
@@ -266,7 +302,21 @@ jobs:
           cargo test -p aispice-layout --test drc_ihp -- --nocapture
           cargo test -p aispice-layout --test generate_ihp -- --nocapture current_mirror missing_contact edge_pinned
           cargo test -p aispice-layout --test chip_script_ihp -- --nocapture
+          cargo test -p aispice-layout --test layout_sandbox -- --nocapture
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
+
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   shell:
     name: Desktop shell
@@ -283,8 +333,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run, saved only by pushes to master (see the engine job).
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -324,6 +376,19 @@ jobs:
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           WEBKIT_DISABLE_COMPOSITING_MODE: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
+
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Upload screenshots on failure
         if: failure()

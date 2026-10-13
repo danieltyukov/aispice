@@ -27,6 +27,7 @@
 use aispice_core::netlist::{CompareOptions, compare_with, parse};
 use aispice_core::symbol::SymbolLibrary;
 use aispice_core::xschem::import::clean;
+use aispice_core::xschem::netlist::without_trailing_m1;
 use aispice_core::xschem::safety;
 use aispice_sim::pdk::Pdk;
 use aispice_sim::xschem::{Run, Sandbox, SchText};
@@ -70,6 +71,8 @@ fn benches(pdk: &Path) -> Vec<PathBuf> {
 fn lines(text: &str) -> Vec<String> {
     text.lines()
         .filter(|l| !l.starts_with("** sch_path") && !l.starts_with("** sym_path"))
+        // xschem 3.4.8 drops a trailing `m=1`, 3.4.4 and aispice keep it.
+        .map(without_trailing_m1)
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
         .collect()

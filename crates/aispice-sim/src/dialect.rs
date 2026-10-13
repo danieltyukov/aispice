@@ -28,6 +28,81 @@ pub enum Target {
     Spectre,
 }
 
+/// XSPICE code models that read a file a deck names. The netlist policy
+/// resolves their file parameters inside the project, and the translator
+/// drops the `.model` card so none reaches ngspice; the `d_cosim` and
+/// `d_process` cards that load or run native code are refused by the policy.
+pub const FILE_XSPICE_MODELS: &[&str] =
+    &["d_source", "d_state", "file_source", "table2d", "table3d"];
+
+/// Whether a `.model` type is an XSPICE code model (an `A` device's master):
+/// on the allowlist, a file model, or one of the two native-code ones.
+fn is_xspice_type(kind: &str) -> bool {
+    XSPICE_MODELS.contains(&kind)
+        || FILE_XSPICE_MODELS.contains(&kind)
+        || kind == "d_cosim"
+        || kind == "d_process"
+}
+
+/// The `.model` cards a deck defines, as `(name as written, type lower)`,
+/// walking into subcircuits, read as ngspice splits a card into words.
+fn model_cards(netlist: &Netlist) -> Vec<(String, String)> {
+    fn walk(items: &[Line], out: &mut Vec<(String, String)>) {
+        for item in items {
+            match item {
+                Line::Directive { text } => {
+                    let words: Vec<&str> = text
+                        .split(|c: char| c.is_whitespace() || "=(),".contains(c))
+                        .filter(|w| !w.is_empty())
+                        .collect();
+                    if let [kw, name, kind, ..] = &words[..]
+                        && kw.eq_ignore_ascii_case(".model")
+                    {
+                        out.push((name.to_string(), kind.to_ascii_lowercase()));
+                    }
+                }
+                Line::Subckt(s) => walk(&s.body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&netlist.items, &mut out);
+    out
+}
+
+/// Why a deck's own `.model` cards may not run on ngspice beside the
+/// co-simulation models aispice loads, or `None`. A deck may not define a
+/// model under a declared co-simulation name (aispice owns that name and
+/// adds its own `d_cosim` card after the policy check), and it may not
+/// define one model name as two XSPICE code-model types (the translator
+/// keeps a flat name-to-type map, so a second definition, in a subcircuit
+/// too, could make it keep an `A` instance for a type the check did not
+/// see). `cosim` is the declared co-simulation model names.
+pub fn behavioral_conflicts(netlist: &Netlist, cosim: &[String]) -> Option<String> {
+    let declared: HashSet<String> = cosim.iter().map(|m| m.to_ascii_uppercase()).collect();
+    let mut types: HashMap<String, String> = HashMap::new();
+    for (name, kind) in model_cards(netlist) {
+        let key = name.to_ascii_uppercase();
+        if declared.contains(&key) {
+            return Some(format!(
+                "the deck defines a model `{name}`, which this project declares as a co-simulation model in aispice.toml; aispice adds that model itself, so rename the deck's `.model` or the [[cosim]] entry"
+            ));
+        }
+        match types.get(&key) {
+            Some(prev) if *prev != kind && (is_xspice_type(prev) || is_xspice_type(&kind)) => {
+                return Some(format!(
+                    "the deck defines model `{name}` as both `{prev}` and `{kind}`; an XSPICE model name must have one type"
+                ));
+            }
+            _ => {
+                types.insert(key, kind);
+            }
+        }
+    }
+    None
+}
+
 impl Target {
     fn name(self) -> &'static str {
         match self {
@@ -49,9 +124,68 @@ pub struct Translated {
     pub unsupported: Vec<String>,
 }
 
+/// XSPICE code models a deck may use on ngspice: digital gates,
+/// flip-flops and latches, the bridges between analog and digital nodes, and
+/// analog function blocks. Not on it: the models that read a file a deck
+/// names (`d_source`, `d_state`, `file_source`, `table2d`, `table3d`) and
+/// the two that load or run native code (`d_cosim`, `d_process`, which the
+/// netlist policy refuses; aispice adds `d_cosim` cards itself for the
+/// co-simulation models a project declares).
+pub const XSPICE_MODELS: &[&str] = &[
+    "adc_bridge",
+    "dac_bridge",
+    "d_to_real",
+    "real_to_v",
+    "d_buffer",
+    "d_inverter",
+    "d_and",
+    "d_nand",
+    "d_or",
+    "d_nor",
+    "d_xor",
+    "d_xnor",
+    "d_tristate",
+    "d_pullup",
+    "d_pulldown",
+    "d_open_c",
+    "d_open_e",
+    "d_dff",
+    "d_jkff",
+    "d_tff",
+    "d_srff",
+    "d_dlatch",
+    "d_srlatch",
+    "d_osc",
+    "d_fdiv",
+    "gain",
+    "summer",
+    "mult",
+    "divide",
+    "limit",
+    "pwl",
+    "sine",
+    "square",
+    "triangle",
+    "int",
+    "d_dt",
+    "s_xfer",
+    "slew",
+    "aswitch",
+    "hyst",
+    "oneshot",
+];
+
 /// Translate `netlist` for `target`.
 pub fn translate(netlist: &Netlist, target: Target) -> Translated {
+    translate_with(netlist, target, &[])
+}
+
+/// As [`translate`], with the co-simulation models the project declares:
+/// an XSPICE `A` instance of one of them is kept for ngspice, which runs it
+/// through the `d_cosim` card aispice adds.
+pub fn translate_with(netlist: &Netlist, target: Target, cosim: &[String]) -> Translated {
     let mut cx = Cx::new(netlist, target);
+    cx.cosim = cosim.iter().map(|m| m.to_ascii_uppercase()).collect();
     if target == Target::Ltspice {
         return cx.ltspice(netlist);
     }
@@ -95,6 +229,10 @@ struct Cx {
     sources: HashSet<String>,
     /// Names already used in the scope being written.
     used: Vec<HashSet<String>>,
+    /// The deck's `.model` cards: upper-cased name to lower-cased type.
+    models: HashMap<String, String>,
+    /// Upper-cased co-simulation model names the project declares.
+    cosim: HashSet<String>,
 }
 
 impl Cx {
@@ -120,6 +258,30 @@ impl Cx {
             }
         }
         walk(&n.items, &mut coupled, &mut sources);
+        fn cards(items: &[Line], models: &mut HashMap<String, String>) {
+            for item in items {
+                match item {
+                    Line::Directive { text } => {
+                        // Words as ngspice reads a card: `(` and `,` end a
+                        // word, so `.model x adc_bridge(...)` has its type.
+                        let words: Vec<String> = text
+                            .split(|c: char| c.is_whitespace() || "=(),".contains(c))
+                            .filter(|w| !w.is_empty())
+                            .map(str::to_ascii_lowercase)
+                            .collect();
+                        if let [kw, name, kind, ..] = &words[..]
+                            && kw == ".model"
+                        {
+                            models.insert(name.to_ascii_uppercase(), kind.clone());
+                        }
+                    }
+                    Line::Subckt(s) => cards(&s.body, models),
+                    _ => {}
+                }
+            }
+        }
+        let mut models = HashMap::new();
+        cards(&n.items, &mut models);
         let analysis = n
             .analysis()
             .and_then(|a| a.split_whitespace().next())
@@ -132,6 +294,8 @@ impl Cx {
             analysis,
             sources,
             used: Vec::new(),
+            models,
+            cosim: HashSet::new(),
         }
     }
 
@@ -372,6 +536,7 @@ impl Cx {
             'L' => self.inductor(e),
             'V' => self.voltage_source(e),
             'K' => self.coupling(e),
+            'A' if self.target == Target::Ngspice && self.xspice(&e) => vec![Line::Element(e)],
             'A' => {
                 self.unsupported(format!(
                     "{}: LTspice's special-function and digital devices (A) have no {} equivalent",
@@ -389,6 +554,29 @@ impl Cx {
             }
             _ => vec![Line::Element(e)],
         }
+    }
+
+    /// Whether an `A` instance is an XSPICE device ngspice may run: its
+    /// model, the last word, is a card in the deck of a type on
+    /// [`XSPICE_MODELS`], or a co-simulation model the project declares.
+    fn xspice(&mut self, e: &Element) -> bool {
+        let model = e
+            .nodes
+            .iter()
+            .map(String::as_str)
+            .chain(e.rest.split_whitespace())
+            .last()
+            .map(str::to_ascii_uppercase)
+            .unwrap_or_default();
+        let ok = self.cosim.contains(&model)
+            || self
+                .models
+                .get(&model)
+                .is_some_and(|t| XSPICE_MODELS.contains(&t.as_str()));
+        if ok {
+            self.note("kept XSPICE devices (A) for ngspice's code models");
+        }
+        ok
     }
 
     fn resistor(&mut self, mut e: Element) -> Vec<Line> {
@@ -747,7 +935,26 @@ impl Cx {
                 self.unsupported(format!("`{text}`: LTspice-only directive"));
                 None
             }
-            ".model" => Some(self.model(&text)),
+            ".model" => {
+                // An XSPICE code model that reads a file never reaches
+                // ngspice: the netlist policy checks its file parameter
+                // inside the project, and its `A` instance was dropped as
+                // unsupported, but the card itself is dropped here too.
+                let kind = text
+                    .split(|c: char| c.is_whitespace() || "=(),".contains(c))
+                    .filter(|w| !w.is_empty())
+                    .nth(2)
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                if FILE_XSPICE_MODELS.contains(&kind.as_str()) {
+                    self.note(format!(
+                        "dropped the `{kind}` model card: its XSPICE code model reads a file and is not run"
+                    ));
+                    None
+                } else {
+                    Some(self.model(&text))
+                }
+            }
             _ => Some(text),
         }
     }
@@ -1666,6 +1873,66 @@ mod tests {
             "{:?}",
             t.notes
         );
+    }
+
+    /// XSPICE devices reach ngspice when their model is an allowed code
+    /// model in the deck or a declared co-simulation model; anything else
+    /// stays an LTspice device no other simulator runs.
+    #[test]
+    fn a_deck_cannot_shadow_a_cosim_model_or_retype_an_xspice_model() {
+        // A deck defining a model under a declared co-simulation name.
+        let shadow = parse("t\nA1 [a] [b] null counter\n.model counter d_dff\n.end\n");
+        let e = behavioral_conflicts(&shadow, &["counter".into()]).unwrap();
+        assert!(e.contains("counter") && e.contains("co-simulation"), "{e}");
+        // The same name as two XSPICE types, one inside a subcircuit.
+        let retype = parse("t\n.model m adc_bridge\n.subckt s a\n.model m d_dff\n.ends\n.end\n");
+        let e = behavioral_conflicts(&retype, &[]).unwrap();
+        assert!(e.contains("`m`") && e.contains("one type"), "{e}");
+        // Two ordinary device models of the same name are not our concern,
+        // and a repeated identical card is fine.
+        let devices = parse("t\n.model d1 d(is=1n)\n.subckt s a\n.model d1 npn\n.ends\n");
+        assert!(behavioral_conflicts(&devices, &[]).is_none());
+        let repeat = parse("t\n.model g d_and\n.model g d_and\n");
+        assert!(behavioral_conflicts(&repeat, &[]).is_none());
+    }
+
+    #[test]
+    fn a_file_reading_xspice_model_card_is_dropped() {
+        let deck = "t\nVin a 0 1\nAbr [a] [ad] tobit\n.model tobit adc_bridge\nA2 [ad] [x] lut\n.model lut d_source(input_file=\"x.txt\")\n.tran 1u 10u\n";
+        let t = translate_with(&parse(deck), Target::Ngspice, &[]);
+        assert!(t.text.contains("adc_bridge"), "{}", t.text);
+        assert!(
+            !t.text.to_ascii_lowercase().contains("d_source"),
+            "{}",
+            t.text
+        );
+        assert!(!t.text.contains("input_file"), "{}", t.text);
+    }
+
+    #[test]
+    fn xspice_devices_pass_for_ngspice_only() {
+        let deck = "t\nVin a 0 1\nAbr [a] [ad] tobit\n.model tobit adc_bridge(in_low=0.4 in_high=0.6)\nA1 [ad] [q] null counter\nA2 [ad] [x] lut\n.model lut d_source(input_file=\"x.txt\")\nA3 1 2 3 4 5 6 7 8 OTA g=1\n.tran 1u 10u\n";
+        let t = translate_with(&parse(deck), Target::Ngspice, &["counter".into()]);
+        let l = lines(&t);
+        assert!(l.contains(&"Abr [a] [ad] tobit"), "{l:?}");
+        assert!(
+            l.contains(&".model tobit adc_bridge(in_low=0.4 in_high=0.6)"),
+            "{l:?}"
+        );
+        assert!(l.contains(&"A1 [ad] [q] null counter"), "{l:?}");
+        assert!(
+            !t.text.contains("A2 ") && !t.text.contains("A3 "),
+            "{}",
+            t.text
+        );
+        assert_eq!(t.unsupported.len(), 2, "{:?}", t.unsupported);
+        // Without the declaration the co-simulated instance is not kept.
+        let t = translate(&parse(deck), Target::Ngspice);
+        assert!(!t.text.contains("A1 "), "{}", t.text);
+        for target in [Target::Xyce, Target::Spectre] {
+            let t = translate_with(&parse(deck), target, &["counter".into()]);
+            assert!(!t.text.contains("Abr "), "{target:?}: {}", t.text);
+        }
     }
 
     #[test]

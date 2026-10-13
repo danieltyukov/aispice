@@ -57,3 +57,63 @@ impl TestRng {
 pub(crate) fn test_rng(seed: u64) -> TestRng {
     TestRng(seed.max(1))
 }
+
+/// The installed xschem's `xschem_library`, found the way aispice finds
+/// xschem to run it (`aispice_sim::xschem::Xschem::find`): the program from
+/// `AISPICE_XSCHEM` or `PATH`, its shared folder from
+/// `AISPICE_XSCHEM_SHAREDIR`, else `share/xschem` beside the program's `bin`
+/// folder. None when no xschem is installed, which a test may skip on; an
+/// error when xschem is there but its library is not, which it must not.
+#[cfg(test)]
+pub(crate) fn installed_library() -> Option<Result<std::path::PathBuf, String>> {
+    use std::path::PathBuf;
+    let program = match std::env::var_os("AISPICE_XSCHEM") {
+        Some(p) => Some(PathBuf::from(p)).filter(|p| p.is_file()),
+        None => std::env::var_os("PATH").and_then(|path| {
+            let name = if cfg!(windows) {
+                "xschem.exe"
+            } else {
+                "xschem"
+            };
+            std::env::split_paths(&path)
+                .map(|d| d.join(name))
+                .find(|p| p.is_file())
+        }),
+    }?;
+    let share = std::env::var_os("AISPICE_XSCHEM_SHAREDIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let real = program.canonicalize().ok()?;
+            Some(real.parent()?.parent()?.join("share/xschem"))
+        });
+    let Some(library) = share.map(|s| s.join("xschem_library")) else {
+        return Some(Err(format!(
+            "xschem is installed at {} but has no share/xschem beside it",
+            program.display()
+        )));
+    };
+    Some(if library.join("devices").is_dir() {
+        Ok(library)
+    } else {
+        Err(format!(
+            "xschem is installed at {} but its library is not at {}",
+            program.display(),
+            library.display()
+        ))
+    })
+}
+
+/// A library folder holding xschem 3.4.8's forms of the symbols it changed
+/// ([`builtin::LATER`]) under `devices/`, with a resolver that reads it
+/// first and aispice's built-ins after it.
+#[cfg(test)]
+pub(crate) fn later_library() -> (tempfile::TempDir, symbol::Resolver) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("devices")).unwrap();
+    for (name, text) in builtin::LATER {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+    let r = symbol::Resolver::new(vec![root.join("devices"), root], Vec::new());
+    (tmp, r)
+}
