@@ -155,7 +155,7 @@ done
 | `ota5t` | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 | `strongarm` | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 | `tiny_counter` | pass, 0 errors, 1 warning | pass, 0 errors, 1 warning |
-| ChipLeap's own [`strongarm.macro`](https://github.com/danieltyukov/chipleap/tree/main/examples/uart/macros) | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
+| ChipLeap's UART [`strongarm.macro`](https://github.com/danieltyukov/chipleap/tree/main/examples/uart/macros), exported by this aispice from its own netlist | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 
 **The counter's warning.** The counter's warning is `pdk.expected`: it was built on PDK commit `cb7daaa`, not the `22f2a25` this chip uses. LibreLane 3.0.0.dev44 hardens on the IHP release it downloads itself (`cb7daaa`), because it cannot load the LibreLane configuration of the `22f2a25` checkout. The twelve standard cells in the counter's GDS are identical to `22f2a25`'s, which is why both checks pass with the libraries. Without `--pdk-libs`, both tools refuse the package with one `pdk.cell_name` error per cell, because they cannot show that those cells are the PDK's own.
 
