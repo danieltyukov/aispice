@@ -1,6 +1,6 @@
 {
   "schema": "macro.fixtures/v1",
-  "description": "What every macro/v1 validator reports for each fixture. Findings are in report order. A finding with message_prefix instead of message comes from a parser, whose detail differs between tools.",
+  "description": "What every macro/v1 validator reports for each fixture. A case with pdk_libs gives the validator that folder, relative to this one, as the PDK's libraries. Findings are in report order. A finding with message_prefix instead of message comes from a parser, whose detail differs between tools.",
   "cases": [
     {
       "package": "tiny_ota.macro",
@@ -298,6 +298,30 @@
       "name": "tiny_counter",
       "kind": "digital",
       "pass": false,
+      "errors": 1,
+      "warnings": 1,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "warning",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_tap\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do; without the PDK's libraries, the validator cannot compare it with the PDK's own"
+        },
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "subcircuit \"Sg13g2_Dly\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        }
+      ]
+    },
+    {
+      "package": "broken/pdk-cell-name/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
       "errors": 2,
       "warnings": 0,
       "findings": [
@@ -312,6 +336,70 @@
           "severity": "error",
           "file": "tiny_counter.spice",
           "message": "subcircuit \"Sg13g2_Dly\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-identical/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 0,
+      "findings": []
+    },
+    {
+      "package": "broken/std-cell-identical/tiny_counter.macro",
+      "pdk": null,
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": true,
+      "errors": 0,
+      "warnings": 1,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "warning",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_inv_1\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do; without the PDK's libraries, the validator cannot compare it with the PDK's own"
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-modified/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_inv_1\" differs from the cell of that name in PDK \"ihp-sg13g2\""
+        }
+      ]
+    },
+    {
+      "package": "broken/spice-pdk-subckt/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.spice",
+          "message": "subcircuit \"sg13g2_inv_1\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
         }
       ]
     },

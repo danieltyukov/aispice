@@ -3,8 +3,9 @@
 //! cells named like the PDK's own. ChipLeap runs the same cases in
 //! tests/test_macro_security.py and tests/test_macro.py.
 
+use aispice_core::macropkg::gds::structure_digests;
 use aispice_core::macropkg::{
-    CheckOptions, Evidence, Manifest, Report, Status, check_package, read_package_file,
+    CheckOptions, Evidence, Manifest, PdkLibs, Report, Status, check_package, read_package_file,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -326,11 +327,32 @@ fn counter_named(tmp: &Path, name: &str, tap: Option<&str>) -> PathBuf {
     pkg
 }
 
+/// Libraries that name `cells`, without any GDS.
 fn with_cells(cells: &[&str]) -> CheckOptions {
+    with_libs(PdkLibs {
+        names: cells.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>(),
+        ..Default::default()
+    })
+}
+
+fn with_libs(libs: PdkLibs) -> CheckOptions {
     CheckOptions {
-        pdk_cells: cells.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>(),
+        pdk_libs: Some(libs),
         ..Default::default()
     }
+}
+
+/// The shared fixtures' stand-in PDK: one made-up cell, `sg13g2_inv_1`.
+fn stand_in() -> PdkLibs {
+    PdkLibs::load(&fixtures().join("pdk/ihp-sg13g2")).unwrap()
+}
+
+fn findings_of(report: &Report) -> Vec<(&str, &str, &str)> {
+    report
+        .findings
+        .iter()
+        .map(|f| (f.severity.as_str(), f.file.as_str(), f.message.as_str()))
+        .collect()
 }
 
 #[test]
@@ -340,37 +362,44 @@ fn a_renamed_counter_passes() {
     assert!(report.findings.is_empty(), "{}", report.to_text());
 }
 
+const NAME: &str =
+    r#"name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#;
+const TAP: &str =
+    r#"GDS cell "sg13g2_counter_tap" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#;
+const UNCOMPARED: &str =
+    "; without the PDK's libraries, the validator cannot compare it with the PDK's own";
+
 #[test]
 fn a_package_named_in_the_pdks_name_space_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = check(&counter_named(tmp.path(), "sg13g2_counter", None));
-    let rules: Vec<(&str, &str)> = report
-        .findings
-        .iter()
-        .map(|f| (f.rule.as_str(), f.file.as_str()))
-        .collect();
-    // The second is its tap cell, sg13g2_counter_tap.
+    let pkg = counter_named(tmp.path(), "sg13g2_counter", None);
+    // Its tap cell, sg13g2_counter_tap, cannot be compared without the PDK's
+    // libraries: a warning.
+    let report = check(&pkg);
+    let tap = format!("{TAP}{UNCOMPARED}");
     assert_eq!(
-        rules,
+        findings_of(&report),
         [
-            ("pdk.cell_name", "macro.toml"),
-            ("pdk.cell_name", "sg13g2_counter.gds")
+            ("error", "macro.toml", NAME),
+            ("warning", "sg13g2_counter.gds", tap.as_str()),
         ]
     );
+    // With them, it is no cell of the PDK's: an error.
+    let report = check_package(&pkg, &with_libs(stand_in())).unwrap();
     assert_eq!(
-        report.findings[0].message,
-        r#"name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#
+        findings_of(&report),
+        [
+            ("error", "macro.toml", NAME),
+            ("error", "sg13g2_counter.gds", TAP),
+        ]
     );
 }
 
 #[test]
 fn case_does_not_hide_a_pdk_cell_name() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = check(&counter_named(
-        tmp.path(),
-        "counter",
-        Some("RM_IHPSG13_tap"),
-    ));
+    let pkg = counter_named(tmp.path(), "counter", Some("RM_IHPSG13_tap"));
+    let report = check_package(&pkg, &with_libs(PdkLibs::default())).unwrap();
     let messages: Vec<&str> = report.findings.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         messages,
@@ -378,6 +407,41 @@ fn case_does_not_hide_a_pdk_cell_name() {
             r#"GDS cell "RM_IHPSG13_tap" begins with "rm_ihpsg13", as the cells of PDK "ihp-sg13g2" do"#
         ]
     );
+    // A PDK cell's name in another case is not its name.
+    let pkg = counter_named(&tmp.path().join("upper"), "counter", Some("SG13G2_INV_1"));
+    let report = check_package(&pkg, &with_libs(stand_in())).unwrap();
+    let messages: Vec<&str> = report.findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [r#"GDS cell "SG13G2_INV_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#]
+    );
+}
+
+/// A package's copy of the PDK's inverter differs from the PDK's only in
+/// BGNSTR, which holds the dates; the same digest is ChipLeap's.
+#[test]
+fn a_pdk_cell_is_compared_without_the_dates_of_its_structure() {
+    let read = |rel: &str| std::fs::read(fixtures().join(rel)).unwrap();
+    let pdk = read("pdk/ihp-sg13g2/libs.ref/sg13g2_stdcell/gds/sg13g2_stdcell.gds");
+    let same = read("broken/std-cell-identical/tiny_counter.macro/tiny_counter.gds");
+    let other = read("broken/std-cell-modified/tiny_counter.macro/tiny_counter.gds");
+    let inv = |data: &[u8]| {
+        structure_digests(data)
+            .unwrap()
+            .into_iter()
+            .find(|(name, _)| name == b"sg13g2_inv_1")
+            .unwrap()
+            .1
+    };
+    // 2025 and 2026 in the BGNSTR dates.
+    assert!(pdk.windows(2).any(|w| w == [0x07, 0xe9]));
+    assert!(!same.windows(2).any(|w| w == [0x07, 0xe9]));
+    assert_eq!(inv(&pdk), inv(&same));
+    assert_ne!(inv(&pdk), inv(&other));
+    assert!(stand_in().gds["sg13g2_inv_1"].contains(&inv(&same)));
+    // A record that runs past the end, or is shorter than its header.
+    assert!(structure_digests(&[0u8, 16, 6, 6, b'a', b'b'][..]).is_err());
+    assert!(structure_digests(&[0u8, 2, 6, 6][..]).is_err());
 }
 
 #[test]
@@ -417,6 +481,22 @@ fn a_cell_of_the_pdks_libraries_is_refused_when_the_validator_has_them() {
     );
 }
 
+/// Instantiating the PDK's cells is fine, defining one is not, with or
+/// without the PDK's libraries.
+#[test]
+fn a_netlist_may_use_the_pdks_cells_but_not_define_them() {
+    let pkg = fixtures().join("tiny_counter.macro");
+    let spice = std::fs::read_to_string(pkg.join("tiny_counter.spice")).unwrap();
+    assert!(spice.contains(" sg13g2_dfrbp_1\n"));
+    assert!(check_package(&pkg, &with_libs(stand_in())).unwrap().passed);
+    let pkg = fixtures().join("broken/spice-pdk-subckt/tiny_counter.macro");
+    for opts in [CheckOptions::default(), with_libs(stand_in())] {
+        let report = check_package(&pkg, &opts).unwrap();
+        assert_eq!(report.rules(), ["pdk.cell_name"]);
+        assert_eq!(report.findings[0].file, "tiny_counter.spice");
+    }
+}
+
 #[test]
 fn other_pdks_have_no_name_space_of_ihps() {
     let tmp = tempfile::tempdir().unwrap();
@@ -448,4 +528,10 @@ fn pdk_cell_names_come_last() {
         report.rules(),
         ["pdk.expected", "pdk.cell_name", "pdk.cell_name"]
     );
+    let severities: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|f| f.severity.as_str())
+        .collect();
+    assert_eq!(severities, ["warning", "warning", "error"]);
 }

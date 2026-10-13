@@ -13,7 +13,9 @@
 
 use super::limits::{LimitError, Limits, ReadError, read_capped};
 use super::text::quote;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -408,7 +410,7 @@ fn need<const N: usize>(body: &[u8], what: &str) -> Result<[u8; N], GdsError> {
     }
 }
 
-fn name_of(body: &[u8]) -> String {
+pub(crate) fn name_of(body: &[u8]) -> String {
     let end = body.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     // Latin-1: every byte is the code point of the same value.
     body[..end].iter().map(|&b| char::from(b)).collect()
@@ -781,4 +783,57 @@ pub fn read_gds(path: &Path) -> Result<GdsLibrary, GdsError> {
         ReadError::Io(e) => GdsError::Syntax(e.to_string()),
     })?;
     parse_gds_with(&data, &limits)
+}
+
+/// Each structure of a GDS stream, read one record at a time: its name as
+/// written (one NUL pads an odd length) and the SHA-256 of its records from
+/// STRNAME to ENDSTR, each with its four-byte header. Two structures with the
+/// same digest are identical for macro/v1's `pdk.cell_name`; BGNSTR, which
+/// holds the dates, is not compared. ChipLeap's
+/// `chipleap.macro.gds.structure_digests` is the same definition, and its
+/// chip merges compare cells by it. Fails when a record runs past the end.
+pub fn structure_digests(stream: impl Read) -> std::io::Result<Vec<(Vec<u8>, String)>> {
+    let mut r = std::io::BufReader::new(stream);
+    let mut out = Vec::new();
+    let mut head = [0u8; 4];
+    let mut body = Vec::new();
+    let mut current: Option<(Vec<u8>, Sha256)> = None;
+    let mut pos = 0u64;
+    loop {
+        match r.read_exact(&mut head) {
+            Ok(()) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e),
+        }
+        let length = usize::from(u16::from_be_bytes([head[0], head[1]]));
+        let bad = || std::io::Error::other(format!("bad record length {length} at byte {pos}"));
+        if length < 4 {
+            return Err(bad());
+        }
+        body.resize(length - 4, 0);
+        r.read_exact(&mut body).map_err(|e| match e.kind() {
+            ErrorKind::UnexpectedEof => bad(),
+            _ => e,
+        })?;
+        pos += length as u64;
+        let rtype = head[2];
+        if rtype == 0x06 {
+            let name = body.strip_suffix(&[0]).unwrap_or(&body).to_vec();
+            current = Some((name, Sha256::new()));
+        }
+        if let Some((_, h)) = &mut current {
+            h.update(head);
+            h.update(&body);
+        }
+        if rtype == 0x07
+            && let Some((name, h)) = current.take()
+        {
+            let hex = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            out.push((name, hex));
+        }
+        if rtype == 0x04 {
+            break;
+        }
+    }
+    Ok(out)
 }

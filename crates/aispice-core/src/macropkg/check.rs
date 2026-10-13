@@ -4,7 +4,7 @@
 //! pins both.
 
 use super::files::{self, Kind, read_package_file, sha256_package_file};
-use super::gds::{GdsError, GdsLibrary, parse_gds_with};
+use super::gds::{GdsError, GdsLibrary, name_of, parse_gds_with, structure_digests};
 use super::lef::{LefError, LefMacro, parse_lef_with};
 use super::liberty::{LibertyError, parse_liberty_with};
 use super::limits::{Limits, ReadError, json_depth, toml_depth};
@@ -12,6 +12,7 @@ use super::manifest::{
     Direction, MANIFEST, MacroError, MacroKind, Manifest, OPENADA_SCHEMA, Pin, PinKind,
     SCHEMA_VERSION,
 };
+use super::pdklibs::PdkLibs;
 use super::schema::{Val, validate_def};
 use super::spice::{spice_subckt_with, spice_subckts_with};
 use super::text::{fmt_g, names, plural, quote};
@@ -104,11 +105,11 @@ impl Report {
 pub struct CheckOptions {
     /// The placing chip's PDK: `NAME` or `NAME@COMMIT`.
     pub pdk: Option<String>,
-    /// The cells of the PDK's libraries (the LEF macros, CDL subcircuits and
-    /// GDS cells of every library under `libs.ref`), when the caller has
-    /// them: a package cell named like one is refused (`pdk.cell_name`).
-    /// Compared in ASCII lower case.
-    pub pdk_cells: BTreeSet<String>,
+    /// The cells of the PDK's libraries ([`PdkLibs::load`]), when the caller
+    /// has them: a package cell named like one is refused unless it is a GDS
+    /// cell identical to the PDK's of that name (`pdk.cell_name`). Names are
+    /// compared in ASCII lower case.
+    pub pdk_libs: Option<PdkLibs>,
     /// For tests; the spec fixes the values of [`Limits::DEFAULT`].
     pub limits: Limits,
 }
@@ -238,10 +239,11 @@ struct Checker<'a> {
     /// Files reported as unreadable, once each.
     unreadable: HashSet<String>,
     /// The cells a chip would merge, seen while the views are read: (file,
-    /// what it is, name).
-    cells: Vec<(String, &'static str, String)>,
-    /// From [`CheckOptions::pdk_cells`], lower case.
-    pdk_cells: HashSet<String>,
+    /// what it is, name, and for a GDS cell named exactly like a GDS cell of
+    /// the PDK's, its digest).
+    cells: Vec<(String, &'static str, String, String)>,
+    /// From [`CheckOptions::pdk_libs`], names in lower case.
+    pdk_libs: Option<PdkLibs>,
     /// Package files hashed for evidence.
     digests: HashMap<String, Option<String>>,
     hash_limit_reported: bool,
@@ -556,8 +558,29 @@ impl Checker<'_> {
                 return;
             }
         };
+        // The digests of the cells named like the PDK's GDS cells, to compare
+        // with theirs.
+        let named: HashSet<&str> = match &self.pdk_libs {
+            Some(libs) => lib
+                .cells()
+                .iter()
+                .filter(|c| **c != m.name && libs.gds.contains_key(*c))
+                .map(String::as_str)
+                .collect(),
+            None => HashSet::new(),
+        };
+        let mut digests: HashMap<String, String> = HashMap::new();
+        if !named.is_empty() {
+            for (raw, digest) in structure_digests(&data[..]).unwrap_or_default() {
+                let name = name_of(&raw);
+                if named.contains(name.as_str()) {
+                    digests.insert(name, digest);
+                }
+            }
+        }
         for c in lib.cells().iter().filter(|c| **c != m.name) {
-            self.cells.push((f.clone(), "GDS cell", c.clone()));
+            let digest = digests.remove(c).unwrap_or_default();
+            self.cells.push((f.clone(), "GDS cell", c.clone(), digest));
         }
         let tops = lib.top_cells();
         if !tops.contains(&m.name) {
@@ -1057,7 +1080,7 @@ impl Checker<'_> {
         let sub = match found {
             Ok((sub, all)) => {
                 for c in all.into_iter().filter(|c| !c.eq_ignore_ascii_case(&m.name)) {
-                    self.cells.push((f.clone(), "subcircuit", c));
+                    self.cells.push((f.clone(), "subcircuit", c, String::new()));
                 }
                 sub
             }
@@ -1517,27 +1540,52 @@ impl Checker<'_> {
     fn cell_names(&mut self, m: &Manifest) {
         let prefixes = pdk_cell_prefixes(&m.pdk.name);
         let cells = std::mem::take(&mut self.cells);
-        let all = std::iter::once((MANIFEST.to_string(), "name", m.name.clone())).chain(cells);
-        for (f, what, name) in all {
+        let libs = self.pdk_libs.take();
+        let pdk = quote(&m.pdk.name);
+        let all = std::iter::once((MANIFEST.to_string(), "name", m.name.clone(), String::new()))
+            .chain(cells);
+        for (f, what, name, digest) in all {
             let low = ascii_lower(&name);
-            let message = if let Some(hit) = prefixes.iter().find(|p| low.starts_with(*p)) {
-                format!(
-                    "{what} {} begins with {}, as the cells of PDK {} do",
-                    quote(&name),
-                    quote(hit),
-                    quote(&m.pdk.name)
-                )
-            } else if self.pdk_cells.contains(&low) {
-                format!(
-                    "{what} {} is a cell of PDK {}",
-                    quote(&name),
-                    quote(&m.pdk.name)
-                )
-            } else {
+            let hit = prefixes.iter().find(|p| low.starts_with(*p));
+            if hit.is_none() && !libs.as_ref().is_some_and(|l| l.names.contains(&low)) {
                 continue;
+            }
+            let pdk_gds = libs.as_ref().and_then(|l| l.gds.get(&name));
+            let (message, severity) = match (what, pdk_gds, hit) {
+                // The PDK's own cell, as a hardened block holds its standard cells.
+                ("GDS cell", Some(theirs), _) if theirs.contains(&digest) => continue,
+                ("GDS cell", Some(_), _) => (
+                    format!(
+                        "{what} {} differs from the cell of that name in PDK {pdk}",
+                        quote(&name)
+                    ),
+                    Severity::Error,
+                ),
+                (_, _, None) => (
+                    format!("{what} {} is a cell of PDK {pdk}", quote(&name)),
+                    Severity::Error,
+                ),
+                ("GDS cell", None, Some(hit)) if libs.is_none() => (
+                    format!(
+                        "{what} {} begins with {}, as the cells of PDK {pdk} do; without the \
+                         PDK's libraries, the validator cannot compare it with the PDK's own",
+                        quote(&name),
+                        quote(hit)
+                    ),
+                    Severity::Warning,
+                ),
+                (_, _, Some(hit)) => (
+                    format!(
+                        "{what} {} begins with {}, as the cells of PDK {pdk} do",
+                        quote(&name),
+                        quote(hit)
+                    ),
+                    Severity::Error,
+                ),
             };
-            self.add("pdk.cell_name", &f, message);
+            self.push("pdk.cell_name", &f, message, severity);
         }
+        self.pdk_libs = libs;
     }
 }
 
@@ -1559,7 +1607,10 @@ pub fn check_package(dir: &Path, opts: &CheckOptions) -> Result<Report, MacroErr
         too_large: HashSet::new(),
         unreadable: HashSet::new(),
         cells: Vec::new(),
-        pdk_cells: opts.pdk_cells.iter().map(|n| ascii_lower(n)).collect(),
+        pdk_libs: opts.pdk_libs.as_ref().map(|l| PdkLibs {
+            names: l.names.iter().map(|n| ascii_lower(n)).collect(),
+            gds: l.gds.clone(),
+        }),
         digests: HashMap::new(),
         hash_limit_reported: false,
         name: None,

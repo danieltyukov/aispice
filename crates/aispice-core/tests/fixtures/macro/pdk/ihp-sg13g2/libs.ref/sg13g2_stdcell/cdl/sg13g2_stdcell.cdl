@@ -1,0 +1,5 @@
+* Stand-in for IHP SG13G2's standard cells. Synthetic test fixture.
+.SUBCKT sg13g2_inv_1 A Y VDD VSS
+MN0 Y A VSS VSS sg13_lv_nmos w=0.74u l=0.13u
+MP0 Y A VDD VDD sg13_lv_pmos w=1.12u l=0.13u
+.ENDS sg13g2_inv_1
