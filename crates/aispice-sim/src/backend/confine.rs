@@ -430,8 +430,12 @@ fn native_code_syscalls() -> Vec<libc::c_long> {
         libc::SYS_pselect6,
     ];
     // The older calls x86_64 still has and its C library still makes.
+    // `fork` and `vfork` take no flags, so they start nothing a `clone`
+    // without namespace flags could not; shells such as dash use `vfork`.
     #[cfg(target_arch = "x86_64")]
     v.extend([
+        libc::SYS_fork,
+        libc::SYS_vfork,
         libc::SYS_open,
         libc::SYS_stat,
         libc::SYS_lstat,
