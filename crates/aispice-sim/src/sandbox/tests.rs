@@ -639,8 +639,9 @@ async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
     let dir = tmp.path().canonicalize().unwrap();
     let ran = dir.join("ran");
     let fake = dir.join("bwrap");
+    let source = dir.join("bwrap.sh");
     std::fs::write(
-        &fake,
+        &source,
         format!(
             "#!/bin/sh\ntouch '{}'\n\
              if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi\n\
@@ -651,7 +652,16 @@ async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
         ),
     )
     .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Made by another process: a file this test process wrote could still
+    // be open for writing in a child another test forked meanwhile, and
+    // running it then fails with ETXTBSY.
+    let installed = std::process::Command::new("install")
+        .args(["-m", "0755"])
+        .arg(&source)
+        .arg(&fake)
+        .status()
+        .unwrap();
+    assert!(installed.success());
     let cancel = CancellationToken::new();
     let err = Sandbox::bwrap_at(fake.clone(), &cancel).await.unwrap_err();
     assert!(err.contains("NativeCode"), "{err}");
