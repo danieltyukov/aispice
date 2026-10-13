@@ -311,7 +311,7 @@ pub fn generate(
         rows.push(cap::build(c)?);
     }
     let ports = crate::lvs::block_ports(netlist, Some(&block.elements));
-    let (plan, spine) = route::assemble(cell, &rows, &ports, params);
+    let (plan, spine) = route::assemble(cell, &rows, &ports, params, &block.mirror);
     let bbox = plan.bbox().unwrap_or(plan::Rect::new(0, 0, 0, 0));
     let mut dummies: Vec<ExtraDevice> = Vec::new();
     for r in &rows {
@@ -403,6 +403,76 @@ mod tests {
     const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n";
 
     #[test]
+    fn the_comparator_is_drawn_symmetric() {
+        let n = aispice_core::netlist::parse(STRONGARM);
+        for pin_edge in [false, true] {
+            let p = Params {
+                pin_edge,
+                ..Default::default()
+            };
+            let g = generate(&n, Template::Comparator, &Roles::new(), &p, "cmp").unwrap();
+            let order: Vec<String> = g.meta.rows.iter().map(|r| r["order"].to_string()).collect();
+            assert_eq!(
+                order,
+                [
+                    r#"["d M0 d"]"#,
+                    r#"["d M1 M2 d"]"#,
+                    r#"["M3","M4"]"#,
+                    r#"["d M5 M6 d"]"#,
+                    r#"["d M9 M7 M8 M10 d"]"#,
+                ],
+                "each row reads the same reflected, with the sides swapped"
+            );
+            // Per routing layer, each net's metal area and via count.
+            let tally = |net: &str| {
+                let mut t: BTreeMap<plan::Layer, (i64, usize)> = BTreeMap::new();
+                for s in g
+                    .plan
+                    .shapes
+                    .iter()
+                    .filter(|s| s.net.as_deref() == Some(net))
+                {
+                    let e = t.entry(s.layer).or_insert((0, 0));
+                    e.0 += s.rect.width() * s.rect.height();
+                    e.1 += 1;
+                }
+                t
+            };
+            for (a, b) in [("xp", "xn"), ("outn", "outp"), ("inp", "inm")] {
+                let (ta, tb) = (tally(a), tally(b));
+                assert_eq!(
+                    ta.keys().collect::<Vec<_>>(),
+                    tb.keys().collect::<Vec<_>>(),
+                    "{a} and {b} use the same layers"
+                );
+                for (layer, (area_a, n_a)) in &ta {
+                    let (area_b, n_b) = tb[layer];
+                    assert_eq!(*n_a, n_b, "{a} and {b}: shapes on {layer:?}");
+                    let diff = (*area_a - area_b).abs() as f64 / *area_a.max(&area_b) as f64;
+                    eprintln!(
+                        "{a} {b} {layer:?}: {area_a} {area_b} nm2 ({:.1} %)",
+                        100.0 * diff
+                    );
+                    // Where a pair takes two tracks, the outer one's stubs
+                    // are a pitch longer (Metal2); pins stand on a grid
+                    // (Metal3 and Metal4 with pin_edge).
+                    let limit = if *layer == plan::Layer::Metal2 || pin_edge {
+                        0.1
+                    } else {
+                        0.03
+                    };
+                    assert!(
+                        diff < limit,
+                        "{a} and {b} on {layer:?}: {area_a} and {area_b} nm2 (pin_edge {pin_edge})"
+                    );
+                }
+            }
+            let errors = g.plan.spacing_errors(&BTreeMap::new());
+            assert!(errors.is_empty(), "{errors:?}");
+        }
+    }
+
+    #[test]
     fn edge_pins_reach_the_bottom_edge_on_columns_of_their_own() {
         for (text, template) in [(OTA, Template::Ota5t), (STRONGARM, Template::Comparator)] {
             let n = aispice_core::netlist::parse(text);
@@ -436,9 +506,16 @@ mod tests {
                 );
                 xs.push(l.x);
             }
+            xs.sort();
             xs.dedup();
             assert_eq!(xs.len(), pins.len(), "one column per pin");
-            assert!(xs.iter().all(|x| *x < plain.plan.bbox().unwrap().x1));
+            // Left of the block, or for the comparator (drawn symmetric) the
+            // right net of each mirror pair right of it.
+            let inner = plain.plan.bbox().unwrap();
+            assert!(xs.iter().all(|x| *x < inner.x1 || *x > inner.x2));
+            if template == Template::Ota5t {
+                assert!(xs.iter().all(|x| *x < inner.x1));
+            }
             // The routes inside are the same, and what was added keeps every
             // net clear of the others.
             for s in &plain.plan.shapes {

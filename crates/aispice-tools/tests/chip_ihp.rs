@@ -20,8 +20,10 @@ use std::sync::Arc;
 
 const OTA: &str = "* 5T OTA\nVDD vdd 0 1.2\nVINP inp 0 0.6 AC 1\nVINM inm 0 0.6\nIB vdd vbn 20u\nCL out 0 1p\nXM1 d1 inp tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM2 out inm tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM3 d1 d1 vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM4 out d1 vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\nXM6 vbn vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\n.ac dec 20 1 10G\n.end\n";
 const OTA_SPECS: &str = "gain = gain_db_at(V(out), 10) >= 20\ngbw = unity_gain_freq(V(out)) >= 1Meg\npm = phase_margin(V(out)) >= 45\n";
-const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n.end\n";
-const COMPARATOR_SPECS: &str = "decision = value_at(V(outp,outn), 2.9n) >= 0.8\n";
+const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 PWL(0 0.61 4n 0.61 4.05n 0.59)\nVM inm 0 PWL(0 0.59 4n 0.59 4.05n 0.61)\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n.end\n";
+/// Both decisions: inp above inm in the first clock cycle, below it in the
+/// second, so an offset cannot pass for one of them.
+const COMPARATOR_SPECS: &str = "decision = value_at(V(outp,outn), 2.9n) >= 0.8\nreverse = value_at(V(outp,outn), 6.9n) <= -0.8\n";
 
 fn workspace() -> Option<(tempfile::TempDir, Arc<Workspace>)> {
     let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {

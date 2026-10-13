@@ -250,6 +250,111 @@ async fn the_ota_is_laid_out_checked_extracted_and_simulated_after_layout() {
     assert!(gbw1 < gbw0, "{gbw0} {gbw1}");
 }
 
+/// Capacitance per net in an extracted netlist's text, fF: each capacitor
+/// counts for both its nets.
+fn net_caps(text: &str) -> BTreeMap<String, f64> {
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for line in text.lines() {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        if w.len() < 4 || !w[0].starts_with('C') {
+            continue;
+        }
+        let Some(v) = aispice_core::units::parse(w[3]) else {
+            continue;
+        };
+        for n in &w[1..3] {
+            *out.entry(n.to_string()).or_default() += v * 1e15;
+        }
+    }
+    out
+}
+
+/// The comparator template laid out by its generator, which draws it
+/// mirror-symmetric: DRC and LVS clean, the two outputs loaded alike after
+/// extraction, both decisions at every corner of the template's set with its
+/// table after layout, and an input-referred offset after layout within the
+/// template's bound: a constant input difference of that size, either way,
+/// decides the right way at tt and 27 C.
+#[tokio::test]
+async fn the_comparator_template_decides_both_ways_after_layout() {
+    let Some((dir, ws)) = workspace() else {
+        return;
+    };
+    let t = aispice_tools::templates::find("comparator").unwrap();
+    let hint = t.layout.as_ref().unwrap();
+    let after = hint.specs.as_deref().unwrap();
+    let bound = hint.offset_mv.unwrap();
+    let asc = String::from_utf8(t.asc.to_vec()).unwrap();
+    std::fs::write(dir.path().join("comparator.asc"), &asc).unwrap();
+    let out = call(
+        &ws,
+        "layout",
+        json!({"action": "generate", "circuit": "comparator.asc", "template": "comparator"}),
+    )
+    .await;
+    let v = &out.data.as_ref().unwrap()["value"];
+    assert_eq!(v["drc"]["rules"], json!([]), "DRC clean");
+    assert_eq!(v["lvs"]["matched"], json!(true), "LVS clean");
+
+    let out = call(&ws, "extract", json!({"layout": "comparator.gds"})).await;
+    let caps = net_caps(&out.text_content());
+    let (n, p) = (caps["outn"], caps["outp"]);
+    eprintln!("outputs after extraction: outn {n:.2} fF, outp {p:.2} fF");
+    assert!((n - p).abs() / n.max(p) < 0.03, "outn {n} fF, outp {p} fF");
+
+    let out = call(
+        &ws,
+        "check_specs",
+        json!({"circuit": "comparator.asc", "specs": after, "save": false,
+               "corners": t.corners, "post_layout": {"layout": "comparator.gds"}}),
+    )
+    .await;
+    let v = &out.data.as_ref().unwrap()["value"];
+    assert!(
+        v["corners_post"]["failed"].as_array().unwrap().is_empty(),
+        "{}",
+        out.text_content()
+    );
+
+    // The bench with constant inputs, inp above inm by d (in mV); the first
+    // decision only.
+    let at = |d: f64| {
+        let vp = format!("SYMATTR Value {:.6}", 0.7 + d / 2000.0);
+        let vm = format!("SYMATTR Value {:.6}", 0.7 - d / 2000.0);
+        asc.replace("SYMATTR Value PWL(0 0.7005 1.5n 0.7005 1.55n 0.6995)", &vp)
+            .replace("SYMATTR Value PWL(0 0.6995 1.5n 0.6995 1.55n 0.7005)", &vm)
+    };
+    assert_ne!(
+        at(1.0),
+        asc,
+        "the bench's inputs are where the test expects"
+    );
+    // The same devices, so the layout still stands for them.
+    for d in [-bound, bound] {
+        std::fs::write(dir.path().join("comparator.asc"), at(d)).unwrap();
+        let spec = if d > 0.0 {
+            "d1 = value_at(V(outp,outn), 0.95n) >= 1"
+        } else {
+            "d1 = value_at(V(outp,outn), 0.95n) <= -1"
+        };
+        let out = call(
+            &ws,
+            "check_specs",
+            json!({"circuit": "comparator.asc", "specs": spec, "save": false,
+                   "post_layout": {"layout": "comparator.gds"}}),
+        )
+        .await;
+        let v = &out.data.as_ref().unwrap()["value"];
+        eprintln!("{d:+} mV: {} V after layout", row(&v["post"], "d1"));
+        assert_eq!(
+            v["post"]["rows"][0]["pass"],
+            json!(true),
+            "an input {d:+} mV apart decides the wrong way after layout: {}",
+            out.text_content()
+        );
+    }
+}
+
 /// Every file of the project outside aispice's own `.aispice/`, with its
 /// contents.
 fn user_files(root: &Path) -> BTreeMap<String, Vec<u8>> {

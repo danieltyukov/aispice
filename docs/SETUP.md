@@ -160,7 +160,7 @@ In such a project:
   | `current_mirror` | 10.3 uA from 10 uA at 0.6 V | 9 to 11.5 uA, at least 8.5 uA at 0.25 V |
   | `ota5t` | 27.6 dB, 23 MHz, 84 degrees into 1 pF | 24 dB, 15 MHz, 70 degrees |
   | `two_stage` | 53.2 dB, 22 MHz, 62 degrees into 1 pF | 48 dB, 13 MHz, 52 degrees |
-  | `comparator` | decides 1 mV in 135 ps at 500 MHz | both decisions, full reset, within 250 ps |
+  | `comparator` | decides 1 mV in 108 ps at 500 MHz | both decisions, full reset, within 250 ps (375 ps after layout) |
   | `bandgap` | 600 mV, 0.8 mV over -40 C to 125 C | 580 to 620 mV, at most 6 mV drift, supply 1.08 to 1.32 V |
   | `ldo` | 1.201 V at 0.1 mA, 1.194 V at 10 mA | 1.17 to 1.23 V, 80 mV droop, input 2.7 to 3.6 V |
 
@@ -187,7 +187,7 @@ aispice layout generate ota.asc --template ota5t
 aispice layout render ota.gds -o ota.png
 ```
 
-A generator is a deterministic planner: it reads the circuit, checks the topology it expects, splits each device into two-finger units, orders matched devices in a common-centroid or interdigitated row with dummy fingers at both ends and a guard ring, routes every net on Metal3 tracks (joined across rows on Metal4) and labels the pins. One KLayout script draws the plan with IHP's own MOS pcells. Templates and their roles:
+A generator is a deterministic planner: it reads the circuit, checks the topology it expects, splits each device into two-finger units, orders matched devices in a common-centroid or interdigitated row with dummy fingers at both ends and a guard ring, routes every net on Metal3 tracks (joined across rows on Metal4) and labels the pins. The comparator is drawn mirror-symmetric about its vertical axis: each device of a pair on its own side, the pair's nets wired as mirror images (the cross-coupled outputs change sides once, between two tracks of the latch's ring net), and no dummies on the latch's internal nodes, so the extracted outputs and internal nodes load alike and the laid-out latch keeps its offset under 0.5 mV. One KLayout script draws the plan with IHP's own MOS pcells. Templates and their roles:
 
 | Template | Roles |
 |---|---|

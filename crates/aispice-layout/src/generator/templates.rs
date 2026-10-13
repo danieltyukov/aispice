@@ -152,6 +152,9 @@ pub struct Block {
     pub caps: Vec<CapSpec>,
     pub elements: Vec<String>,
     pub roles: Roles,
+    /// Net pairs that mirror each other about the block's vertical axis
+    /// (left net first), for a block drawn symmetric; empty otherwise.
+    pub mirror: Vec<(String, String)>,
 }
 
 fn lookup<'a>(mos: &'a [Mos], name: &str) -> Result<&'a Mos, String> {
@@ -243,9 +246,11 @@ fn row(name: &str, devs: &[&Mos]) -> Result<RowSpec, String> {
         islands: vec![Island {
             devices: devs.iter().map(|d| d.dev.clone()).collect(),
             source,
+            mirror: Vec::new(),
         }],
         off: bulk.clone(),
         bulk,
+        dummies: None,
     })
 }
 
@@ -443,10 +448,12 @@ fn split_row(name: &str, devs: &[&Mos], sources: &[&String]) -> Result<RowSpec, 
             .map(|(d, s)| Island {
                 devices: vec![d.dev.clone()],
                 source: (*s).clone(),
+                mirror: Vec::new(),
             })
             .collect(),
         off: bulk.clone(),
         bulk,
+        dummies: None,
     })
 }
 
@@ -486,6 +493,7 @@ pub fn block(
     let mut used: Vec<&Mos> = Vec::new();
     let mut cap_list: Vec<CapSpec> = Vec::new();
     let mut cap_elements: Vec<String> = Vec::new();
+    let mut mirror: Vec<(String, String)> = Vec::new();
     let rows = match template {
         Template::CurrentMirror => {
             let rf = need(mos, &roles, "ref", Some(1))?[0];
@@ -604,6 +612,7 @@ pub fn block(
                 r.islands.push(Island {
                     devices: vec![cs.dev.clone()],
                     source: core.load_src.clone(),
+                    mirror: Vec::new(),
                 });
                 vec![r]
             } else {
@@ -681,13 +690,37 @@ pub fn block(
             used.extend(&latch_n);
             used.extend(&latch_p);
             used.extend(&reset);
-            vec![
+            let rows = vec![
                 row("tail", &[tail])?,
                 row("pair", &pair)?,
                 split_row("latch_n", &latch_n, &srcs)?,
                 row("latch_p", &latch_p)?,
                 row("reset", &reset)?,
-            ]
+            ];
+            match comparator_mirror(&pair, &s, &latch_n, &srcs, &latch_p, &reset) {
+                Some((sides, nets)) => {
+                    mirror = nets;
+                    // No dummies on the two latch islands: they would sit on
+                    // the internal nodes, and the extraction splits the
+                    // islands' shared diffusion between them differently on
+                    // the two sides, which simulates as an offset (about
+                    // 0.6 mV with dummies, under 0.2 mV without).
+                    let mut latch = split_row(
+                        "latch_n",
+                        &sides.order(&latch_n),
+                        &sides.sources(&srcs, &latch_n),
+                    )?;
+                    latch.dummies = Some(0);
+                    vec![
+                        rows[0].clone(),
+                        mirrored(&rows[1], &sides),
+                        latch,
+                        mirrored(&rows[3], &sides),
+                        mirrored(&rows[4], &sides),
+                    ]
+                }
+                None => rows,
+            }
         }
     };
     let mut seen = BTreeMap::new();
@@ -714,7 +747,153 @@ pub fn block(
         caps: cap_list,
         elements,
         roles,
+        mirror,
     })
+}
+
+/// Which side of a symmetric block each device sits on: its mirror partner
+/// and its distance from the axis (0 innermost).
+struct Sides {
+    /// Device name to (partner's name, rank from the axis, left side).
+    place: BTreeMap<String, (String, usize, bool)>,
+}
+
+impl Sides {
+    /// Devices in left-to-right order: the left side outermost first, then
+    /// the right side innermost first.
+    fn order<'a>(&self, devs: &[&'a Mos]) -> Vec<&'a Mos> {
+        let mut v: Vec<&Mos> = devs.to_vec();
+        v.sort_by_key(|m| match self.place.get(&m.dev.name) {
+            Some((_, rank, true)) => (0, usize::MAX - rank),
+            Some((_, rank, false)) => (1, *rank),
+            None => (2, 0),
+        });
+        v
+    }
+
+    /// The source net of each device of `order(devs)`, from `srcs` (one per
+    /// device of `devs`).
+    fn sources<'a>(&self, srcs: &[&'a String], devs: &[&Mos]) -> Vec<&'a String> {
+        self.order(devs)
+            .iter()
+            .map(|m| {
+                let i = devs
+                    .iter()
+                    .position(|d| d.dev.name == m.dev.name)
+                    .unwrap_or(0);
+                srcs[i]
+            })
+            .collect()
+    }
+}
+
+/// A one-island row redrawn symmetric: its devices left to right, with their
+/// mirror pairs (outermost first).
+fn mirrored(spec: &RowSpec, sides: &Sides) -> RowSpec {
+    let mut out = spec.clone();
+    for island in &mut out.islands {
+        let mut devs: Vec<RowDev> = island.devices.clone();
+        devs.sort_by_key(|d| match sides.place.get(&d.name) {
+            Some((_, rank, true)) => (0, usize::MAX - rank),
+            Some((_, rank, false)) => (1, *rank),
+            None => (2, 0),
+        });
+        let mut pairs = Vec::new();
+        for (i, d) in devs.iter().enumerate() {
+            if let Some((partner, _, true)) = sides.place.get(&d.name)
+                && let Some(j) = devs.iter().position(|e| &e.name == partner)
+            {
+                pairs.push((i, j));
+            }
+        }
+        island.devices = devs;
+        island.mirror = pairs;
+    }
+    out
+}
+
+/// The comparator's two sides: the left one is the input pair's first
+/// device and everything on its drain (the NMOS and PMOS latch devices
+/// whose drain is that side's output, the reset devices on the side's
+/// internal node and output), the right one its partner. Returns the
+/// sides and the net pairs that mirror each other (internal nodes,
+/// outputs, inputs), or `None` when a device has no partner on the other
+/// side (the block is then drawn as before).
+fn comparator_mirror(
+    pair: &[&Mos],
+    s: &str,
+    latch_n: &[&Mos],
+    srcs: &[&String],
+    latch_p: &[&Mos],
+    reset: &[&Mos],
+) -> Option<(Sides, Vec<(String, String)>)> {
+    let x = [drain(pair[0], s).clone(), drain(pair[1], s).clone()];
+    let mut out = [String::new(), String::new()];
+    let mut place: BTreeMap<String, (String, usize, bool)> = BTreeMap::new();
+    let mut by_side: [Vec<(&Mos, usize)>; 2] = [Vec::new(), Vec::new()];
+    for (k, m) in pair.iter().enumerate() {
+        by_side[k].push((m, 0));
+    }
+    for (i, m) in latch_n.iter().enumerate() {
+        let k = x.iter().position(|n| n == srcs[i])?;
+        out[k] = drain(m, srcs[i]).clone();
+        by_side[k].push((m, 0));
+    }
+    if out[0].is_empty() || out[1].is_empty() || out[0] == out[1] {
+        return None;
+    }
+    for m in latch_p {
+        let k = out.iter().position(|o| *o == m.dev.d || *o == m.dev.s)?;
+        by_side[k].push((m, 0));
+    }
+    // Reset devices: the one on the internal node outermost, the one on the
+    // output next to the axis.
+    for m in reset {
+        let on = |n: &String| m.dev.d == *n || m.dev.s == *n;
+        let (k, rank) = if let Some(k) = out.iter().position(on) {
+            (k, 0)
+        } else {
+            (x.iter().position(on)?, 1)
+        };
+        by_side[k].push((m, rank));
+    }
+    // Partners: the same role and rank on the other side, one each.
+    let key = |m: &Mos, rank: usize| -> (u8, usize) {
+        let role = if pair.iter().any(|p| p.dev.name == m.dev.name) {
+            0
+        } else if latch_n.iter().any(|p| p.dev.name == m.dev.name) {
+            1
+        } else if latch_p.iter().any(|p| p.dev.name == m.dev.name) {
+            2
+        } else {
+            3
+        };
+        (role, rank)
+    };
+    for (m, rank) in &by_side[0] {
+        let partners: Vec<&&Mos> = by_side[1]
+            .iter()
+            .filter(|(o, r)| key(o, *r) == key(m, *rank))
+            .map(|(o, _)| o)
+            .collect();
+        let [p] = partners.as_slice() else {
+            return None;
+        };
+        if p.dev.w != m.dev.w || p.dev.l != m.dev.l {
+            return None;
+        }
+        place.insert(m.dev.name.clone(), (p.dev.name.clone(), *rank, true));
+        place.insert(p.dev.name.clone(), (m.dev.name.clone(), *rank, false));
+    }
+    if place.len() != by_side[0].len() + by_side[1].len() {
+        return None;
+    }
+    let nets = vec![
+        (x[0].clone(), x[1].clone()),
+        (out[0].clone(), out[1].clone()),
+        (pair[0].dev.g.clone(), pair[1].dev.g.clone()),
+    ];
+    Some((Sides { place }, nets))
 }
 
 /// The checked parts of a five-transistor OTA, shared by the templates
