@@ -2,7 +2,7 @@ id = "comparator"
 title = "StrongARM latch comparator (IHP SG13G2)"
 category = "ic"
 pdk = "ihp-sg13g2"
-description = "Clocked StrongARM latch on IHP SG13G2 low-voltage devices. While clk is low, M7-M10 precharge both outputs to the supply; when it rises, the input pair M1-M2 on the clocked tail M0 discharges xp and xn at rates set by the inputs, and the cross-coupled latch M3-M6 regenerates the difference to full logic levels. The test bench clocks it at 500 MHz with inputs 1 mV apart at 0.7 V that swap between the two decisions, into 5 fF on each output. It decides correctly both ways and outn falls through half the supply within 250 ps at every process corner from -40 C to 125 C (about 135 ps at 27 C)."
+description = "Clocked StrongARM latch on IHP SG13G2 low-voltage devices. While clk is low, M7-M10 precharge both outputs and the internal nodes xp and xn to the supply; when it rises, the input pair M1-M2 on the clocked tail M0 discharges xp and xn at rates set by the inputs, and the cross-coupled latch M3-M6 regenerates the difference to full logic levels. The test bench clocks it at 500 MHz with inputs 1 mV apart at 0.7 V that swap between the two decisions, into 5 fF on each output. It decides correctly both ways and outn falls through half the supply within 250 ps at every process corner from -40 C to 125 C (about 108 ps at 27 C). Laid out by the comparator generator, which draws it mirror-symmetric, it still decides 1 mV both ways at every corner, with an input-referred offset under 0.5 mV at tt and 27 C; the wiring slows the decision, so the table after layout allows 375 ps."
 analysis = ".tran 1p 3n"
 corners = { process = ["tt", "ss", "ff", "sf", "fs"], temperatures = [-40, 27, 125] }
 simulators = ["ngspice", "xyce"]
@@ -16,6 +16,14 @@ tdec = crossing(V(outn), 0.6, fall) <= 250p
 [layout]
 generator = "comparator"
 roles = { tail = "M0", pair = ["M1", "M2"], latch_n = ["M3", "M4"], latch_p = ["M5", "M6"], reset = ["M7", "M8", "M9", "M10"] }
+offset_mv = 0.5
+note = "The generator's wiring puts about 27 fF on each output, against the bench's 5 fF loads, and the latch regenerates more slowly into it: outn falls through half the supply within about 335 ps at ss and -40 C after layout, against 155 ps in the schematic. Wider devices buy little back, since their wiring grows with them (four times the width still takes about 270 ps). The decisions and the reset hold as in the schematic's table; only the decision time has its own limit after layout."
+specs = """
+first = value_at(V(outp,outn), 0.95n) >= 1
+second = value_at(V(outp,outn), 2.95n) <= -1
+reset = value_at(V(outp), 1.95n) >= 1.1
+tdec = crossing(V(outn), 0.6, fall) <= 375p
+"""
 
 [[parameters]]
 part = "M1"
