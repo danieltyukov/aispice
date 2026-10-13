@@ -16,7 +16,7 @@
   "inputs": [
     {
       "path": "tiny_counter.gds",
-      "sha256": "6d1d69e9534508969501cbb6d395f03a1683229be5deda17e57d5f3a64d838ee"
+      "sha256": "ce340cbb74d798e936907c46b15dc9713182b7d350251a5aedd373c7de4d6637"
     },
     {
       "path": "tiny_counter.spice",

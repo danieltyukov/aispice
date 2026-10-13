@@ -3,4 +3,8 @@ MACRO sg13g2_inv_1
   CLASS CORE ;
   SIZE 0.96 BY 3.78 ;
 END sg13g2_inv_1
+MACRO sg13g2_buf_1
+  CLASS CORE ;
+  SIZE 1.92 BY 3.78 ;
+END sg13g2_buf_1
 END LIBRARY

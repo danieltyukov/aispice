@@ -3,3 +3,7 @@
 MN0 Y A VSS VSS sg13_lv_nmos w=0.74u l=0.13u
 MP0 Y A VDD VDD sg13_lv_pmos w=1.12u l=0.13u
 .ENDS sg13g2_inv_1
+.SUBCKT sg13g2_buf_1 A X VDD VSS
+X0 A n VDD VSS sg13g2_inv_1
+X1 n X VDD VSS sg13g2_inv_1
+.ENDS sg13g2_buf_1

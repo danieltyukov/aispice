@@ -298,14 +298,14 @@
       "name": "tiny_counter",
       "kind": "digital",
       "pass": false,
-      "errors": 1,
-      "warnings": 1,
+      "errors": 2,
+      "warnings": 0,
       "findings": [
         {
           "rule": "pdk.cell_name",
-          "severity": "warning",
+          "severity": "error",
           "file": "tiny_counter.gds",
-          "message": "GDS cell \"sg13g2_tap\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do; without the PDK's libraries, the validator cannot compare it with the PDK's own"
+          "message": "GDS cell \"sg13g2_tap\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do, and without the PDK's libraries cannot be shown to be the PDK's own"
         },
         {
           "rule": "pdk.cell_name",
@@ -355,15 +355,21 @@
       "pdk": null,
       "name": "tiny_counter",
       "kind": "digital",
-      "pass": true,
-      "errors": 0,
-      "warnings": 1,
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
       "findings": [
         {
           "rule": "pdk.cell_name",
-          "severity": "warning",
+          "severity": "error",
           "file": "tiny_counter.gds",
-          "message": "GDS cell \"sg13g2_inv_1\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do; without the PDK's libraries, the validator cannot compare it with the PDK's own"
+          "message": "GDS cell \"sg13g2_inv_1\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do, and without the PDK's libraries cannot be shown to be the PDK's own"
+        },
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_buf_1\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do, and without the PDK's libraries cannot be shown to be the PDK's own"
         }
       ]
     },
@@ -382,6 +388,102 @@
           "severity": "error",
           "file": "tiny_counter.gds",
           "message": "GDS cell \"sg13g2_inv_1\" differs from the cell of that name in PDK \"ihp-sg13g2\""
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-child/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 2,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_inv_1\" differs from the cell of that name in PDK \"ihp-sg13g2\""
+        },
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_buf_1\" places \"sg13g2_inv_1\", which is not the PDK's own"
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-units/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_inv_1\" differs from the cell of that name in PDK \"ihp-sg13g2\""
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-strclass/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_inv_1\" differs from the cell of that name in PDK \"ihp-sg13g2\""
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-twice/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "gds.parse",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message_prefix": "cannot read the GDS: "
+        }
+      ]
+    },
+    {
+      "package": "broken/std-cell-other-library/tiny_counter.macro",
+      "pdk": null,
+      "pdk_libs": "pdk/ihp-sg13g2",
+      "name": "tiny_counter",
+      "kind": "digital",
+      "pass": false,
+      "errors": 1,
+      "warnings": 0,
+      "findings": [
+        {
+          "rule": "pdk.cell_name",
+          "severity": "error",
+          "file": "tiny_counter.gds",
+          "message": "GDS cell \"sg13g2_Corner\" begins with \"sg13g2\", as the cells of PDK \"ihp-sg13g2\" do"
         }
       ]
     },
