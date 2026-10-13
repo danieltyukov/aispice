@@ -107,7 +107,9 @@ jobs:
       IHP_PDK_COMMIT: 22f2a25f1734796de3debbbf29cf697cbbc54081
       OPENVAF_URL: https://openva.fra1.cdn.digitaloceanspaces.com/openvaf_23_5_0_linux_amd64.tar.gz
       OPENVAF_SHA256: 79c0e08ad948a7a9f460dc87be88b261bbd99b63a4038db3c64680189f44e4f0
-      KLAYOUT_URL: https://www.klayout.org/downloads/Ubuntu-24/klayout_0.30.4-1_amd64.deb
+      # The package for this version is cached; its hash is checked on every
+      # install, from the cache or the site.
+      KLAYOUT_VERSION: 0.30.4-1
       KLAYOUT_SHA256: a25e750329921de81ea35f349194768fc925f5d1aacbacffc1856af733a7be25
     steps:
       - uses: actions/checkout@v7
@@ -184,12 +186,46 @@ jobs:
             test -s "../ngspice/osdi/$m.osdi" || { echo "missing $m.osdi"; exit 1; }
           done
 
+      # www.klayout.org has timed out on CI, so the package is fetched once
+      # per version and kept in the cache.
+      - name: Restore the KLayout package
+        id: klayout-deb
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/klayout-deb
+          key: klayout-${{ env.KLAYOUT_VERSION }}-ubuntu-24.04-amd64
+
+      - name: Download KLayout
+        if: steps.klayout-deb.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/klayout-deb
+          url="https://www.klayout.org/downloads/Ubuntu-24/klayout_${KLAYOUT_VERSION}_amd64.deb"
+          for wait in 10 30 60 0; do
+            if curl -sSfL --connect-timeout 30 --max-time 600 -o ~/klayout-deb/klayout.deb "$url"; then
+              exit 0
+            fi
+            rm -f ~/klayout-deb/klayout.deb
+            [ "$wait" = 0 ] && break
+            echo "download failed; retrying in $wait s"
+            sleep "$wait"
+          done
+          echo "could not download $url" >&2
+          exit 1
+
       - name: Install KLayout
         run: |
-          curl -sSfL -o "$RUNNER_TEMP/klayout.deb" "$KLAYOUT_URL"
-          echo "$KLAYOUT_SHA256  $RUNNER_TEMP/klayout.deb" | sha256sum -c -
-          sudo apt-get install --no-install-recommends -y "$RUNNER_TEMP/klayout.deb"
+          echo "$KLAYOUT_SHA256  $HOME/klayout-deb/klayout.deb" | sha256sum -c -
+          sudo apt-get install --no-install-recommends -y "$HOME/klayout-deb/klayout.deb"
           klayout -b -v
+
+      # Saved only after the hash check passed, so a bad download is never
+      # cached.
+      - name: Save the KLayout package
+        if: steps.klayout-deb.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/klayout-deb
+          key: klayout-${{ env.KLAYOUT_VERSION }}-ubuntu-24.04-amd64
 
       - name: PDK tests
         run: |
