@@ -346,11 +346,29 @@ impl Workspace {
         Ok(p)
     }
 
+    /// Write `bytes` as a new file `name`: nothing may be there yet, a link
+    /// included, and a link is never followed.
+    pub fn create(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, SimError> {
+        use std::io::Write as _;
+        let p = self.file(name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+        options
+            .open(&p)
+            .and_then(|mut f| f.write_all(bytes))
+            .map_err(|e| SimError::Io(format!("cannot write {}: {e}", p.display())))?;
+        Ok(p)
+    }
+
     /// Move the named files that exist into `run_dir`, returning their new
-    /// paths. Missing files are skipped. Nothing here follows a symlink in
-    /// `run_dir`: the folder itself must be a plain directory, an existing
-    /// entry at a target name is removed first (a link is removed, not
-    /// followed), and copies create their files exclusively.
+    /// paths. Missing files are skipped, and an entry that is neither a
+    /// plain file nor a folder (a link a run left, a fifo) is refused, never
+    /// kept. Nothing here follows a symlink in `run_dir`: the folder itself
+    /// must be a plain directory, an existing entry at a target name is
+    /// removed first (a link is removed, not followed), and copies create
+    /// their files exclusively.
     pub fn keep(&self, run_dir: &Path, names: &[String]) -> Result<Vec<PathBuf>, SimError> {
         let io = |what: &str, e: std::io::Error| SimError::Io(format!("{what}: {e}"));
         match std::fs::symlink_metadata(run_dir) {
@@ -367,8 +385,14 @@ impl Workspace {
         let mut out = Vec::new();
         for name in names {
             let from = self.file(name);
-            if !from.exists() {
-                continue;
+            match std::fs::symlink_metadata(&from) {
+                Err(_) => continue,
+                Ok(m) if m.is_file() || m.is_dir() => {}
+                Ok(_) => {
+                    return Err(SimError::Io(format!(
+                        "{name} in the run folder is not a plain file or folder; it was not kept"
+                    )));
+                }
             }
             let to = run_dir.join(name);
             if let Ok(m) = std::fs::symlink_metadata(&to) {
@@ -416,6 +440,60 @@ fn copy_tree_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
             .open(to)?;
         std::io::copy(&mut src, &mut dst).map(|_| ())
     }
+}
+
+/// The bytes of a file a run left in its folder, read through one
+/// descriptor opened without following a link or blocking on a fifo, only
+/// when it is a plain file of at most `limit` bytes; `None` when there is
+/// none. The run could have put anything at that name, so the path is not
+/// used again after the open.
+pub(crate) fn read_output(path: &Path, limit: u64) -> Result<Option<Vec<u8>>, SimError> {
+    use std::io::Read as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    );
+    #[cfg(not(unix))]
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(not_plain(path));
+    }
+    let file = match options.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(not_plain(path)),
+    };
+    let meta = file
+        .metadata()
+        .map_err(|e| SimError::Io(format!("cannot read {}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(not_plain(path));
+    }
+    let too_large = |size| SimError::TooLarge {
+        what: format!("output {}", path.display()),
+        size,
+        limit,
+    };
+    if meta.len() > limit {
+        return Err(too_large(meta.len()));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| SimError::Io(format!("cannot read {}: {e}", path.display())))?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large(bytes.len() as u64));
+    }
+    Ok(Some(bytes))
+}
+
+fn not_plain(path: &Path) -> SimError {
+    SimError::Io(format!(
+        "{} is not a plain file; a run's output is never read through a link",
+        path.display()
+    ))
 }
 
 /// Read a raw file (or Spectre raw directory) within the size limit.
@@ -515,5 +593,74 @@ mod tests {
             assert!(which("sh").is_some());
         }
         assert!(which("aispice-no-such-program-xyz").is_none());
+    }
+
+    /// What a run left in its folder is read only as a plain file, never
+    /// through a link or from a fifo, and kept only as a plain file or
+    /// folder; aispice's own files are made new, never through a link.
+    /// Without the checks, each planted link would lead to the target.
+    #[cfg(unix)]
+    #[test]
+    fn planted_links_and_nodes_are_refused_in_a_run_folder() {
+        use std::os::unix::fs::symlink;
+        let ws = Workspace::new().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.txt");
+        std::fs::write(&target, "outside").unwrap();
+        symlink(&target, ws.file("link.raw")).unwrap();
+        symlink(outside.path().join("none"), ws.file("dangling.raw")).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(ws.file("fifo.raw"))
+            .status()
+            .unwrap();
+        assert!(made.success());
+        std::fs::write(ws.file("plain.raw"), "plain").unwrap();
+
+        // Read: through the link the bytes would be the target's.
+        assert_eq!(std::fs::read(ws.file("link.raw")).unwrap(), b"outside");
+        for name in ["link.raw", "dangling.raw", "fifo.raw"] {
+            let e = read_output(&ws.file(name), 1 << 20).unwrap_err();
+            assert!(e.to_string().contains("is not a plain file"), "{name}: {e}");
+        }
+        assert_eq!(
+            read_output(&ws.file("plain.raw"), 1 << 20)
+                .unwrap()
+                .unwrap(),
+            b"plain"
+        );
+        assert!(
+            read_output(&ws.file("missing.raw"), 1 << 20)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            read_output(&ws.file("plain.raw"), 3),
+            Err(SimError::TooLarge {
+                size: 5,
+                limit: 3,
+                ..
+            })
+        ));
+
+        // Write: through the link the bytes would land in the target.
+        for name in ["link.raw", "dangling.raw", "plain.raw"] {
+            assert!(ws.create(name, b"aispice").is_err(), "{name}");
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"outside");
+        assert!(!outside.path().join("none").exists());
+        assert!(ws.create("new.cir", b"deck").is_ok());
+
+        // Keep: a link moved into the run's results would be followed by
+        // whatever reads them later.
+        let runs = outside.path().join("runs");
+        for name in ["link.raw", "fifo.raw"] {
+            let e = ws.keep(&runs, &[name.to_string()]).unwrap_err();
+            assert!(e.to_string().contains("was not kept"), "{name}: {e}");
+            assert!(std::fs::symlink_metadata(runs.join(name)).is_err());
+        }
+        let kept = ws
+            .keep(&runs, &["plain.raw".to_string(), "missing.raw".to_string()])
+            .unwrap();
+        assert_eq!(kept, vec![runs.join("plain.raw")]);
     }
 }
