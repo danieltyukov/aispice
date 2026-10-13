@@ -27,6 +27,17 @@ pub struct LefPin {
     pub use_: String,
     pub layers: Vec<String>,
     pub shapes: usize,
+    /// The port rectangles with their layers, in the macro's own frame
+    /// (before `ORIGIN`): what a router connects to. Polygons and vias are
+    /// counted in `shapes` only.
+    pub rects: Vec<LefRect>,
+}
+
+/// A rectangle on a layer, um: left, bottom, right, top.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LefRect {
+    pub layer: String,
+    pub rect: [f64; 4],
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -36,6 +47,29 @@ pub struct LefMacro {
     pub origin: (f64, f64),
     pub size: Option<(f64, f64)>,
     pub pins: BTreeMap<String, LefPin>,
+    /// Obstruction rectangles.
+    pub obs: Vec<LefRect>,
+}
+
+/// `RECT [MASK n] x1 y1 x2 y2` as a rectangle, when its four numbers read.
+fn rect(layer: &str, args: &[String]) -> Option<LefRect> {
+    let n = args.len();
+    if n < 4 {
+        return None;
+    }
+    let mut v = [0.0; 4];
+    for (k, a) in args[n - 4..].iter().enumerate() {
+        v[k] = number(a).ok()?;
+    }
+    Some(LefRect {
+        layer: layer.to_string(),
+        rect: [
+            v[0].min(v[2]),
+            v[1].min(v[3]),
+            v[0].max(v[2]),
+            v[1].max(v[3]),
+        ],
+    })
 }
 
 fn tokens(text: &str, limits: &Limits) -> Result<Vec<String>, LimitError> {
@@ -220,7 +254,24 @@ fn parse_macro(t: &mut Tokens, name: &str, limits: &Limits) -> Result<LefMacro, 
                 let pin = parse_pin(t, &pin_name)?;
                 m.pins.entry(pin.name.clone()).or_insert(pin);
             }
-            "OBS" | "DENSITY" => {
+            "OBS" => {
+                let mut layer = String::new();
+                loop {
+                    let kw = t.next()?.to_string();
+                    if kw == "END" {
+                        break;
+                    }
+                    let args = t.statement()?;
+                    if kw == "LAYER" {
+                        layer = args.into_iter().next().unwrap_or_default();
+                    } else if kw == "RECT"
+                        && let Some(r) = rect(&layer, &args)
+                    {
+                        m.obs.push(r);
+                    }
+                }
+            }
+            "DENSITY" => {
                 while t.next()? != "END" {
                     t.statement()?;
                 }
@@ -261,6 +312,12 @@ fn parse_pin(t: &mut Tokens, name: &str) -> Result<LefPin, LefError> {
                     }
                 } else if matches!(kw.as_str(), "RECT" | "POLYGON" | "VIA") {
                     p.shapes += 1;
+                    let layer = p.layers.last().cloned().unwrap_or_default();
+                    if kw == "RECT"
+                        && let Some(r) = rect(&layer, &args)
+                    {
+                        p.rects.push(r);
+                    }
                 }
             },
             _ => {
@@ -323,6 +380,15 @@ mod tests {
             ("OUTPUT", "", 2)
         );
         assert_eq!(d0.layers, ["Metal3", "Metal4"]);
+        assert_eq!(
+            d0.rects,
+            [LefRect {
+                layer: "Metal3".into(),
+                rect: [0.0, 0.0, 1.0, 1.0]
+            }]
+        );
+        assert_eq!(blk.obs.len(), 1);
+        assert_eq!(blk.obs[0].rect, [0.0, 0.0, 10.0, 4.0]);
         assert_eq!(blk.pins["VPWR"].use_, "POWER");
         assert_eq!(blk.pins["VPWR"].shapes, 0);
         let e = parse_lef("MACRO x\n PIN a\n DIRECTION INPUT ;\n").unwrap_err();

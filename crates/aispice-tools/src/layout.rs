@@ -85,7 +85,7 @@ pub fn open_gds(
     let path = resolve_include(rel, p.root(), &policy)
         .map_err(|e| format!("layout {e}"))?
         .ok_or_else(|| format!("{rel} does not exist"))?;
-    if path.starts_with(p.root().join(crate::project::STATE_DIR)) {
+    if p.in_state_dir(&path) {
         return Err(format!("{rel} is inside aispice's own .aispice folder"));
     }
     let ext = path

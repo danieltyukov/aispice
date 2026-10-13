@@ -39,6 +39,7 @@ async fn a_metal1_spacing_violation_is_reported_with_rule_and_place() {
         extra: false,
         antenna: false,
         density: false,
+        recommended: true,
     };
     let started = std::time::Instant::now();
     let report = drc::run(

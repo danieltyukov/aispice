@@ -116,6 +116,8 @@ Measurements:
 | `aispice pdk add\|list\|show\|remove` | Register an installed PDK (IHP-Open-PDK's `ihp-sg13g2`), list and describe them |
 | `aispice gmid <device>` | Size a PDK transistor by gm/Id, for example `--gm-id 12 --l 0.5u --id 50u` |
 | `aispice macro check <dir>` | Check a macro package (a hardened block shared with ChipLeap); exits 1 when it fails |
+| `aispice macro export <circuit> --layout <gds>` | Export a generated block as a macro package, checked and characterized at corners; exits 1 when it cannot |
+| `aispice chip plan\|assemble <chip.toml>` | Floorplan and routes of an analog-on-top chip, or the chip itself with pad ring, seal ring, fill, DRC and LVS; exits 1 when either check fails |
 | `aispice layout generate <circuit> --template ota5t` | Lay a circuit out with the PDK's pcells, then run DRC and LVS; exits 1 when either fails |
 | `aispice layout render <gds> -o <out.png>` | Draw a layout |
 | `aispice drc <gds>`, `aispice lvs <gds> <circuit>` | The PDK's KLayout rule and LVS decks; exit 1 on violations or a mismatch |
@@ -183,6 +185,44 @@ aispice macro check tiny_counter.macro --pdk ihp-sg13g2
 
 The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-package.md](docs/macro-package.md) is the format, shared word for word with ChipLeap.
 
+A generated block becomes a package with `aispice macro export` (the `macro_export` tool). The block is drawn again with every pin on its bottom edge, checked with the PDK's DRC and LVS decks, extracted, and its specs measured at every corner before and after layout; the package is written only when it passes the same checks a chip runs on it:
+
+```console
+$ aispice macro export ota.asc --layout ota.gds --name ota5t --process tt,ss,ff
+Wrote macros/ota5t.macro (12 files; undo with the history tool).
+ota5t: 6 pins (inm input analog, inp input analog, out output analog, vbn input analog, vdd inout power, vss inout ground), 21.63 x 26.62 um, PDK ihp-sg13g2 at 22f2a25f1734.
+DRC clean (main, extra, antenna), LVS clean, extracted (41.5 fF), 3 specs at 3 corners pass after layout:
+  gain: 24.99 dB pass -> 25.26 dB pass (+1.1%)
+  gbw: 17.23 MHz pass -> 16.72 MHz pass (-3.0%)
+  pm: 91.69 ° pass -> 91.1 ° pass (-0.6%)
+check_macro: 0 error(s), 0 warning(s).
+```
+
+An analog-on-top chip places such blocks, and hardened digital packages from ChipLeap, inside IHP's pad ring. A TOML file names the blocks, how their pins join chip nets, and the pads; `aispice chip plan` shows the floorplan and routes, and `aispice chip assemble` draws the chip with bond pads, seal ring and fill and runs full-chip DRC and LVS:
+
+```toml
+name = "demo"
+
+[[macros]]
+instance = "ota"
+package = "macros/ota5t.macro"
+nets = { inp = "ota_inp", inm = "ota_inm", out = "ota_out", vbn = "ota_bias" }
+
+[[pads]]
+net = "ota_inp"
+side = "west"
+kind = "analog"        # analog, input, output, vdd, vss, iovdd or iovss
+resistor = true        # through the pad's secondary protection
+```
+
+```console
+$ aispice chip assemble demo.chip.toml
+demo: die 1040 x 1040 um, core 420 x 420 um, 16 pads, 40 IO ring cells, 3 blocks.
+...
+DRC clean: cell demo, decks main, extra, antenna, density.
+LVS clean: the layout of demo matches the schematic.
+```
+
 ## Simulators and models
 
 | Simulator | Notes |
@@ -194,8 +234,8 @@ The `check_macro` tool does the same for the agent and MCP clients. [docs/macro-
 
 | Layout tool | Notes |
 |---|---|
-| KLayout | 0.30 or newer, for DRC, LVS, drawing layouts with the PDK's pcells and pictures. Runs in batch mode only |
-| Magic | 8.3.573 or newer, for parasitic extraction with the PDK's tech file. Runs without graphics |
+| KLayout | 0.30 or newer, for DRC, LVS, drawing layouts and chips with the PDK's pcells, fill and pictures. Runs in batch mode only |
+| Magic | 8.3.573 or newer, for parasitic extraction and LEF abstracts with the PDK's tech file. Runs without graphics |
 
 | Provider | Notes |
 |---|---|

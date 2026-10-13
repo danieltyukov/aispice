@@ -24,6 +24,10 @@ pub struct DrcChecks {
     pub antenna: bool,
     /// Metal and active density: a chip-level rule, off for blocks.
     pub density: bool,
+    /// IHP's recommended rules (names ending in `R`), on by default. A
+    /// chip leaves them out: its IO cells with bond pads abutting them, as
+    /// IHP and Croc place them, break the recommended pad rules.
+    pub recommended: bool,
 }
 
 impl Default for DrcChecks {
@@ -32,6 +36,7 @@ impl Default for DrcChecks {
             extra: true,
             antenna: true,
             density: false,
+            recommended: true,
         }
     }
 }
@@ -362,7 +367,7 @@ fn switches(
         ("density", f(checks.density)),
         ("no_forbidden", f(false)),
         ("no_pin", f(false)),
-        ("no_recommended", f(false)),
+        ("no_recommended", f(!checks.recommended)),
         ("topcell", cell.to_string()),
         ("input", gds.display().to_string()),
         ("report", report.display().to_string()),

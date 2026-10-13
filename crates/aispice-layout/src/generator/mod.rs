@@ -63,6 +63,11 @@ pub struct Params {
     /// Space between the routing channels of two rows, um (default 1).
     #[serde(default = "row_gap")]
     pub row_gap: f64,
+    /// Bring every pin to the block's bottom edge on a Metal4 column of its
+    /// own, 1.2 um apart on a grid fixed to the block's origin, as a macro
+    /// package needs (default false: pins are labels on the Metal3 tracks).
+    #[serde(default)]
+    pub pin_edge: bool,
 }
 
 fn one() -> u32 {
@@ -87,6 +92,7 @@ impl Default for Params {
             fingers: None,
             track_pitch: track_pitch(),
             row_gap: row_gap(),
+            pin_edge: false,
         }
     }
 }
@@ -392,5 +398,56 @@ mod tests {
             ..Default::default()
         };
         assert!(adjust(&wide, &["M2.b".into()]).is_none());
+    }
+
+    const OTA: &str = "* 5T OTA\nVDD vdd 0 1.2\nVP inp 0 0.6 AC 0.5\nVM inm 0 0.6 AC -0.5\nIB vdd vbn 20u\nCL out 0 1p\nXM1 x inp tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM2 out inm tail 0 sg13_lv_nmos w=2u l=0.5u ng=1 m=1\nXM3 x x vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM4 out x vdd vdd sg13_lv_pmos w=4u l=0.5u ng=1 m=1\nXM5 tail vbn 0 0 sg13_lv_nmos w=4u l=1u ng=1 m=1\nXM6 vbn vbn 0 0 sg13_lv_nmos w=2u l=1u ng=1 m=1\n.ac dec 20 1 1G\n";
+    const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n";
+
+    #[test]
+    fn edge_pins_reach_the_bottom_edge_on_columns_of_their_own() {
+        for (text, template) in [(OTA, Template::Ota5t), (STRONGARM, Template::Comparator)] {
+            let n = aispice_core::netlist::parse(text);
+            let roles = Roles::new();
+            let plain = generate(&n, template, &roles, &Params::default(), "blk").unwrap();
+            assert!(
+                plain
+                    .plan
+                    .labels
+                    .iter()
+                    .all(|l| l.layer == plan::Layer::Metal3)
+            );
+            let p = Params {
+                pin_edge: true,
+                ..Default::default()
+            };
+            let g = generate(&n, template, &roles, &p, "blk").unwrap();
+            let bbox = g.plan.bbox().unwrap();
+            let pins: Vec<&plan::Label> = g.plan.labels.iter().filter(|l| l.pin).collect();
+            assert_eq!(pins.len(), g.meta.ports.len(), "every port gets a pin");
+            let mut xs = Vec::new();
+            for l in &pins {
+                assert_eq!(l.layer, plan::Layer::Metal4);
+                assert_eq!(l.y, bbox.y1 + 100, "{} sits at the bottom edge", l.text);
+                assert!(bbox.y1 < plain.plan.bbox().unwrap().y1, "below the rest");
+                assert_eq!(
+                    l.x.rem_euclid(route::PIN_PITCH),
+                    0,
+                    "{} on the grid",
+                    l.text
+                );
+                xs.push(l.x);
+            }
+            xs.dedup();
+            assert_eq!(xs.len(), pins.len(), "one column per pin");
+            assert!(xs.iter().all(|x| *x < plain.plan.bbox().unwrap().x1));
+            // The routes inside are the same, and what was added keeps every
+            // net clear of the others.
+            for s in &plain.plan.shapes {
+                assert!(g.plan.shapes.contains(s), "{s:?}");
+            }
+            let errors = g.plan.spacing_errors(&BTreeMap::new());
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(g.meta.params.pin_edge);
+        }
     }
 }

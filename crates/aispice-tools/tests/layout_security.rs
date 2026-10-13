@@ -88,6 +88,10 @@ fn every_tool_declares_what_it_does_to_files() {
         ("pdk", Edit),
         ("gm_id", ReadOnly),
         ("check_macro", ReadOnly),
+        // Writes a package into the project after one approval.
+        ("macro_export", Edit),
+        // Writes the chip, its netlist and evidence after one approval.
+        ("chip", Edit),
         // xschem import and export each write one new file of the user's.
         ("xschem_import", Edit),
         ("xschem_export", Edit),
