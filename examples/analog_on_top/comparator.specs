@@ -1,0 +1,6 @@
+# Specs from the aispice template comparator (StrongARM latch comparator (IHP SG13G2)).
+# Edit them to your requirements; check_specs reads this file.
+first = value_at(V(outp,outn), 0.95n) >= 1
+second = value_at(V(outp,outn), 2.95n) <= -1
+reset = value_at(V(outp), 1.95n) >= 1.1
+tdec = crossing(V(outn), 0.6, fall) <= 250p

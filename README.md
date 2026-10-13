@@ -253,6 +253,8 @@ DRC clean: cell demo, decks main, extra, antenna, density.
 LVS clean: the layout of demo matches the schematic.
 ```
 
+[examples/analog_on_top](examples/analog_on_top) goes all the way with the commands and their results: the OTA and the StrongARM comparator from their templates, checked at 15 corners, laid out, checked after layout and exported, a counter hardened by LibreLane, all three packages accepted by aispice's and ChipLeap's checks, and the chip, DRC and LVS clean.
+
 ## Simulators and models
 
 | Simulator | Notes |

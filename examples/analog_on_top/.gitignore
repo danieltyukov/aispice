@@ -1,0 +1,8 @@
+# Everything the steps in README.md write: layouts, packages, the chip and the counter's
+# LibreLane run. They hold the PDK's cells, so they are made here, never committed.
+*.gds
+*.layout.json
+macros/
+build/
+analog_on_top.chip/
+chip.png
