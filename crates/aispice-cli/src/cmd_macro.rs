@@ -2,11 +2,9 @@
 
 use crate::cmd_layout::{done, in_project, run_tool};
 use crate::cmd_sim::workspace_for;
-use aispice_core::macropkg::{CheckOptions, MacroError, SCHEMA_JSON, check_package};
-use aispice_layout::macro_export::pdk_cell_names;
+use aispice_core::macropkg::{CheckOptions, MacroError, PdkLibs, SCHEMA_JSON, check_package};
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -20,7 +18,7 @@ pub fn check(
     strict: bool,
     json: bool,
 ) -> Result<ExitCode> {
-    let mut pdk_cells = BTreeSet::new();
+    let mut libraries = None;
     if let Some(libs) = pdk_libs {
         if !libs.join("libs.ref").is_dir() {
             eprintln!(
@@ -29,8 +27,8 @@ pub fn check(
             );
             return Ok(ExitCode::from(2));
         }
-        match pdk_cell_names(libs) {
-            Ok(cells) => pdk_cells = cells,
+        match PdkLibs::load(libs) {
+            Ok(loaded) => libraries = Some(loaded),
             Err(e) => {
                 eprintln!("aispice: --pdk-libs: {e}");
                 return Ok(ExitCode::from(2));
@@ -41,7 +39,7 @@ pub fn check(
         dir,
         &CheckOptions {
             pdk,
-            pdk_cells,
+            pdk_libs: libraries,
             ..Default::default()
         },
     ) {

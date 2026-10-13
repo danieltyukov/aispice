@@ -3,8 +3,9 @@
 //! cells named like the PDK's own. ChipLeap runs the same cases in
 //! tests/test_macro_security.py and tests/test_macro.py.
 
+use aispice_core::macropkg::gds::structure_identities;
 use aispice_core::macropkg::{
-    CheckOptions, Evidence, Manifest, Report, Status, check_package, read_package_file,
+    CheckOptions, Evidence, Manifest, PdkLibs, Report, Status, check_package, read_package_file,
 };
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -326,11 +327,32 @@ fn counter_named(tmp: &Path, name: &str, tap: Option<&str>) -> PathBuf {
     pkg
 }
 
+/// Libraries that name `cells`, without any GDS.
 fn with_cells(cells: &[&str]) -> CheckOptions {
+    with_libs(PdkLibs {
+        names: cells.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>(),
+        ..Default::default()
+    })
+}
+
+fn with_libs(libs: PdkLibs) -> CheckOptions {
     CheckOptions {
-        pdk_cells: cells.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>(),
+        pdk_libs: Some(libs),
         ..Default::default()
     }
+}
+
+/// The shared fixtures' stand-in PDK: one made-up cell, `sg13g2_inv_1`.
+fn stand_in() -> PdkLibs {
+    PdkLibs::load(&fixtures().join("pdk/ihp-sg13g2")).unwrap()
+}
+
+fn findings_of(report: &Report) -> Vec<(&str, &str, &str)> {
+    report
+        .findings
+        .iter()
+        .map(|f| (f.severity.as_str(), f.file.as_str(), f.message.as_str()))
+        .collect()
 }
 
 #[test]
@@ -340,37 +362,59 @@ fn a_renamed_counter_passes() {
     assert!(report.findings.is_empty(), "{}", report.to_text());
 }
 
+const NAME: &str =
+    r#"name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#;
+const TAP: &str =
+    r#"GDS cell "sg13g2_counter_tap" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#;
+const UNSHOWN: &str = ", and without the PDK's libraries cannot be shown to be the PDK's own";
+
 #[test]
 fn a_package_named_in_the_pdks_name_space_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = check(&counter_named(tmp.path(), "sg13g2_counter", None));
-    let rules: Vec<(&str, &str)> = report
-        .findings
-        .iter()
-        .map(|f| (f.rule.as_str(), f.file.as_str()))
-        .collect();
-    // The second is its tap cell, sg13g2_counter_tap.
+    let pkg = counter_named(tmp.path(), "sg13g2_counter", None);
+    // Without the PDK's libraries its tap cell cannot be shown to be the
+    // PDK's: refused.
+    let report = check(&pkg);
+    let tap = format!("{TAP}{UNSHOWN}");
     assert_eq!(
-        rules,
+        findings_of(&report),
         [
-            ("pdk.cell_name", "macro.toml"),
-            ("pdk.cell_name", "sg13g2_counter.gds")
+            ("error", "macro.toml", NAME),
+            ("error", "sg13g2_counter.gds", tap.as_str()),
         ]
     );
+    let report = check_package(&pkg, &with_libs(stand_in())).unwrap();
     assert_eq!(
-        report.findings[0].message,
-        r#"name "sg13g2_counter" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#
+        findings_of(&report),
+        [
+            ("error", "macro.toml", NAME),
+            ("error", "sg13g2_counter.gds", TAP),
+        ]
+    );
+}
+
+/// A package named like a standard cell is refused by its name, whatever its
+/// top cell holds: the exception is for the cells it places.
+#[test]
+fn the_top_cell_is_never_the_pdks_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg = counter_named(tmp.path(), "sg13g2_inv_1", None);
+    let report = check_package(&pkg, &with_libs(stand_in())).unwrap();
+    let first = &report.findings[0];
+    assert_eq!(
+        (first.file.as_str(), first.message.as_str()),
+        (
+            "macro.toml",
+            r#"name "sg13g2_inv_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#
+        )
     );
 }
 
 #[test]
 fn case_does_not_hide_a_pdk_cell_name() {
     let tmp = tempfile::tempdir().unwrap();
-    let report = check(&counter_named(
-        tmp.path(),
-        "counter",
-        Some("RM_IHPSG13_tap"),
-    ));
+    let pkg = counter_named(tmp.path(), "counter", Some("RM_IHPSG13_tap"));
+    let report = check_package(&pkg, &with_libs(PdkLibs::default())).unwrap();
     let messages: Vec<&str> = report.findings.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         messages,
@@ -378,6 +422,116 @@ fn case_does_not_hide_a_pdk_cell_name() {
             r#"GDS cell "RM_IHPSG13_tap" begins with "rm_ihpsg13", as the cells of PDK "ihp-sg13g2" do"#
         ]
     );
+    // A standard cell's name in another case is not its name.
+    let pkg = counter_named(&tmp.path().join("upper"), "counter", Some("SG13G2_INV_1"));
+    let report = check_package(&pkg, &with_libs(stand_in())).unwrap();
+    let messages: Vec<&str> = report.findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [r#"GDS cell "SG13G2_INV_1" begins with "sg13g2", as the cells of PDK "ihp-sg13g2" do"#]
+    );
+}
+
+/// A GDS stream as its records, each with its header.
+fn records(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 <= data.len() {
+        let n = usize::from(u16::from_be_bytes([data[i], data[i + 1]]));
+        out.push(data[i..i + n].to_vec());
+        i += n;
+    }
+    out
+}
+
+fn inv(data: &[u8]) -> String {
+    structure_identities(data)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == b"sg13g2_inv_1")
+        .unwrap()
+        .1
+}
+
+/// The package's copy of the inverter differs from the PDK's only in
+/// BGNSTR's dates: the same identity. A property, the order of its elements
+/// or the file's units make another. ChipLeap's tests change the same.
+#[test]
+fn identity_covers_every_record_but_the_dates() {
+    let read = |rel: &str| std::fs::read(fixtures().join(rel)).unwrap();
+    let pdk = read("pdk/ihp-sg13g2/libs.ref/sg13g2_stdcell/gds/sg13g2_stdcell.gds");
+    let same = read("broken/std-cell-identical/tiny_counter.macro/tiny_counter.gds");
+    // 2025 and 2026 in the BGNSTR dates.
+    assert!(pdk.windows(2).any(|w| w == [0x07, 0xe9]));
+    assert!(!same.windows(2).any(|w| w == [0x07, 0xe9]));
+    assert!(!inv(&same).is_empty());
+    assert_eq!(inv(&pdk), inv(&same));
+    assert_eq!(stand_in().std_cells["sg13g2_inv_1"], inv(&same));
+    let recs = records(&same);
+    let start = recs
+        .iter()
+        .position(|r| r[2] == 0x06 && r[4..] == *b"sg13g2_inv_1")
+        .unwrap();
+    let ends: Vec<usize> = (start..recs.len())
+        .filter(|&k| recs[k][2] == 0x11)
+        .collect();
+    // A property on the first element.
+    let mut prop = vec![0, 6, 0x2B, 0x02, 0, 1];
+    prop.extend([0, 6, 0x2C, 0x06, b'x', 0]);
+    let mut with_prop = recs.clone();
+    with_prop.insert(ends[0], prop);
+    assert_ne!(inv(&with_prop.concat()), inv(&same));
+    // The first two elements swapped.
+    let swapped = [
+        &recs[..start + 1],
+        &recs[ends[0] + 1..ends[1] + 1],
+        &recs[start + 1..ends[0] + 1],
+        &recs[ends[1] + 1..],
+    ]
+    .concat();
+    assert_eq!(swapped.len(), recs.len());
+    assert_ne!(inv(&swapped.concat()), inv(&same));
+    // A second UNITS record, or one after the first structure: no identity.
+    let k = recs.iter().position(|r| r[2] == 0x03).unwrap();
+    let mut twice = recs.clone();
+    twice.insert(k + 1, recs[k].clone());
+    assert_eq!(inv(&twice.concat()), "");
+    let first = recs.iter().position(|r| r[2] == 0x05).unwrap();
+    let mut moved = recs.clone();
+    let units = moved.remove(k);
+    moved.insert(first, units);
+    assert_eq!(inv(&moved.concat()), "");
+    // A record that runs past the end, or is shorter than its header.
+    assert!(structure_identities(&[0u8, 16, 6, 6, b'a', b'b'][..]).is_err());
+    assert!(structure_identities(&[0u8, 2, 6, 6][..]).is_err());
+}
+
+/// A copy of the inverter in another library's GDS, or a standard-cell GDS
+/// that defines it twice, makes no standard cell of it.
+#[test]
+fn only_the_standard_cell_gds_holds_the_pdks_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let std_gds = fixtures().join("pdk/ihp-sg13g2/libs.ref/sg13g2_stdcell/gds/sg13g2_stdcell.gds");
+    let pdk_gds = std::fs::read(&std_gds).unwrap();
+    let pr = tmp.path().join("libs.ref/sg13g2_pr/gds");
+    std::fs::create_dir_all(&pr).unwrap();
+    std::fs::write(pr.join("sg13g2_pr.gds"), &pdk_gds).unwrap();
+    let libs = PdkLibs::load(tmp.path()).unwrap();
+    assert!(libs.names.contains("sg13g2_inv_1") && libs.std_cells.is_empty());
+    let pkg = fixtures().join("broken/std-cell-identical/tiny_counter.macro");
+    assert_eq!(check_package(&pkg, &with_libs(libs)).unwrap().errors, 2);
+    let recs = records(&pdk_gds);
+    let name = recs
+        .iter()
+        .position(|r| r[2] == 0x06 && r[4..] == *b"sg13g2_inv_1")
+        .unwrap();
+    let end = (name..recs.len()).find(|&k| recs[k][2] == 0x07).unwrap();
+    let twice = [&recs[..end + 1], &recs[name - 1..end + 1], &recs[end + 1..]].concat();
+    let std = tmp.path().join("libs.ref/sg13g2_stdcell/gds");
+    std::fs::create_dir_all(&std).unwrap();
+    std::fs::write(std.join("sg13g2_stdcell.gds"), twice.concat()).unwrap();
+    let libs = PdkLibs::load(tmp.path()).unwrap();
+    assert_eq!(libs.std_cells.keys().collect::<Vec<_>>(), ["sg13g2_buf_1"]);
 }
 
 #[test]
@@ -417,6 +571,22 @@ fn a_cell_of_the_pdks_libraries_is_refused_when_the_validator_has_them() {
     );
 }
 
+/// Instantiating the PDK's cells is fine, defining one is not, with or
+/// without the PDK's libraries.
+#[test]
+fn a_netlist_may_use_the_pdks_cells_but_not_define_them() {
+    let pkg = fixtures().join("tiny_counter.macro");
+    let spice = std::fs::read_to_string(pkg.join("tiny_counter.spice")).unwrap();
+    assert!(spice.contains(" sg13g2_dfrbp_1\n"));
+    assert!(check_package(&pkg, &with_libs(stand_in())).unwrap().passed);
+    let pkg = fixtures().join("broken/spice-pdk-subckt/tiny_counter.macro");
+    for opts in [CheckOptions::default(), with_libs(stand_in())] {
+        let report = check_package(&pkg, &opts).unwrap();
+        assert_eq!(report.rules(), ["pdk.cell_name"]);
+        assert_eq!(report.findings[0].file, "tiny_counter.spice");
+    }
+}
+
 #[test]
 fn other_pdks_have_no_name_space_of_ihps() {
     let tmp = tempfile::tempdir().unwrap();
@@ -448,4 +618,10 @@ fn pdk_cell_names_come_last() {
         report.rules(),
         ["pdk.expected", "pdk.cell_name", "pdk.cell_name"]
     );
+    let severities: Vec<&str> = report
+        .findings
+        .iter()
+        .map(|f| f.severity.as_str())
+        .collect();
+    assert_eq!(severities, ["warning", "error", "error"]);
 }

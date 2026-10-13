@@ -5,7 +5,7 @@
 
 use aispice_core::macropkg::gds::{GdsError, parse_gds};
 use aispice_core::macropkg::{
-    CheckOptions, Evidence, Manifest, Status, check_package, parse_pdk_option,
+    CheckOptions, Evidence, Manifest, PdkLibs, Status, check_package, parse_pdk_option,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 // The contract both repositories share. ChipLeap pins the same hashes in
 // tests/test_macro.py; change both together (CONTRIBUTING.md).
-const SPEC_SHA256: &str = "7f64a8235353f4f8f34584657104454e3c2d5a2e73b69c0c9d806996f51760b7";
+const SPEC_SHA256: &str = "a6e93e8bc36471af1e913e9b0d04a82dbbd030837732db125fb40f39b8449b04";
 const SCHEMA_SHA256: &str = "01fadd5205677b27ef3dcc5a00c086aaf00f2dba63d398d17fc046dd67254327";
-const FIXTURES_SHA256: &str = "e2afb61df8867df02db4ae502029c0ad21b9f08af1d8fb06774c4af8835f3ee0";
+const FIXTURES_SHA256: &str = "3170942c1f149c7e5781d5ee0571b9d86debd09ce7c19f647600481c9fc660ae";
 
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -69,11 +69,14 @@ fn every_case_reports_exactly_what_expected_json_says() {
     assert!(cases.len() >= 20);
     for case in cases {
         let package = case["package"].as_str().unwrap();
+        // A case with pdk_libs gets that folder as the PDK's libraries.
+        let libs = case["pdk_libs"].as_str();
         let opts = CheckOptions {
             pdk: case["pdk"].as_str().map(str::to_string),
+            pdk_libs: libs.map(|l| PdkLibs::load(&fixtures().join(l)).unwrap()),
             ..Default::default()
         };
-        let id = format!("{package} {:?}", opts.pdk);
+        let id = format!("{package} {:?} {libs:?}", opts.pdk);
         let report = check_package(&fixtures().join(package), &opts).unwrap();
         let json = serde_json::to_value(&report).unwrap();
         for key in ["name", "kind", "pass", "errors", "warnings"] {

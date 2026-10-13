@@ -30,6 +30,7 @@ pub mod lef;
 pub mod liberty;
 pub mod limits;
 mod manifest;
+mod pdklibs;
 mod schema;
 pub mod spice;
 pub mod text;
@@ -49,6 +50,7 @@ pub use manifest::{
     Corner, Direction, Domain, EVIDENCE_SCHEMA, MANIFEST, MacroError, MacroKind, Manifest,
     OPENADA_SCHEMA, Pdk, Pin, PinKind, Producer, SCHEMA_VERSION, SPECS_SCHEMA, Size,
 };
+pub use pdklibs::PdkLibs;
 pub use schema::{SCHEMA_JSON, Val, validate_def};
 
 /// The views are ASCII formats: whitespace, letters, digits and case are ASCII
