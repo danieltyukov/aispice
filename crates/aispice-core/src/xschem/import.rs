@@ -14,7 +14,9 @@
 //! - The PDK's model header (`.lib cornerMOSlv.lib mos_tt`) is dropped: in
 //!   aispice the project's PDK supplies it. A section other than the typical
 //!   one is named in the note.
-//! - `.GLOBAL` lines go (a flat deck has no use for them), and so does `.end`.
+//! - `.GLOBAL` lines of ground nets go (ground is `0` everywhere), and so
+//!   does `.end`. Other global nets stay global: a subcircuit that uses one
+//!   without a port is connected to it only through `.GLOBAL`.
 //! - A relative `.include` whose file is not beside the new `.asc` is kept,
 //!   with a finding.
 //! - Every other line must pass [`crate::netlist::check_lexical`]; a refused
@@ -210,7 +212,7 @@ pub fn clean(text: &str, out_dir: Option<&Path>) -> Cleaned {
     out.text.push_str(lines.next().unwrap_or("*"));
     out.text.push('\n');
     let mut control: Option<Vec<String>> = None;
-    let mut globals = false;
+    let mut ground_globals = false;
     for line in lines {
         let t = line.trim();
         let low = t.to_ascii_lowercase();
@@ -236,7 +238,17 @@ pub fn clean(text: &str, out_dir: Option<&Path>) -> Cleaned {
             continue;
         }
         if keyword == ".global" {
-            globals = true;
+            let kept: Vec<&str> = t
+                .split_whitespace()
+                .skip(1)
+                .filter(|n| *n != "0" && !n.eq_ignore_ascii_case("gnd"))
+                .collect();
+            if kept.len() + 1 < t.split_whitespace().count() {
+                ground_globals = true;
+            }
+            if !kept.is_empty() {
+                out.text.push_str(&format!(".GLOBAL {}\n", kept.join(" ")));
+            }
             continue;
         }
         if let Some(note) = pdk_header(t) {
@@ -264,9 +276,9 @@ pub fn clean(text: &str, out_dir: Option<&Path>) -> Cleaned {
         f.message.push_str(" (it had no .endc)");
         out.findings.push(f);
     }
-    if globals {
+    if ground_globals {
         out.notes
-            .push(".GLOBAL lines are dropped: a flat deck has no use for them".to_string());
+            .push(".GLOBAL of ground is dropped: ground is node 0 everywhere".to_string());
     }
     out
 }

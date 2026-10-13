@@ -18,7 +18,6 @@ path = "src/main.rs"
 [dependencies]
 aispice-agent = { version = "0.2.0", path = "../aispice-agent" }
 aispice-core.workspace = true
-aispice-layout.workspace = true
 aispice-tools.workspace = true
 anyhow.workspace = true
 async-trait = "0.1"

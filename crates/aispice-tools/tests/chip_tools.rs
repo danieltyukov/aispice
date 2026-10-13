@@ -247,6 +247,55 @@ async fn a_block_gds_with_klayout_context_information_is_refused() {
     );
 }
 
+/// A hardened block's standard cells are placed only when the PDK's
+/// libraries show them to be the PDK's own: the chip's package check reads
+/// the libraries, refuses the block without its standard cells, and stops
+/// when the libraries cannot be read.
+#[tokio::test]
+async fn a_block_with_the_pdks_standard_cells_needs_the_pdks_libraries() {
+    let s = setup();
+    let pkg = s.project.path().join("macros/tiny_counter.macro");
+    std::fs::remove_dir_all(&pkg).unwrap();
+    copy_package(
+        &fixtures().join("broken/std-cell-identical/tiny_counter.macro"),
+        &pkg,
+    );
+    std::fs::write(
+        s.project.path().join("t.chip.toml"),
+        chip("macros/tiny_counter.macro"),
+    )
+    .unwrap();
+    let plan = || call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"}));
+    // The fake PDK has no standard-cell library: the cells are not the PDK's.
+    let out = plan().await;
+    assert!(
+        out.is_error && out.text_content().contains("pdk.cell_name"),
+        "{}",
+        out.text_content()
+    );
+    // With the shared fixtures' stand-in for it, they are.
+    let std = s.pdk_root.join("libs.ref/sg13g2_stdcell");
+    let stand_in = fixtures().join("pdk/ihp-sg13g2/libs.ref/sg13g2_stdcell");
+    for (dir, file) in [
+        ("gds", "sg13g2_stdcell.gds"),
+        ("lef", "sg13g2_stdcell.lef"),
+        ("cdl", "sg13g2_stdcell.cdl"),
+    ] {
+        std::fs::create_dir_all(std.join(dir)).unwrap();
+        std::fs::copy(stand_in.join(dir).join(file), std.join(dir).join(file)).unwrap();
+    }
+    let out = plan().await;
+    assert!(!out.is_error, "{}", out.text_content());
+    // A standard-cell GDS that cannot be read stops the plan.
+    std::fs::write(std.join("gds/sg13g2_stdcell.gds"), [0u8, 16, 6, 6]).unwrap();
+    let out = plan().await;
+    assert!(
+        out.is_error && out.text_content().contains("sg13g2_stdcell.gds"),
+        "{}",
+        out.text_content()
+    );
+}
+
 /// SPICE ignores case, so `TINY_COUNTER` and `tiny_counter` are one
 /// subcircuit; a block or chip named like a cell of the PDK is refused
 /// whatever its case, the block by macro/v1's `pdk.cell_name` itself.

@@ -1,0 +1,22 @@
+{
+  "schema": "macro.evidence/v1",
+  "operation": "drc",
+  "tool": {
+    "name": "synthetic",
+    "version": "1"
+  },
+  "pdk": {
+    "name": "ihp-sg13g2",
+    "commit": "22f2a25f1734796de3debbbf29cf697cbbc54081"
+  },
+  "engineering": {
+    "status": "pass",
+    "summary": "Synthetic test fixture: no DRC was run."
+  },
+  "inputs": [
+    {
+      "path": "tiny_counter.gds",
+      "sha256": "5e974031b1f7e45ed7ff4b832254a0e9bcb9f4b48afdff2bda3b63d1d978fad1"
+    }
+  ]
+}
