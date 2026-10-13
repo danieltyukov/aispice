@@ -108,8 +108,53 @@ fn the_bubblewrap_command_shows_only_the_plan() {
         .map(|i| (3 + i).to_string())
         .collect();
     assert_eq!(fds, want.iter().collect::<Vec<_>>());
+    // The program runs through `env -u PWD`, which removes the PWD
+    // bubblewrap sets after every other variable.
     let tail = args.iter().position(|a| a == "--").unwrap();
-    assert_eq!(args[tail + 1..], ["/usr/bin/true", "--flag"]);
+    let env = which("env").unwrap().canonicalize().unwrap();
+    assert_eq!(
+        args[tail + 1..],
+        [
+            env.display().to_string().as_str(),
+            "-u",
+            "PWD",
+            "/usr/bin/true",
+            "--flag"
+        ]
+    );
+}
+
+/// In every sandbox here, the program sees exactly the plan's environment:
+/// nothing of aispice's, and under bubblewrap not the PWD it sets.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_program_sees_exactly_the_plans_environment() {
+    let Some(env) = which("env") else {
+        eprintln!("skipped: no env");
+        return;
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            let mut plan = plan_in(&dir, &env, profile);
+            plan.env.push(("AISPICE_PROBE".into(), "1 2".into()));
+            let spec = sandbox.command(&plan).unwrap();
+            let out = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(out.success(), "{}: {}", sandbox.describe(), out.combined());
+            let mut seen: Vec<String> = out.stdout.lines().map(str::to_string).collect();
+            let mut want: Vec<String> = plan
+                .env
+                .iter()
+                .map(|(k, v)| format!("{}={}", k.to_string_lossy(), v.to_string_lossy()))
+                .collect();
+            seen.sort();
+            want.sort();
+            assert_eq!(seen, want, "{} {profile:?}", sandbox.describe());
+        }
+    }
 }
 
 /// Under Landlock: the program runs directly with the plan's environment;
