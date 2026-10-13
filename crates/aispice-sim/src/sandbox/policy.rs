@@ -19,12 +19,23 @@ pub const SCOPED_LANDLOCK_ABI: u8 = 6;
 /// The newest ABI aispice knows how to write a ruleset for.
 pub const MAX_LANDLOCK_ABI: u8 = 6;
 
+/// How many seccomp programs a [`Profile`] compiles to: the `clone3`
+/// program, on x86_64 the x32 program, and the profile. bubblewrap gets one
+/// descriptor for each, numbered from 3, and installs them in that order.
+pub(crate) const PROFILE_PROGRAMS: usize = if cfg!(target_arch = "x86_64") { 3 } else { 2 };
+
 /// How a child process is confined. Made by [`Confinement::builder`].
 #[derive(Debug, Clone)]
 pub struct Confinement {
     landlock: Option<LandlockPolicy>,
     seccomp: Option<SeccompPolicy>,
     limits: Limits,
+    /// Hand the seccomp profile's programs to the program as descriptors
+    /// 3.. instead of applying them: bubblewrap installs them inside its
+    /// sandbox (`--add-seccomp-fd`). Only [`crate::sandbox::Sandbox`] sets it.
+    /// Read only where confinement is enforced.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    seccomp_as_fds: bool,
 }
 
 impl Confinement {
@@ -39,7 +50,27 @@ impl Confinement {
             landlock: None,
             seccomp: None,
             limits,
+            seccomp_as_fds: false,
         }
+    }
+
+    /// The limits, with `profile`'s programs handed to the program (which
+    /// is bubblewrap) as descriptors 3.. for it to install.
+    pub(crate) fn for_bwrap(limits: Limits, profile: Profile) -> Self {
+        Self {
+            landlock: None,
+            seccomp: Some(SeccompPolicy {
+                profile,
+                signals: Signals::Unrestricted,
+            }),
+            limits,
+            seccomp_as_fds: true,
+        }
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn seccomp_as_fds(&self) -> bool {
+        self.seccomp_as_fds
     }
 
     pub fn landlock(&self) -> Option<&LandlockPolicy> {
@@ -204,6 +235,7 @@ impl ConfinementBuilder {
             landlock: self.landlock,
             seccomp: self.seccomp,
             limits: self.limits,
+            seccomp_as_fds: false,
         })
     }
 }

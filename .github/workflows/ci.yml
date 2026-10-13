@@ -67,6 +67,20 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ngspice
 
+      # Both sandboxes for real: bubblewrap, with Ubuntu's restriction on
+      # unprivileged user namespaces lifted (aispice changes no system
+      # setting itself; this runner is throwaway), and Landlock at the
+      # kernel's ABI. The sandbox tests fail rather than skip when either is
+      # missing here.
+      - name: Sandboxes (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+          uname -r
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
+
       # The whole workspace, app shell included: formatting needs no compiling.
       - name: Format
         if: runner.os == 'Linux'
@@ -117,6 +131,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ngspice verilator
+
+      # As in the engine job: both sandboxes, so ngspice with the PDK's OSDI
+      # models is run under the native-code profile in each.
+      - name: Sandboxes
+        run: |
+          sudo apt-get install --no-install-recommends -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "AISPICE_REQUIRE_SANDBOXES=bwrap,landlock" >> "$GITHUB_ENV"
 
       # Only the PDK's sources are cached. The OSDI models are compiled on every
       # run instead: OpenVAF builds for the runner's own CPU, a cache restored on
@@ -177,6 +199,7 @@ jobs:
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
           cargo test -p aispice-sim --lib pdk::
+          cargo test -p aispice-sim --lib sandbox::
           cargo test -p aispice-tools --test pdk_ihp -- --nocapture
           cargo test -p aispice-tools --test templates_ihp -- --nocapture
           cargo test -p aispice-tools --test eval_suite -- every_reference_solution_passes
