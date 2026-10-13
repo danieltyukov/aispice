@@ -402,6 +402,72 @@ async fn no_metadata_change_outside_and_no_limits_of_others() {
     );
 }
 
+/// In every sandbox here, under either profile, a program makes no link
+/// and no node in its own folder: under bubblewrap its folder is a plain
+/// bind, and a link left there would point what aispice later reads or
+/// writes in it somewhere else. The same commands work unconfined.
+#[cfg(unix)]
+#[tokio::test]
+async fn no_link_or_node_is_made_in_a_write_folder() {
+    let (Some(ln), Some(mkfifo)) = (which("ln"), which("mkfifo")) else {
+        eprintln!("skipped: no ln or mkfifo");
+        return;
+    };
+    let script = |dir: &Path| {
+        format!(
+            "#!/bin/sh\nprintf 'ok\\n' > result\nprintf x > file\n\
+             ln -s {home} soft 2>/dev/null && printf 'symlink\\n' >> result\n\
+             ln file hard 2>/dev/null && printf 'hard link\\n' >> result\n\
+             mkfifo fifo 2>/dev/null && printf 'fifo\\n' >> result\n",
+            home = dir.display()
+        )
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            let program = dir.join("stand-in");
+            std::fs::write(&program, script(&dir)).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            let mut plan = plan_in(&out, &program, profile);
+            plan.exec = vec![PathBuf::from("/bin/sh"), ln.clone(), mkfifo.clone()];
+            let spec = sandbox.command(&plan).unwrap();
+            let run = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                .await
+                .unwrap();
+            let text = std::fs::read_to_string(out.join("result")).unwrap_or_else(|_| {
+                panic!("{}: no result: {}", sandbox.describe(), run.combined())
+            });
+            assert_eq!(text, "ok\n", "{} {profile:?}", sandbox.describe());
+            for name in ["soft", "hard", "fifo"] {
+                assert!(
+                    std::fs::symlink_metadata(out.join(name)).is_err(),
+                    "{} {profile:?}: {name} was made",
+                    sandbox.describe()
+                );
+            }
+        }
+    }
+    // Unconfined, the same script makes all three.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    std::fs::write(dir.join("s.sh"), script(&dir)).unwrap();
+    let ok = std::process::Command::new("/bin/sh")
+        .arg(dir.join("s.sh"))
+        .current_dir(&dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("result")).unwrap(),
+        "ok\nsymlink\nhard link\nfifo\n"
+    );
+}
+
 /// Native code may signal itself and its group but not every process, in
 /// every sandbox here: `kill(-1, 0)` fails with an errno at Landlock ABI 6
 /// too, where the signal scope alone would let it report success, and under
