@@ -633,6 +633,11 @@ code {
   padding: 18px 20px;
 }
 
+/* aispice's schematic renders are drawn on white; they keep it in the dark theme. */
+.card-light {
+  background: #ffffff;
+}
+
 .card-label {
   color: var(--faint);
   font-family: var(--font-mono);
