@@ -38,6 +38,7 @@ fn a_refusal_says_what_is_missing_and_what_to_do_instead() {
     );
 }
 
+#[cfg(unix)]
 fn fake_ngspice(dir: &Path) -> PathBuf {
     let bin = dir.join("opt/ngspice/bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -48,10 +49,12 @@ fn fake_ngspice(dir: &Path) -> PathBuf {
     exe
 }
 
+#[cfg(unix)]
 fn real(p: &Path) -> PathBuf {
     p.canonicalize().unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn ngspice_writes_only_its_run_folder_and_runs_under_the_native_code_profile() {
     let dir = tempfile::tempdir().unwrap();
@@ -95,6 +98,7 @@ fn a_run_folder_ld_preload_would_split_is_refused() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_sandboxed_run_starts_from_a_fixed_environment() {
     let env = environment(Path::new("/tmp/run"));
