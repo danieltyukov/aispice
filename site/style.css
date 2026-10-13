@@ -629,6 +629,15 @@ code {
   gap: 16px;
 }
 
+.ms {
+  border-top: 1px solid var(--line);
+}
+
+.ms-plot {
+  margin: 0;
+  padding: 12px;
+}
+
 .card-pad {
   padding: 18px 20px;
 }

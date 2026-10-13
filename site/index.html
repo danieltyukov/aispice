@@ -326,6 +326,40 @@
       </section>
 
       <!-- mixed-signal:start -->
+      <section id="mixed-signal" class="product ms">
+        <div class="wrap">
+          <div class="feature feature-flip">
+            <div class="feature-copy">
+              <p class="eyebrow">Mixed signal</p>
+              <h2>Analog and logic in one simulation.</h2>
+              <p>
+                A project declares Verilog-A models and Verilog to co-simulate. aispice builds
+                them itself with OpenVAF and Verilator, runs the result in a sandbox, and ngspice
+                simulates the transistors and the logic together. Above the block, the budget tool
+                splits a target into block specs with every equation, and the trim check proves a
+                trimmed block reaches its range at every corner and mismatch sample.
+              </p>
+              <ul class="checks">
+                <li>Behavioural models and co-simulated Verilog, sandboxed</li>
+                <li>ADC front-end and LDO budgets written as spec tables</li>
+                <li>Every trim code at every corner and sample</li>
+              </ul>
+            </div>
+            <div class="feature-art stack stack-ic">
+              <figure class="card card-light ms-plot">
+                <img src="/img/ic/mixed-signal.webp" srcset="/img/ic/mixed-signal-1x.webp 1x, /img/ic/mixed-signal.webp 2x" width="1400" height="836" loading="lazy" alt="The StrongARM comparator's clock and outputs over eight 2 ns cycles, and the co-simulated counter stepping from 0 to 5" />
+              </figure>
+              <div class="card card-pad">
+                <p class="card-label">budget: a 10-bit ADC front end, ENOB 9.5, 50 MS/s</p>
+<pre class="result">  sampling capacitor (each side) = 207.9fF
+  OTA gain-bandwidth = 404.5MHz
+  OTA DC gain in dB = 72.25dB
+  OTA input noise density = 11.2nV/rtHz</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
       <!-- mixed-signal:end -->
 
       <section id="chips" class="chips" aria-labelledby="chips-title">
