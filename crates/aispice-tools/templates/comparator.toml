@@ -17,7 +17,7 @@ tdec = crossing(V(outn), 0.6, fall) <= 250p
 generator = "comparator"
 roles = { tail = "M0", pair = ["M1", "M2"], latch_n = ["M3", "M4"], latch_p = ["M5", "M6"], reset = ["M7", "M8", "M9", "M10"] }
 offset_mv = 0.5
-note = "The generator's wiring puts about 27 fF on each output, against the bench's 5 fF loads, and the latch regenerates more slowly into it: outn falls through half the supply within about 335 ps at ss and -40 C after layout, against 155 ps in the schematic. Wider devices buy little back, since their wiring grows with them (four times the width still takes 280 ps). The decisions and the reset hold as in the schematic's table; only the decision time has its own limit after layout."
+note = "The generator's wiring puts about 27 fF on each output, against the bench's 5 fF loads, and the latch regenerates more slowly into it: outn falls through half the supply within about 335 ps at ss and -40 C after layout, against 155 ps in the schematic. Wider devices buy little back, since their wiring grows with them (four times the width still takes about 270 ps). The decisions and the reset hold as in the schematic's table; only the decision time has its own limit after layout."
 specs = """
 first = value_at(V(outp,outn), 0.95n) >= 1
 second = value_at(V(outp,outn), 2.95n) <= -1
