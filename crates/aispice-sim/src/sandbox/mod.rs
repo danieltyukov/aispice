@@ -19,6 +19,10 @@
 //!   profile's seccomp programs. At ABI 6 Landlock scopes signals and
 //!   abstract sockets; at 4 or 5 seccomp keeps signals to the process and
 //!   its group ([`Signals::SelfOnly`]), and every profile refuses sockets.
+//!
+//! [`Profile::NativeCode`] gets [`Signals::SelfOnly`] in every sandbox, at
+//! every ABI: a scope or namespace keeps a signal from arriving, but only
+//! seccomp makes `kill(-1, 0)` fail rather than report success.
 //!   This is the path on a kernel that restricts unprivileged user
 //!   namespaces without a bwrap AppArmor profile (Ubuntu 24.04's default).
 //! - else nothing runs, and `select` says why.
@@ -233,8 +237,10 @@ impl Sandbox {
         let mut spec = match &self.kind {
             Kind::Bwrap(bwrap) => {
                 let mut spec = ProcessSpec::new(bwrap, &plan.cwd);
-                spec.args = bwrap_args(plan, &program);
-                spec.confine = Some(Confinement::for_bwrap(plan.limits, plan.profile));
+                let confine = Confinement::for_bwrap(plan.limits, plan.profile);
+                let programs = confine.seccomp().map_or(0, SeccompPolicy::programs);
+                spec.args = bwrap_args(plan, &program, programs);
+                spec.confine = Some(confine);
                 spec
             }
             Kind::Landlock { abi } => {
@@ -269,11 +275,7 @@ impl Sandbox {
                 };
                 let seccomp = SeccompPolicy {
                     profile: plan.profile,
-                    signals: if scoped {
-                        Signals::Unrestricted
-                    } else {
-                        Signals::SelfOnly
-                    },
+                    signals: plan.profile.signals(scoped),
                 };
                 let confine = Confinement::builder()
                     .landlock(landlock)
@@ -317,8 +319,9 @@ fn executables(program: &Path, others: &[PathBuf]) -> Vec<PathBuf> {
     v
 }
 
-/// The bubblewrap arguments that run `plan` (its program at `program`).
-fn bwrap_args(plan: &Plan, program: &Path) -> Vec<OsString> {
+/// The bubblewrap arguments that run `plan` (its program at `program`),
+/// with `programs` seccomp programs to install.
+fn bwrap_args(plan: &Plan, program: &Path, programs: usize) -> Vec<OsString> {
     let mut a: Vec<OsString> = Vec::new();
     let mut push = |items: &[&dyn AsRef<std::ffi::OsStr>]| {
         for i in items {
@@ -374,7 +377,7 @@ fn bwrap_args(plan: &Plan, program: &Path) -> Vec<OsString> {
     push(&[&"--chdir", &plan.cwd]);
     // The seccomp programs arrive as descriptors 3.. (backend::confine
     // moves them there); bubblewrap installs them before the program runs.
-    for i in 0..policy::PROFILE_PROGRAMS {
+    for i in 0..programs {
         push(&[&"--add-seccomp-fd", &(3 + i).to_string()]);
     }
     push(&[&"--", &program]);

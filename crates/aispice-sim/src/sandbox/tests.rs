@@ -103,7 +103,8 @@ fn the_bubblewrap_command_shows_only_the_plan() {
         .filter(|w| w[0] == "--add-seccomp-fd")
         .map(|w| &w[1])
         .collect();
-    let want: Vec<String> = (0..policy::PROFILE_PROGRAMS)
+    // Native code also gets the signal program.
+    let want: Vec<String> = (0..policy::PROFILE_PROGRAMS + 1)
         .map(|i| (3 + i).to_string())
         .collect();
     assert_eq!(fds, want.iter().collect::<Vec<_>>());
@@ -155,6 +156,14 @@ fn the_landlock_command_confines_to_the_plan() {
                 .iter()
                 .any(|p| p == Path::new("/usr/bin") || p == Path::new("/usr"))
         );
+        // Native code has its signals checked at every ABI.
+        plan.profile = Profile::NativeCode;
+        let spec = Sandbox::landlock_for_tests(abi).command(&plan).unwrap();
+        assert_eq!(
+            spec.confine.as_ref().unwrap().seccomp().unwrap().signals,
+            Signals::SelfOnly
+        );
+        plan.profile = Profile::Denylist;
     }
 }
 
@@ -255,6 +264,36 @@ async fn landlock_narrows_exec_and_signals() {
                 sandbox.describe()
             );
         }
+    }
+}
+
+/// Native code may signal itself and its group but not every process, in
+/// every sandbox here: `kill(-1, 0)` fails with an errno at Landlock ABI 6
+/// too, where the signal scope alone would let it report success, and under
+/// bubblewrap, whose namespace pid the signal program is written with.
+#[cfg(unix)]
+#[tokio::test]
+async fn native_code_cannot_signal_everyone() {
+    for sandbox in every_available().await {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let script = "#!/bin/sh\nprintf 'ok\\n' > result\n\
+            kill -0 $$ && printf 'self\\n' >> result\n\
+            kill -0 0 && printf 'group\\n' >> result\n\
+            kill -0 -$$ && printf 'own group\\n' >> result\n\
+            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n";
+        let text = run_script(&sandbox, &dir, script, Profile::NativeCode).await;
+        assert!(
+            text.starts_with("ok\nself\ngroup\nown group\n"),
+            "{}: {text}",
+            sandbox.describe()
+        );
+        assert!(!text.contains("everyone"), "{}: {text}", sandbox.describe());
+        assert!(
+            text.contains("not permitted"),
+            "{}: kill(-1, 0) did not fail with EPERM: {text}",
+            sandbox.describe()
+        );
     }
 }
 
