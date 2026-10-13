@@ -6,7 +6,7 @@ use super::lef::too_many_tokens;
 use super::limits::{LimitError, Limits};
 use super::text::quote;
 use super::{is_ws, parse_int};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LibertyError {
@@ -263,11 +263,21 @@ pub fn parse_liberty(
     parse_liberty_with(text, &Limits::DEFAULT, None)
 }
 
+/// A pin of `cell`, refused when the cell already has one of its name.
+fn add(pins: &mut BTreeMap<String, LibPin>, cell: &str, pin: LibPin) -> Result<(), LibertyError> {
+    if pins.contains_key(&pin.name) {
+        return fail(format!("pin {} of cell {cell} is defined twice", pin.name));
+    }
+    pins.insert(pin.name.clone(), pin);
+    Ok(())
+}
+
 /// Pins of every cell in the library group (or only of `cell`), by cell then
-/// pin bit name. The first cell of a name counts; later ones are skipped.
-/// Bus bits come from the bus's `bus_type` and from `pin` groups inside the
-/// bus. Fails on a syntax error, and when the file has too many tokens, nests
-/// groups too deep or a cell declares too many pins.
+/// pin bit name. Bus bits come from the bus's `bus_type` and from `pin`
+/// groups inside the bus. Fails on a syntax error, when a cell, or a pin of
+/// the cell read, is defined twice (OpenSTA keeps the last cell of a name and
+/// both pins), and when the file has too many tokens, nests groups too deep or
+/// a cell declares too many pins.
 pub fn parse_liberty_with(
     text: &str,
     limits: &Limits,
@@ -294,12 +304,16 @@ pub fn parse_liberty_with(
         }
     }
     let mut cells = BTreeMap::new();
+    let mut seen = HashSet::new();
     for c in &lib.groups {
         let Some(cell_name) = c.args.first() else {
             continue;
         };
-        if c.kind != "cell" || cells.contains_key(cell_name) {
+        if c.kind != "cell" {
             continue;
+        }
+        if !seen.insert(cell_name.as_str()) {
+            return fail(format!("cell {cell_name} is defined twice"));
         }
         if cell.is_some_and(|want| want != cell_name) {
             continue;
@@ -324,19 +338,19 @@ pub fn parse_liberty_with(
                 "pg_pin" => {
                     declare(g.args.len() as i128)?;
                     for name in &g.args {
-                        pins.entry(name.clone()).or_insert_with(|| LibPin {
+                        let pin = LibPin {
                             name: name.clone(),
                             pg: true,
                             pg_type: g.attrs.get("pg_type").cloned().unwrap_or_default(),
                             ..LibPin::default()
-                        });
+                        };
+                        add(&mut pins, cell_name, pin)?;
                     }
                 }
                 "pin" => {
                     declare(g.args.len() as i128)?;
                     for name in &g.args {
-                        pins.entry(name.clone())
-                            .or_insert_with(|| lib_pin(name, g, "", 0));
+                        add(&mut pins, cell_name, lib_pin(name, g, "", 0))?;
                     }
                 }
                 "bus" => {
@@ -346,31 +360,39 @@ pub fn parse_liberty_with(
                     let direction = g.attrs.get("direction").cloned().unwrap_or_default();
                     let timing = timing_count(g);
                     let range = g.attrs.get("bus_type").and_then(|t| types.get(t.as_str()));
+                    let mut bits = HashSet::new();
                     if let Some(&(a, b)) = range {
                         let (lo, hi) = (a.min(b), a.max(b));
                         declare(i128::from(hi) - i128::from(lo) + 1)?;
                         for i in lo..=hi {
                             let bit = format!("{bus}[{i}]");
-                            pins.entry(bit.clone()).or_insert_with(|| LibPin {
-                                name: bit,
+                            let pin = LibPin {
+                                name: bit.clone(),
                                 direction: direction.clone(),
                                 timing,
                                 ..LibPin::default()
-                            });
+                            };
+                            add(&mut pins, cell_name, pin)?;
+                            bits.insert(bit);
                         }
                     }
+                    // A pin group inside the bus describes one of its bits, once.
+                    let mut inner_seen = HashSet::new();
                     for inner in g.groups.iter().filter(|x| x.kind == "pin") {
                         declare(inner.args.len() as i128)?;
                         for name in &inner.args {
+                            if !inner_seen.insert(name.as_str()) {
+                                return fail(format!(
+                                    "pin {name} of cell {cell_name} is defined twice"
+                                ));
+                            }
                             let p = lib_pin(name, inner, &direction, timing);
-                            match pins.get_mut(name) {
+                            match pins.get_mut(name).filter(|_| bits.contains(name)) {
                                 Some(existing) => {
                                     existing.direction = p.direction;
                                     existing.timing = p.timing;
                                 }
-                                None => {
-                                    pins.insert(name.clone(), p);
-                                }
+                                None => add(&mut pins, cell_name, p)?,
                             }
                         }
                     }
@@ -429,5 +451,45 @@ mod tests {
         assert_eq!(pins["d[2]"].direction, "inout");
         assert!(pins["VDD"].pg && pins["VDD"].pg_type == "primary_power");
         assert!(parse_liberty("library (l) { cell (x) { pin (a) { direction : input ; }").is_err());
+    }
+
+    fn error(text: &str) -> String {
+        parse_liberty(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn a_cell_or_pin_defined_twice_cannot_be_read() {
+        // As in ChipLeap's test_a_view_that_defines_something_twice_cannot_be_read.
+        let lib = |body: &str| format!("library (l) {{ cell (m) {{ {body} }} }}");
+        let twice = "pin a of cell m is defined twice";
+        assert_eq!(error(&lib("pin (a) { } pg_pin (a) { }")), twice);
+        assert_eq!(error(&lib("pin (a, a) { }")), twice);
+        let bus = "type (t) { bit_from : 0 ; bit_to : 1 ; } ";
+        assert_eq!(
+            error(&format!(
+                "library (l) {{ {bus}cell (m) {{ pin (d[0]) {{ }} bus (d) {{ bus_type : t ; }} }} }}"
+            )),
+            "pin d[0] of cell m is defined twice"
+        );
+        assert_eq!(
+            error(&format!(
+                "library (l) {{ {bus}cell (m) {{ bus (d) {{ bus_type : t ; pin (d[1]) {{ }} pin (d[1]) {{ }} }} }} }}"
+            )),
+            "pin d[1] of cell m is defined twice"
+        );
+        // A bus's own pin groups describe its bits, once each.
+        let cells = parse_liberty(&format!(
+            "library (l) {{ {bus}cell (m) {{ bus (d) {{ bus_type : t ; direction : input ; \
+             pin (d[1]) {{ direction : output ; }} }} }} }}"
+        ))
+        .unwrap();
+        assert_eq!(cells["m"]["d[1]"].direction, "output");
+        assert_eq!(cells["m"]["d[0]"].direction, "input");
+        // OpenSTA keeps the last cell of a name; any cell defined twice makes
+        // the file unreadable, even when another cell is the one read.
+        let cells = "library (l) { cell (m) { } cell (x) { } cell (x) { } }";
+        assert_eq!(error(cells), "cell x is defined twice");
+        let only_m = parse_liberty_with(cells, &Limits::DEFAULT, Some("m"));
+        assert_eq!(only_m.unwrap_err().to_string(), "cell x is defined twice");
     }
 }
