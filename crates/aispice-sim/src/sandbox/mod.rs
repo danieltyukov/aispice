@@ -127,7 +127,7 @@ impl Sandbox {
             Err(e) => why.push(e),
         }
         Err(format!(
-            "no sandbox is available here: {} (see docs/XSCHEM.md)",
+            "no sandbox is available here: {} (see docs/SANDBOX.md)",
             why.join("; ")
         ))
     }
@@ -246,6 +246,14 @@ impl Sandbox {
                     .chain(DEVICES)
                     .map(PathBuf::from)
                     .collect();
+                // Without a merged /usr, /lib, /bin and the rest are real
+                // folders the loader and helpers come from.
+                read.extend(
+                    SYSTEM_LINKS
+                        .iter()
+                        .map(PathBuf::from)
+                        .filter(|p| p.is_dir() && !p.is_symlink()),
+                );
                 read.extend(plan.read.iter().cloned());
                 let landlock = LandlockPolicy {
                     read,
