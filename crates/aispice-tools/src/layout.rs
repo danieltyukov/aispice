@@ -39,6 +39,11 @@ pub fn open_project_gds(ws: &Workspace, rel: &str, cell: Option<&str>) -> Result
 }
 
 /// The layout setup of the open project, or why there is none.
+/// The sandbox KLayout and Magic get on this machine, for `aispice doctor`.
+pub async fn sandbox_description() -> String {
+    aispice_layout::tools::sandbox_description().await
+}
+
 /// `text` with a note when KLayout and Magic ran without a sandbox on this
 /// machine, for every tool that runs them.
 pub async fn noted(mut text: String) -> String {
