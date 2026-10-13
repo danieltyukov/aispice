@@ -223,6 +223,29 @@ impl Sandbox {
         override_landlock_abi(abi)
     }
 
+    /// Tests only (feature `testing`): Landlock at `abi` for a test that
+    /// hands its sandbox to the code under test, with nothing changed for
+    /// the rest of the process. Prefer it to
+    /// [`Sandbox::use_landlock_abi_for_tests`] wherever a sandbox can be
+    /// handed in. Refused outside [`MIN_LANDLOCK_ABI`] to
+    /// [`MAX_LANDLOCK_ABI`], above the kernel's ABI, and on a system without
+    /// Landlock. No product build has this.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn landlock_at_abi_for_tests(abi: u8) -> Result<Sandbox, String> {
+        if !(MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI).contains(&abi) {
+            return Err(format!(
+                "aispice writes Landlock rulesets for ABI {MIN_LANDLOCK_ABI} to {MAX_LANDLOCK_ABI}, not {abi}"
+            ));
+        }
+        let here = landlock_abi_here()?;
+        if here < abi {
+            return Err(format!("the kernel's Landlock ABI is {here}, below {abi}"));
+        }
+        Ok(Sandbox {
+            kind: Kind::Landlock { abi },
+        })
+    }
+
     /// The ABI the Landlock ruleset is written against, under Landlock.
     pub fn landlock_abi(&self) -> Option<u8> {
         match self.kind {

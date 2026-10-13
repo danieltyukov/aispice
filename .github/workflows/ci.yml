@@ -86,6 +86,24 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
+      # Each crate's `testing` feature exposes entry points only tests may
+      # use (a process-wide Landlock ABI override, xschem text that is not an
+      # export). Only dev-dependencies may turn one on: no normal dependency
+      # path of a shipped binary, on any target, may.
+      - name: No test-only features in shipped binaries
+        if: runner.os == 'Linux'
+        run: |
+          for bin in aispice aispice-app; do
+            for dep in aispice-sim aispice-core aispice-agent; do
+              tree=$(cargo tree -p "$bin" -e normal,features -i "$dep" --target all)
+              if grep -q "$dep feature \"testing\"" <<<"$tree"; then
+                echo "$bin turns on $dep/testing through a normal dependency:"
+                echo "$tree"
+                exit 1
+              fi
+            done
+          done
+
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 

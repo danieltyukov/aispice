@@ -35,7 +35,7 @@ With **`Signals::SelfOnly`**, a further program lets a signal reach only the pro
 
 ## Testing at an older Landlock ABI
 
-A kernel at ABI 6 or later can still enforce a ruleset written against ABI 4 or 5. aispice-sim's own tests run their Landlock checks at ABI 4 as well as at the kernel's. Tests in other crates, where `Sandbox::select` is called deep inside the code under test, can turn on the `testing` feature of `aispice-sim` in their dev-dependencies and call `Sandbox::use_landlock_abi_for_tests(4)`: for the rest of that test process `select` skips bubblewrap and gives Landlock at ABI 4, with seccomp's signal program in place of the scopes. It is process-wide, so such tests belong in a test binary of their own. No product build has the feature.
+A kernel at ABI 6 or later can still enforce a ruleset written against ABI 4 or 5. aispice-sim's own tests run their Landlock checks at ABI 4 as well as at the kernel's. Tests in other crates can turn on the `testing` feature of `aispice-sim` in their dev-dependencies. A test that hands a sandbox to the code under test takes `Sandbox::landlock_at_abi_for_tests(4)`, which changes nothing else. Where `Sandbox::select` is called deep inside the code under test, `Sandbox::use_landlock_abi_for_tests(4)` makes it skip bubblewrap and give Landlock at ABI 4 for the rest of that test process; since that is process-wide, such tests belong in a test binary of their own. Both are refused above the kernel's ABI. No product build has the feature, and CI checks that no normal dependency path of the `aispice` or desktop binary turns it on.
 
 ## Using bubblewrap on Ubuntu 24.04
 

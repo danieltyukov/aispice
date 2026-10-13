@@ -297,6 +297,28 @@ async fn native_code_cannot_signal_everyone() {
     }
 }
 
+/// The scoped test entry point gives Landlock at an ABI the kernel has,
+/// and refuses one it does not or that aispice does not write.
+#[cfg(target_os = "linux")]
+#[test]
+fn landlock_at_an_abi_for_tests() {
+    for abi in [0, 3, 7] {
+        assert!(Sandbox::landlock_at_abi_for_tests(abi).is_err(), "{abi}");
+    }
+    let Ok(kernel) = landlock_abi_here() else {
+        assert!(Sandbox::landlock_at_abi_for_tests(4).is_err());
+        return;
+    };
+    for abi in MIN_LANDLOCK_ABI..=MAX_LANDLOCK_ABI {
+        let got = Sandbox::landlock_at_abi_for_tests(abi);
+        if abi <= kernel {
+            assert_eq!(got.unwrap().landlock_abi(), Some(abi));
+        } else {
+            assert!(got.is_err(), "{abi}");
+        }
+    }
+}
+
 /// A Landlock sandbox writes its ruleset against its own ABI, not the
 /// kernel's. ABI 5 added the right to use ioctl on a device, so `stty` on
 /// `/dev/null` (granted read and write, never that right) is refused from
