@@ -119,7 +119,8 @@ impl Tool for ChipTool {
             Ok((t, d)) => {
                 text.push_str(&t);
                 data["result"] = d;
-                ToolOutput::text(text).with_data(json!({"kind": "generic", "value": data}))
+                ToolOutput::text(crate::layout::noted(text).await)
+                    .with_data(json!({"kind": "generic", "value": data}))
             }
             Err(e) => ToolOutput::error(format!("{text}{e}")),
         }

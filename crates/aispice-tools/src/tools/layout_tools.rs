@@ -161,7 +161,8 @@ impl Tool for DrcTool {
         if !folder.is_empty() {
             t.push_str(&format!("Reports kept in {folder}.\n"));
         }
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"drc": report}}))
+        ToolOutput::text(layout::noted(t).await)
+            .with_data(json!({"kind": "generic", "value": {"drc": report}}))
     }
 }
 
@@ -218,7 +219,8 @@ impl Tool for LvsTool {
                 input.circuit
             ));
         }
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"lvs": report}}))
+        ToolOutput::text(layout::noted(t).await)
+            .with_data(json!({"kind": "generic", "value": {"lvs": report}}))
     }
 }
 
@@ -282,11 +284,13 @@ impl Tool for ExtractTool {
             t.push_str(&lines[..120].join("\n"));
             t.push_str(&format!("\n... {} more lines\n", lines.len() - 120));
         }
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": {"extracted": {
-            "cell": ex.cell, "ports": ex.ports, "devices": ex.devices,
-            "capacitors": ex.capacitors, "resistors": ex.resistors,
-            "total_cap_ff": ex.total_cap_ff,
-        }}}))
+        ToolOutput::text(layout::noted(t).await).with_data(
+            json!({"kind": "generic", "value": {"extracted": {
+                "cell": ex.cell, "ports": ex.ports, "devices": ex.devices,
+                "capacitors": ex.capacitors, "resistors": ex.resistors,
+                "total_cap_ff": ex.total_cap_ff,
+            }}}),
+        )
     }
 }
 
@@ -504,7 +508,8 @@ impl LayoutTool {
             data["drc"] = json!(drc);
             data["lvs"] = json!(lvs);
         }
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": data}))
+        ToolOutput::text(layout::noted(t).await)
+            .with_data(json!({"kind": "generic", "value": data}))
     }
 
     async fn render(&self, input: LayoutInput, cancel: &CancellationToken) -> ToolOutput {
@@ -530,7 +535,7 @@ impl LayoutTool {
             .await
         );
         let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-        ToolOutput::text(format!("Layout of {} in {}", gds.cell, gds.rel))
+        ToolOutput::text(layout::noted(format!("Layout of {} in {}", gds.cell, gds.rel)).await)
             .with_image("image/png", b64)
             .with_data(json!({"kind": "generic", "value": {"layout": gds.rel, "cell": gds.cell}}))
     }

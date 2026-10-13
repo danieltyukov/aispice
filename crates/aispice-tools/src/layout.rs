@@ -39,6 +39,19 @@ pub fn open_project_gds(ws: &Workspace, rel: &str, cell: Option<&str>) -> Result
 }
 
 /// The layout setup of the open project, or why there is none.
+/// `text` with a note when KLayout and Magic ran without a sandbox on this
+/// machine, for every tool that runs them.
+pub async fn noted(mut text: String) -> String {
+    if let Some(note) = aispice_layout::tools::unsandboxed().await {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&note);
+        text.push('\n');
+    }
+    text
+}
+
 pub fn env(ws: &Workspace) -> Result<LayoutEnv, String> {
     let project = ws.project().map_err(|e| e.to_string())?;
     let pdk = ws

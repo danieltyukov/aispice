@@ -164,7 +164,8 @@ impl Tool for MacroExport {
             built.files.len()
         );
         t.push_str(&built.text);
-        ToolOutput::text(t).with_data(json!({"kind": "generic", "value": built.data}))
+        ToolOutput::text(crate::layout::noted(t).await)
+            .with_data(json!({"kind": "generic", "value": built.data}))
     }
 }
 

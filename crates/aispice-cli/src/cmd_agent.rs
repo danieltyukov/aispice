@@ -218,6 +218,7 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
             "ltspice_library": runner.ltspice_lib_dirs(),
             "pdks": pdk_lines(&runner),
             "layout_tools": layout_lines(&runner),
+            "layout_sandbox": rt.block_on(aispice_layout::tools::sandbox_description()),
             "providers": configured.iter().map(|k| serde_json::json!({"provider": k.provider, "source": k.source.to_string()})).collect::<Vec<_>>(),
             "config": Config::default_path(),
         });
@@ -269,6 +270,11 @@ pub fn doctor(json_mode: bool) -> Result<ExitCode> {
     for l in layout_lines(&runner) {
         println!("  {l}");
     }
+    println!(
+        "  {:8} {}",
+        "sandbox",
+        rt.block_on(aispice_layout::tools::sandbox_description())
+    );
     println!("\nModel providers with a key:");
     if configured.is_empty() {
         println!(
