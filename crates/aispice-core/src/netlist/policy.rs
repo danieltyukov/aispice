@@ -505,10 +505,14 @@ fn check_lines(
     let mut in_control = false;
     for (i, logical) in lines.iter().enumerate() {
         let line = &logical.text;
+        // What a line starts with, as ngspice reads it: leading blanks are
+        // already gone, and a byte-order mark (or a stray U+FEFF) is passed
+        // over too, so it cannot hide a `.control` or a `*#` from the checks.
+        let text = line.trim_start_matches('\u{feff}').trim_start();
         // A deck whose title is `*ng_script` is read by ngspice as a script
         // of control commands, not a netlist. Refused on any line, comment
         // or not, in a deck or a file it includes.
-        if line.to_ascii_lowercase().starts_with(SCRIPT_MARK) {
+        if text.to_ascii_lowercase().starts_with(SCRIPT_MARK) {
             out.push(Violation {
                 line: line.clone(),
                 reason: "`*ng_script` makes ngspice read the deck as a script of control commands, which can load code and write files; it is not allowed".into(),
@@ -520,7 +524,7 @@ fn check_lines(
         // never one): refused unless the user allows control blocks, and
         // then held to the same allowlist.
         if !(i == 0 && has_title)
-            && let Some(rest) = star_hash_command(line)
+            && let Some(rest) = star_hash_command(text)
         {
             cx.control.set(true);
             let command = rest.trim().to_ascii_lowercase();
@@ -541,13 +545,16 @@ fn check_lines(
         // file a `.include` title names), so such a title is checked like
         // any other line. Xyce never reads the title.
         let title_skipped =
-            i == 0 && has_title && (reading == Reading::Xyce || !line.starts_with('.'));
+            i == 0 && has_title && (reading == Reading::Xyce || !text.starts_with('.'));
         if logical.comment || title_skipped {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
+        let lower = text.to_ascii_lowercase();
         let first = lower.split_whitespace().next().unwrap_or("");
-        if first == ".control" {
+        // ngspice opens and closes a control block on any line that starts
+        // with `.control` or `.endc`, whatever follows and in any case, so
+        // the policy does too.
+        if lower.starts_with(".control") {
             in_control = true;
             cx.control.set(true);
             if !policy.allow_control_blocks {
@@ -555,8 +562,12 @@ fn check_lines(
             }
             continue;
         }
-        if first == ".endc" {
+        if lower.starts_with(".endc") {
             in_control = false;
+            cx.control.set(true);
+            if !policy.allow_control_blocks {
+                out.push(Violation { line: line.clone(), reason: "`.endc` belongs to a `.control` block, and control blocks are off unless enabled in settings".into() });
+            }
             continue;
         }
         // Control blocks are allowed only by the user's setting, and then
@@ -2165,6 +2176,54 @@ mod tests {
                 .any(|v| v.reason.contains("continuation inside a control block")),
             "{joined}"
         );
+    }
+
+    /// ngspice opens a control block on any line that starts with
+    /// `.control` (and closes one on `.endc`), in any case, after blanks or
+    /// a byte-order mark, with anything after it, in the deck or in any file
+    /// it includes or a `.lib` section of one, before or after `.end`, with
+    /// LF or CRLF. With control blocks off every such line is refused; with
+    /// them on the deck counts as having control commands and the lines in
+    /// the block are held to the allowlist.
+    #[test]
+    fn every_spelling_of_a_control_block_is_seen() {
+        let d = temp("control-spellings");
+        std::fs::write(d.join("inc.lib"), "* lib\n.control\nshell id\n.endc\n").unwrap();
+        std::fs::write(
+            d.join("sec.lib"),
+            "* lib\n.lib sec\n.control\nshell id\n.endc\n.endl\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("bom.lib"), "\u{feff}.control\nshell id\n.endc\n").unwrap();
+        let off = policy_at(&d);
+        let mut on = policy_at(&d);
+        on.allow_control_blocks = true;
+        for deck in [
+            "t\nV1 a 0 1\n.CONTROL\nshell id\n.ENDC\n.end\n",
+            "t\nV1 a 0 1\n   .control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n\t.control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.control foo\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.controlx\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.end\n.control\nshell id\n.endc\n",
+            "t\r\nV1 a 0 1\r\n.control\r\nshell id\r\n.endc\r\n.end\r\n",
+            "\u{feff}t\nV1 a 0 1\n\u{feff}.control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.include inc.lib\n.end\n",
+            "t\nV1 a 0 1\n.lib sec.lib sec\n.end\n",
+            "t\nV1 a 0 1\n.include bom.lib\n.end\n",
+        ] {
+            assert!(!check(deck, &off).is_empty(), "off: {deck:?}");
+            let (v, reads) = check_reads(deck, &on);
+            assert!(reads.control, "on, not seen: {deck:?}");
+            assert!(
+                v.iter()
+                    .any(|v| v.reason.contains("control blocks allow only")),
+                "on, shell allowed: {deck:?}: {v:?}"
+            );
+        }
+        // A lone `.endc` is refused with control blocks off.
+        let lone = "t\nV1 a 0 1\n.endc\n.end\n";
+        assert!(!check(lone, &off).is_empty());
+        assert!(check(lone, &on).is_empty());
     }
 
     /// A `*#` line is a control command to ngspice in some modes, so it is

@@ -227,7 +227,7 @@ fn refusal_for(purpose: Purpose, no_sandbox: Option<&str>, no_compiler: bool) ->
         let mut missing = Vec::new();
         if let Some(why) = no_sandbox {
             missing.push(format!(
-                "{why}, and with control blocks enabled aispice runs ngspice only in a sandbox, which needs Linux with seccomp and either bubblewrap 0.8 or later or Landlock ABI 4 (Linux 6.7) or later (see docs/SANDBOX.md)"
+                "{why} (the sandbox needs Linux with seccomp and either bubblewrap 0.8 or later or Landlock ABI 4 (Linux 6.7) or later; see docs/SANDBOX.md)"
             ));
         }
         if no_compiler {
@@ -238,7 +238,7 @@ fn refusal_for(purpose: Purpose, no_sandbox: Option<&str>, no_compiler: bool) ->
             ));
         }
         return format!(
-            "the deck's control commands were not run: {}. To simulate here, remove the deck's `.control` block and `*#` lines and use aispice's measurements instead.",
+            "ngspice was not run: control blocks are enabled in the settings, and aispice then runs every ngspice simulation in a sandbox, but {}. To simulate here, turn control blocks off in the settings (a deck's `.control` block and `*#` lines are then refused) and use aispice's measurements instead.",
             missing.join("; and ")
         );
     }

@@ -720,16 +720,20 @@ impl Runner {
         } else {
             (Vec::new(), None)
         };
-        // Control commands, which the policy let through only because the
-        // user enabled control blocks, run only in a sandboxed ngspice,
-        // whatever they are; without a sandbox they are not run at all.
-        let sandbox = if deck_reads.control {
-            if id != SimId::Ngspice {
-                return Err(RunError::Netlist(format!(
-                    "the deck has control commands, which run on ngspice only (in a sandbox), not on {}",
-                    id.name()
-                )));
-            }
+        // With control blocks enabled, every ngspice run goes in the
+        // sandbox, whether or not aispice saw a control command in the deck,
+        // so the decision never rests on aispice reading every spelling the
+        // way ngspice does; without a sandbox nothing runs on ngspice.
+        // Control commands it did see run on ngspice only.
+        let control_on = policy.allow_control_blocks;
+        if deck_reads.control && id != SimId::Ngspice {
+            return Err(RunError::Netlist(format!(
+                "the deck has control commands, which run on ngspice only (in a sandbox), not on {}",
+                id.name()
+            )));
+        }
+        let sandboxed_control = id == SimId::Ngspice && (control_on || deck_reads.control);
+        let sandbox = if sandboxed_control {
             let sandbox = match sandbox {
                 Some(s) => s,
                 None => aispice_sim::backend::native_code::ready_for(
@@ -745,14 +749,16 @@ impl Runner {
                 &pdk_roots,
             )
             .map_err(RunError::Netlist)?;
-            notes.push("ran the deck's control commands in a sandboxed ngspice".into());
+            notes.push(
+                "ran ngspice in a sandbox, since control blocks are enabled in the settings".into(),
+            );
             Some(sandbox)
         } else {
             sandbox
         };
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
-        job.control = deck_reads.control;
+        job.control = sandboxed_control;
         job.sandbox = sandbox;
         // What a sandboxed run may read of the user's: the files the deck
         // reads, as the policy resolved them, and the project's PDK. Not the
@@ -1542,7 +1548,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            run.notes.iter().any(|n| n.contains("sandboxed ngspice")),
+            run.notes.iter().any(|n| n.contains("ngspice in a sandbox")),
             "{:?}",
             run.notes
         );
@@ -1550,6 +1556,18 @@ mod tests {
             run.output.log.contains("CONTROL-HIGH"),
             "{}",
             run.output.log
+        );
+        // With the setting on, a deck with no control block aispice can see
+        // runs in the sandbox all the same.
+        let plain = netlist::parse("t\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n");
+        let run = runner
+            .run_netlist(&project, "deck.cir", &plain, &[], Some("ngspice"), &cancel)
+            .await
+            .unwrap();
+        assert!(
+            run.notes.iter().any(|n| n.contains("ngspice in a sandbox")),
+            "{:?}",
+            run.notes
         );
         // A command off the list is refused, the run never starts.
         let refused = netlist::parse("t\nV1 a 0 1\n.op\n.control\nshell id\n.endc\n.end\n");
