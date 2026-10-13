@@ -208,16 +208,14 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
         return Err(format!("the chip's name: {why}"));
     }
     let mut cells: BTreeMap<String, String> = BTreeMap::new();
+    let opts = CheckOptions {
+        pdk: Some(format!("{}@{commit}", pdk.name)),
+        pdk_cells,
+        ..Default::default()
+    };
     for m in &spec.macros {
         let dir = package_dir(&p, &m.package)?;
-        let report = check_package(
-            &dir,
-            &CheckOptions {
-                pdk: Some(format!("{}@{commit}", pdk.name)),
-                ..Default::default()
-            },
-        )
-        .map_err(|e| format!("{}: {e}", m.package))?;
+        let report = check_package(&dir, &opts).map_err(|e| format!("{}: {e}", m.package))?;
         if !report.passed {
             return Err(format!(
                 "{} does not pass the macro package checks, so the chip does not use it:\n{}",
@@ -236,7 +234,7 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
                 m.package
             ));
         }
-        if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
+        if let Some(why) = mx::pdk_name_clash(&name, &opts.pdk_cells) {
             return Err(format!("{}: {why}", m.package));
         }
         if let Some(other) = cells.insert(name.to_ascii_lowercase(), m.package.clone())
