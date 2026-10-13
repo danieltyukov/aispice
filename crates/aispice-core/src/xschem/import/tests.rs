@@ -161,6 +161,60 @@ fn clean_handles_unterminated_blocks_and_globals() {
     assert_eq!(c.text, "** title\nR1 a 0 1k\n");
     assert!(c.findings[0].message.contains("no .endc"));
     assert!(c.notes.iter().any(|n| n.contains(".GLOBAL")));
+    // A global net that is not ground stays global.
+    let c = clean(
+        "** title\nR1 a 0 1k\n.GLOBAL GND\n.GLOBAL VDDX\n.GLOBAL sub! gnd\n",
+        None,
+    );
+    assert_eq!(c.text, "** title\nR1 a 0 1k\n.GLOBAL VDDX\n.GLOBAL sub!\n");
+}
+
+/// A net a subcircuit reaches only by being global, as xschem lists it in
+/// `.GLOBAL` (here through the instance's own `global`), stays connected
+/// after import: the deck keeps its `.GLOBAL` line.
+#[test]
+fn a_global_net_inside_a_subcircuit_stays_connected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    std::fs::write(
+        dir.join("load.sym"),
+        "v {xschem version=3.4.8RC file_version=1.2}\nK {type=subcircuit\nformat=\"@name @pinlist @symname\"\ntemplate=\"name=x1\"}\nB 5 -2.5 -32.5 2.5 -27.5 {name=a dir=inout}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("load.sch"),
+        "v {xschem version=3.4.8RC file_version=1.2}\n\
+         C {devices/iopin.sym} 0 -30 0 0 {name=p1 lab=a}\n\
+         C {devices/res.sym} 0 0 0 0 {name=R1 value=1k}\n\
+         C {devices/lab_pin.sym} 0 30 0 0 {name=l1 lab=VDDX global=true}\n",
+    )
+    .unwrap();
+    let top = "v {xschem version=3.4.8RC file_version=1.2}\n\
+         C {load.sym} 0 0 0 0 {name=x1}\n\
+         C {devices/lab_pin.sym} 0 -30 0 0 {name=p1 lab=out}\n\
+         C {devices/vsource.sym} 100 0 0 0 {name=V1 value=1}\n\
+         C {devices/lab_pin.sym} 100 -30 0 0 {name=p2 lab=VDDX global=true}\n\
+         C {devices/gnd.sym} 100 30 0 0 {name=l2 lab=GND}\n\
+         C {devices/res.sym} 200 0 0 0 {name=R2 value=1k}\n\
+         C {devices/lab_pin.sym} 200 -30 0 0 {name=p3 lab=out}\n\
+         C {devices/gnd.sym} 200 30 0 0 {name=l3 lab=GND}\n";
+    let f = file::parse(top).unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let i = import(
+        &dir.join("top.sch"),
+        &f,
+        &r,
+        &SymbolLibrary::builtin_only(),
+        &ImportOptions::default(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(i.xschem.text.contains(".GLOBAL VDDX"), "{}", i.xschem.text);
+    let deck = crate::netlist::write(&i.asc_netlist);
+    assert!(
+        deck.to_ascii_uppercase().contains(".GLOBAL VDDX"),
+        "the deck lost the global net: {deck}"
+    );
+    assert!(i.proof.equivalent, "{:?}", i.proof);
 }
 
 #[test]
