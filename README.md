@@ -142,28 +142,29 @@ pm   = phase_margin(V(out)) >= 45
 
 ## The full analog and mixed-signal flow
 
-These are the steps aispice runs on an IC block today, on the IHP SG13G2 open PDK, with what each gave in aispice's own tests and examples. The tests that need the PDK run in CI's PDK job against IHP-Open-PDK at `22f2a25`. The digital side, from RTL to a chip with a pad ring, is [ChipLeap](https://github.com/danieltyukov/chipleap); the two hand blocks to each other as [macro packages](docs/macro-package.md).
+These are the steps aispice runs on an IC block today, on the IHP SG13G2 open PDK, with what each gave in aispice's own tests and examples. The tests that need the PDK run in CI's PDK job against IHP-Open-PDK at `22f2a25`. The figures are from those tests on master at `c28a1f8` (13 Oct 2026), except the Xyce and LTspice ones, which come from the runs recorded in [#34](https://github.com/danieltyukov/aispice/pull/34), [#36](https://github.com/danieltyukov/aispice/pull/36) and [#41](https://github.com/danieltyukov/aispice/pull/41) (11 Oct 2026): CI has no Xyce that loads IHP's models, and no LTspice. The digital side, from RTL to a chip with a pad ring, is [ChipLeap](https://github.com/danieltyukov/chipleap); the two hand blocks to each other as [macro packages](docs/macro-package.md).
 
 | Step | Tools | Measured |
 |---|---|---|
-| Schematic | aispice's editor (the desktop app), LTspice `.asc`, xschem import and export | a corpus of 660 LTspice schematics netlisted exactly as LTspice's own `-netlist`; all 49 of IHP's xschem test benches imported, each netlist identical, line for line, to xschem 3.4.4's |
+| Schematic | aispice's editor (the desktop app), LTspice `.asc`, xschem import and export | a corpus of 660 LTspice schematics netlisted exactly as LTspice's own `-netlist`; all 49 of IHP's xschem test benches imported, each netlist identical, line for line, to xschem 3.4.4's, and to 3.4.8's but for a trailing `m=1` |
 | PDK and device models | `aispice pdk add`; IHP's compiled PSP models through OSDI on ngspice, plugins on Xyce | an inverter and a 5T OTA on ngspice and Xyce 7.10: the same switching threshold (0.6183 V), DC gain (25.060 dB) and unity-gain frequency (113.725 MHz) |
 | gm/Id sizing | lookup tables built on ngspice over L, VDS and VGS, cached by PDK commit | an NMOS and a PMOS sized for gm/Id = 12 at L = 0.5 um and 50 uA simulate at 50.0 uA and 12.00, within 0.1 % |
-| IC templates | six blocks, each proven at every corner of its set on ngspice and Xyce | worst case: two-stage op-amp 51.1 dB, 15.2 MHz and 57 degrees over 15 corners; StrongARM decision in 194 ps; bandgap 601.7 mV with 3.8 mV drift; LDO 1.192 to 1.203 V over 45 corners |
+| IC templates | six blocks, each checked at every corner of its set on ngspice, and on Xyce except the bandgap (Xyce has no model for IHP's HBT) | worst case: two-stage op-amp 51.1 dB, 15.2 MHz and 57 degrees over 15 corners; StrongARM decision in 194 ps; bandgap 601.7 mV with 3.8 mV drift; LDO 1.192 to 1.203 V over 45 corners |
 | Simulation | ngspice, Xyce and LTspice; Spectre on a licensed server you configure | every analysis read the same way from each simulator, checked by the same tests |
 | Noise | `.noise` on every simulator, output and input referred | the two-stage op-amp, input referred at tt and 27 C: 425 nV/rtHz at 1 kHz, 29.2 nV/rtHz at 1 MHz |
-| PSRR and CMRR | a second AC run with the stimulus moved to the supply or the common-mode source | a circuit built to reject its supply by 80 dB reads 80.000 dB on ngspice, Xyce and LTspice |
-| Corners | process (tt, ss, ff, sf, fs), temperature and supply sets; the worst corner named per spec | an IHP inverter's threshold at all five process corners, ngspice and Xyce within 0.1 mV |
+| PSRR and CMRR | a second AC run with the stimulus moved to the supply or the common-mode source | a circuit built to reject its supply by 80 dB reads 80 dB on ngspice, Xyce and LTspice |
+| Corners | process (tt, ss, ff, sf, fs), temperature and supply sets; the worst corner named per spec | an IHP inverter's switching threshold: 0.618 V at tt, 0.611 V at ss, 0.622 V at ff, 0.650 V at sf, 0.585 V at fs on ngspice; Xyce within 0.1 mV |
 | Mismatch Monte Carlo | IHP's `_mismatch` and `_stat` library sections, a seed per run | the inverter's threshold over 40 runs: 6.3 mV (1 sigma) from local mismatch, 23.1 mV with global variation, the same for the same seed |
-| Behavioural models and co-simulation | Verilog-A built with OpenVAF, Verilog with Verilator through ngspice's `d_cosim`, both in a sandbox | the StrongARM template, transistor level with IHP's models, drives a co-simulated counter: eight decisions at 500 MHz, count 5 |
-| Spec budgets and trim | ADC front-end and LDO budgets with each equation; every trim code at every corner and sample | the bandgap with a 5-bit trim: mismatch spreads it by 23 mV (1 sigma); 0 of 8 samples within 597 to 603 mV untrimmed, 8 of 8 trimmed |
-| Layout | five generators drawing IHP's own pcells: current mirror, differential pair, 5T OTA, two-stage op-amp with its MIM capacitor, StrongARM comparator | all five DRC and LVS clean; the 5T OTA drawn in 1.3 s |
-| DRC | IHP's KLayout decks: main, extra, antenna, density | the OTA in 4.1 s; a Metal1 sliver reported as `M1.b` at its place |
-| LVS | IHP's KLayout LVS deck against a CDL written from the circuit | the OTA in 3.0 s; one gate contact removed fails LVS on `INM` |
-| Extraction | Magic with IHP's tech file: coupling capacitance, resistor networks on request | the OTA in 0.2 s |
+| Behavioural models and co-simulation | Verilog-A built with OpenVAF, Verilog with Verilator through ngspice's `d_cosim`, both in a sandbox | the StrongARM template, transistor level with IHP's models, drives a co-simulated counter: eight decisions at 500 MHz with the input 0.5 mV above or below the reference, count 5 |
+| Spec budgets | ADC front-end and LDO budgets, each spec with its equation, saved as the block's spec file | a 10-bit, 50 MS/s ADC front end at ENOB 9.5: 207.9 fF sampling capacitors and an OTA of 404.5 MHz, 72.25 dB and 11.2 nV/rtHz |
+| Trim | every trim code at every corner and mismatch sample, the codes each sample needs | the bandgap with a 5-bit trim at tt and ff, four local mismatch samples each: at the middle code, 0 of 8 samples within 597 to 603 mV; every sample has a code that brings it in, codes 7 to 23 |
+| Layout | five generators drawing IHP's own pcells: current mirror, differential pair, 5T OTA, two-stage op-amp with its MIM capacitor, StrongARM comparator | all five DRC and LVS clean; the 5T OTA drawn in 1.1 s |
+| DRC | IHP's KLayout decks: main, extra, antenna, density | the OTA in 2.5 s; a Metal1 sliver reported as `M1.b` at its place |
+| LVS | IHP's KLayout LVS deck against a CDL written from the circuit | the OTA in 2.5 s; one gate contact removed fails LVS on `INM` |
+| Extraction | Magic with IHP's tech file: coupling capacitance, resistor networks on request | the OTA in 0.1 s |
 | Post-layout specs | every spec before and after layout, at every corner | the 5T OTA into 150 fF: GBW 113.7 to 105.2 MHz, phase margin 84.5 to 82.5 degrees; the worst GBW over six corners 78.3 to 72.8 MHz |
 | Macro export | a `macro/v1` package from a generated block, checked as a chip would check it | the OTA and the StrongARM pass aispice's and ChipLeap's validators with no findings; the StrongARM in ChipLeap's UART chip is 20.93 x 45 um, 90.2 fF extracted |
-| Analog-on-top chip | IHP's pad ring, bond pads, seal ring, a router on Metal3 and Metal4, fill, full-chip DRC and LVS | the OTA, the StrongARM and a counter hardened by ChipLeap in 16 pads on 1.04 x 1.04 mm: DRC clean on all four decks, LVS clean down to the counter's standard cells; about 65 s to draw and fill, 125 s to check |
+| Analog-on-top chip | IHP's pad ring, bond pads, seal ring, a router on Metal3 and Metal4, fill, full-chip DRC and LVS | the OTA, the StrongARM and a two-bit counter hardened with LibreLane in 16 pads on 1.04 x 1.04 mm: DRC clean on all four decks, LVS clean down to the counter's standard cells; 59 s to draw and fill, 114 s to check |
 
 ## IC design on a PDK
 
