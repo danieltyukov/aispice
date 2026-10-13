@@ -35,6 +35,8 @@ same-file = "1"
 [dev-dependencies]
 aispice-agent = { workspace = true, features = ["testing"] }
 aispice-core = { workspace = true, features = ["testing"] }
+# The test-only Landlock ABI override, for mixed_signal_landlock4.
+aispice-sim = { workspace = true, features = ["testing"] }
 similar.workspace = true
 
 [lints]

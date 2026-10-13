@@ -133,8 +133,66 @@ const FOREIGN: &[&str] = &[
     "osdi",
 ];
 
+/// How a deck that ngspice reads as a control script starts.
+const SCRIPT_MARK: &str = "*ng_script";
+
+/// The first words a control line may start with, when the user's setting
+/// allows control blocks: running and measuring analyses, vectors and
+/// plain variables, printing, structured loops and conditions, and writing
+/// results to a bare file name in the run folder. Anything else is
+/// refused, so the list decides what a control block can do rather than a
+/// list of what it may not.
+const CONTROL_ALLOWED: &[&str] = &[
+    "op", "dc", "ac", "tran", "noise", "pz", "sens", "run", "meas", "measure", "let", "print",
+    "echo", "set", "unset", "if", "else", "while", "repeat", "foreach", "end", "wrdata", "write",
+    "quit", "exit",
+];
+
+/// The only variables a control line may `set` or `unset`: how numbers and
+/// vectors are printed and written. A variable can change what an allowed
+/// command does (where `write` puts its file, which program or folder
+/// ngspice uses, how it reads the deck), so the list names the harmless
+/// ones and every other is refused.
+const CONTROL_SET_VARS: &[&str] = &[
+    "numdgt",
+    "units",
+    "wr_singlescale",
+    "wr_vecnames",
+    "appendwrite",
+    "width",
+    "height",
+];
+
+/// Commands whose arguments may substitute a variable with `$`: they only
+/// print or compute. Anywhere else (the command word, a file name, a
+/// variable's value, an analysis) a `$` could build what the allowlist
+/// would refuse, so it is refused.
+const CONTROL_DOLLAR_OK: &[&str] = &["echo", "print", "let", "if", "while", "foreach", "repeat"];
+
+/// Commands whose arguments may hold quotes: they only print.
+const CONTROL_QUOTES_OK: &[&str] = &["echo", "print"];
+
+/// `meas` keys that would name a file. ngspice's measurements write none
+/// that aispice knows of; these are refused should a version add one.
+const MEAS_FILE_KEYS: &[&str] = &["out", "outfile", "file", "filename", "path", "rawfile"];
+
+/// A line that starts with this is read by ngspice as a control command in
+/// some modes (through `source`, interactively), so the policy treats it as
+/// one.
+const CONTROL_COMMENT: &str = "*#";
+
 /// File types that hold compiled code a simulator would load and run.
 const COMPILED: &[&str] = &["osdi", "so", "dll", "dylib", "cm"];
+
+/// XSPICE code models a deck may not use: `d_cosim` loads the shared library
+/// its `simulation` parameter names, and `d_process` starts the program its
+/// `process_file` names. aispice adds its own `d_cosim` models, for libraries
+/// it built, after this check.
+const CODE_RUNNING_MODELS: &[&str] = &["d_cosim", "d_process"];
+
+/// The parameters through which those models name the code they load or
+/// run.
+const CODE_RUNNING_PARAMS: &[&str] = &["simulation", "process_file"];
 
 /// Included files larger than this are refused rather than read.
 const MAX_INCLUDE_BYTES: u64 = 16 * 1024 * 1024;
@@ -149,12 +207,51 @@ const MAX_INCLUDE_TOTAL: u64 = 256 * 1024 * 1024;
 
 /// Check netlist text. An empty result means the deck may run.
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
+    check_reads(text, policy).0
+}
+
+/// What a simulator running a deck reads, from [`check_reads`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeckReads {
+    /// Every file the deck includes, followed into the files those include,
+    /// and every existing file a value on a line names (`file=...`), with
+    /// symbolic links resolved, sorted.
+    pub files: Vec<PathBuf>,
+    /// The includes that reach their file through a symbolic link.
+    pub linked: Vec<LinkedInclude>,
+    /// Whether the deck or a file it includes has control commands (a
+    /// `.control` block or a `*#` line); with control blocks allowed, such
+    /// a run is sandboxed.
+    pub control: bool,
+}
+
+/// An include whose path, as written, goes through a symbolic link: the
+/// simulator opens `path` and the file it reads is `file`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedInclude {
+    /// The path as the include line writes it.
+    pub include: String,
+    /// That path made absolute, without resolving links.
+    pub path: PathBuf,
+    /// The file it resolves to.
+    pub file: PathBuf,
+}
+
+/// [`check`], and what a simulator running the deck reads ([`DeckReads`]),
+/// with includes followed as [`check`] follows them. With no violations,
+/// `files` are all the files of the project and the model folders the deck
+/// can make a simulator open; a sandbox grants reading them and nothing
+/// else there.
+pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, DeckReads) {
     let mut out = Vec::new();
     let mut seen = Vec::new();
     let cx = Cx {
         policy,
         trusted: canonical_dirs(&policy.trusted_dirs),
         read: std::cell::Cell::new(0),
+        named: std::cell::RefCell::new(Vec::new()),
+        linked: std::cell::RefCell::new(Vec::new()),
+        control: std::cell::Cell::new(false),
     };
     check_inner(
         &cx,
@@ -172,7 +269,20 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
             unique.push(v);
         }
     }
-    unique
+    let mut files = seen;
+    files.extend(cx.named.into_inner());
+    files.sort();
+    files.dedup();
+    let control = cx.control.get();
+    let linked = cx.linked.into_inner();
+    (
+        unique,
+        DeckReads {
+            files,
+            linked,
+            control,
+        },
+    )
 }
 
 struct Cx<'a> {
@@ -181,6 +291,37 @@ struct Cx<'a> {
     trusted: Vec<PathBuf>,
     /// Bytes of included files read so far.
     read: std::cell::Cell<u64>,
+    /// Existing files that values on checked lines name.
+    named: std::cell::RefCell<Vec<PathBuf>>,
+    /// Includes reached through a symbolic link.
+    linked: std::cell::RefCell<Vec<LinkedInclude>>,
+    /// Whether a control command was seen.
+    control: std::cell::Cell<bool>,
+}
+
+impl Cx<'_> {
+    /// Note an include of `file`, written `include` in a file in `base`,
+    /// when the path as written goes through a symbolic link.
+    fn note_link(&self, include: &str, base: &Path, file: &Path) {
+        let written = Path::new(include.trim());
+        let path: PathBuf = if written.is_absolute() {
+            written.components().collect()
+        } else {
+            std::fs::canonicalize(base)
+                .unwrap_or_else(|_| base.to_path_buf())
+                .join(written)
+                .components()
+                .collect()
+        };
+        let mut linked = self.linked.borrow_mut();
+        if path != file && !linked.iter().any(|l| l.path == path) {
+            linked.push(LinkedInclude {
+                include: include.trim().to_string(),
+                path,
+                file: file.to_path_buf(),
+            });
+        }
+    }
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -364,28 +505,97 @@ fn check_lines(
     let mut in_control = false;
     for (i, logical) in lines.iter().enumerate() {
         let line = &logical.text;
+        // What a line starts with, as ngspice reads it: leading blanks are
+        // already gone, and a byte-order mark (or a stray U+FEFF) is passed
+        // over too, so it cannot hide a `.control` or a `*#` from the checks.
+        let text = line.trim_start_matches('\u{feff}').trim_start();
+        // A deck whose title is `*ng_script` is read by ngspice as a script
+        // of control commands, not a netlist. Refused on any line, comment
+        // or not, in a deck or a file it includes.
+        if text.to_ascii_lowercase().starts_with(SCRIPT_MARK) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: "`*ng_script` makes ngspice read the deck as a script of control commands, which can load code and write files; it is not allowed".into(),
+            });
+            continue;
+        }
+        // A `*#` line is a control command to ngspice in some modes, so it
+        // is one here too, wherever it is (not on the title line, which is
+        // never one): refused unless the user allows control blocks, and
+        // then held to the same allowlist.
+        if !(i == 0 && has_title)
+            && let Some(rest) = star_hash_command(text)
+        {
+            cx.control.set(true);
+            let command = rest.trim().to_ascii_lowercase();
+            let reason = if !policy.allow_control_blocks {
+                Some("a `*#` line is a control command to ngspice, and control commands are off unless enabled in settings".to_string())
+            } else {
+                control_line(&command)
+            };
+            if let Some(reason) = reason {
+                out.push(Violation {
+                    line: line.clone(),
+                    reason,
+                });
+            }
+            continue;
+        }
         // ngspice acts on a title that starts with a dot (it includes the
         // file a `.include` title names), so such a title is checked like
         // any other line. Xyce never reads the title.
         let title_skipped =
-            i == 0 && has_title && (reading == Reading::Xyce || !line.starts_with('.'));
+            i == 0 && has_title && (reading == Reading::Xyce || !text.starts_with('.'));
         if logical.comment || title_skipped {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
+        let lower = text.to_ascii_lowercase();
         let first = lower.split_whitespace().next().unwrap_or("");
-        if first == ".control" {
+        // ngspice opens and closes a control block on any line that starts
+        // with `.control` or `.endc`, whatever follows and in any case, so
+        // the policy does too.
+        if lower.starts_with(".control") {
             in_control = true;
+            cx.control.set(true);
             if !policy.allow_control_blocks {
-                out.push(Violation { line: line.clone(), reason: "`.control` blocks can run shell commands and write files; they are off unless enabled in settings".into() });
+                out.push(Violation { line: line.clone(), reason: "`.control` blocks run commands and write files; they are off unless enabled in settings".into() });
             }
             continue;
         }
-        if first == ".endc" {
+        if lower.starts_with(".endc") {
             in_control = false;
+            cx.control.set(true);
+            if !policy.allow_control_blocks {
+                out.push(Violation { line: line.clone(), reason: "`.endc` belongs to a `.control` block, and control blocks are off unless enabled in settings".into() });
+            }
             continue;
         }
+        // Control blocks are allowed only by the user's setting, and then
+        // only the commands on the allowlist; the run itself is sandboxed.
         if in_control {
+            // aispice joins `+` lines as ngspice joins netlist lines; inside
+            // a control block it does not model the joining, so a joined
+            // line is refused rather than read differently.
+            let reason = if logical.continued {
+                Some("a `+` continuation inside a control block; write each control command on one line".to_string())
+            } else {
+                control_line(&lower)
+            };
+            if let Some(reason) = reason {
+                out.push(Violation {
+                    line: line.clone(),
+                    reason,
+                });
+            }
+            continue;
+        }
+        // On any line, not only `.model` cards: the words are read as
+        // ngspice reads them, so no spelling hides one from this check.
+        if let Some(why) = code_running_model(&lower) {
+            out.push(Violation {
+                line: line.clone(),
+                reason: why,
+            });
             continue;
         }
         // `simulator lang=spice` keeps a Spectre deck in SPICE syntax, where
@@ -421,7 +631,7 @@ fn check_lines(
             }
             Some(Ok(include)) => include,
             None => {
-                check_values(line, &lower, base, policy, trusted, out);
+                check_values(cx, line, &lower, base, trusted, out);
                 continue;
             }
         };
@@ -435,7 +645,11 @@ fn check_lines(
             });
             continue;
         }
-        match resolve(arg, base, policy) {
+        let resolved = resolve(arg, base, policy);
+        if let Ok(Some(file)) = &resolved {
+            cx.note_link(arg, base, file);
+        }
+        match resolved {
             Err(reason) => out.push(Violation {
                 line: line.clone(),
                 reason,
@@ -514,17 +728,204 @@ fn check_lines(
     }
 }
 
+/// The type of a `.model` card, when it is one of [`CODE_RUNNING_MODELS`]:
+/// `.model x d_cosim(...)`, `.model x d_cosim (...)` or `.model x d_cosim`.
+fn code_running_model(lower: &str) -> Option<String> {
+    let words = ngspice_words(lower);
+    if let Some(kind) = words
+        .iter()
+        .map(|(w, _)| *w)
+        .find(|w| CODE_RUNNING_MODELS.contains(w))
+    {
+        return Some(format!(
+            "`{kind}` {} native code a deck cannot choose; declare Verilog to co-simulate under [[cosim]] in aispice.toml and aispice builds and loads it",
+            if kind == "d_process" {
+                "starts a program, which is"
+            } else {
+                "loads a shared library, which is"
+            }
+        ));
+    }
+    words
+        .iter()
+        .find(|(w, assigned)| *assigned && CODE_RUNNING_PARAMS.contains(w))
+        .map(|(w, _)| {
+            format!(
+                "`{w}=` names native code for an XSPICE model to load or run; a deck cannot set it"
+            )
+        })
+}
+
+/// The command of a `*#` line, or `None` when the line is a plain comment.
+/// A `*#` line is a control command to ngspice in some modes; one whose
+/// text after `*#` is empty or starts with a decorative character (a banner
+/// such as IHP's `*####...`) names no command, and stays a comment. Any
+/// other start, a letter, a `$`, a backquote or anything else, could begin
+/// a command, so the line is a control line.
+fn star_hash_command(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix(CONTROL_COMMENT)?;
+    // Only a banner of `#` (IHP frames its model files with `*####...`) or
+    // nothing at all is a comment; any other text after `*#` is read as a
+    // control command.
+    if rest.chars().all(|c| c == '#' || c.is_whitespace()) {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+/// Why a control line (inside an allowed control block, or a `*#` line) is
+/// refused, or `None` when it is on the allowlist. The line is classified by
+/// its first word against [`CONTROL_ALLOWED`]; a word the list does not
+/// have is refused, so a command the policy does not know (or one built at
+/// run time from a variable) cannot run. Command substitution, redirection
+/// and command separators are refused on every line, a `set` names a plain
+/// variable, and `wrdata` and `write` write only to a bare file name, so
+/// their output lands in the run folder.
+fn control_line(lower: &str) -> Option<String> {
+    let refused = |why: String| {
+        Some(format!(
+            "{why}; control blocks allow only analyses, measurements, vectors and plain variables, printing, loops and conditions, and wrdata/write to a bare file name"
+        ))
+    };
+    // Characters whose meaning in ngspice's control language aispice does
+    // not model (command substitution, redirection, a second command, an
+    // escape or line continuation, a comment inside the line): a line with
+    // any of them is refused rather than read differently from ngspice.
+    if lower.contains('`') {
+        return refused("a backquote runs a command and substitutes its output".into());
+    }
+    if lower.contains(['>', '<']) {
+        return refused(
+            "`>` and `<` redirect a command's input or output to a file; compare with gt, lt, ge and le".into(),
+        );
+    }
+    if lower.contains(';') {
+        return refused("`;` would put another command on the line".into());
+    }
+    if lower.contains('\\') {
+        return refused("a backslash escapes a character or continues the line".into());
+    }
+    if lower.contains('#') {
+        return refused("`#` starts a comment inside a control line".into());
+    }
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let &command = words.first()?;
+    if !CONTROL_ALLOWED.contains(&command) {
+        return refused(format!(
+            "`{command}` is not on aispice's list of control commands"
+        ));
+    }
+    if lower.contains('$') && !CONTROL_DOLLAR_OK.contains(&command) {
+        return refused(format!(
+            "`$` substitutes a variable, which `{command}` may not do (only echo, print, let and loop conditions may)"
+        ));
+    }
+    if lower.contains(['"', '\'']) && !CONTROL_QUOTES_OK.contains(&command) {
+        return refused(format!(
+            "quotes group words in ways `{command}` may not use (only echo and print may)"
+        ));
+    }
+    match command {
+        "set" | "unset" => {
+            // `set a = 1`, `set a=1`, `set a`, `unset a b`: the names are
+            // the words before an `=` (or each word for `unset`), and a
+            // value is a plain number or word.
+            let rest = lower[command.len()..].trim();
+            let (names, value): (Vec<&str>, Option<&str>) = if command == "set" {
+                let mut parts = rest.splitn(2, '=');
+                let names = parts
+                    .next()
+                    .map(|n| n.split_whitespace().collect())
+                    .unwrap_or_default();
+                (names, parts.next().map(str::trim))
+            } else {
+                (rest.split_whitespace().collect(), None)
+            };
+            if names.is_empty() {
+                return refused(format!("`{command}` names no variable"));
+            }
+            for name in names {
+                if !CONTROL_SET_VARS.contains(&name) {
+                    return refused(format!(
+                        "`{name}` is not one of the variables a control block may set ({})",
+                        CONTROL_SET_VARS.join(", ")
+                    ));
+                }
+            }
+            if let Some(v) = value
+                && !v
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+            {
+                return refused(format!("`{v}` is not a plain value"));
+            }
+        }
+        "wrdata" | "write" => {
+            if let Some(file) = words.get(1) {
+                let bare = !file.is_empty()
+                    && *file != "."
+                    && *file != ".."
+                    && file
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+                if !bare {
+                    return refused(format!(
+                        "`{command}` may write only to a bare file name in the run folder, not `{file}`"
+                    ));
+                }
+            }
+        }
+        "meas" | "measure" => {
+            for w in &words[1..] {
+                if let Some((key, _)) = w.split_once('=')
+                    && MEAS_FILE_KEYS.contains(&key)
+                {
+                    return refused(format!("`{key}=` would name a file for `{command}`"));
+                }
+            }
+        }
+        _ => {}
+    }
+    code_running_model(lower)
+}
+
+/// The words of a line as ngspice's parser reads a card (`INPgetTok`):
+/// whitespace and each of `=`, `(`, `)` and `,` end a word and are never
+/// part of one, and a run of them is skipped, the first word included. So
+/// `.model x d_cosim,simulation=...` and `.model x (d_cosim ...)` both have
+/// the type `d_cosim`. Each word comes with whether `=` follows it.
+fn ngspice_words(lower: &str) -> Vec<(&str, bool)> {
+    let sep = |c: char| c.is_whitespace() || matches!(c, '=' | '(' | ')' | ',');
+    let mut out = Vec::new();
+    let mut rest = lower;
+    loop {
+        rest = rest.trim_start_matches(sep);
+        if rest.is_empty() {
+            return out;
+        }
+        let end = rest.find(sep).unwrap_or(rest.len());
+        let (word, after) = rest.split_at(end);
+        let assigned = after
+            .trim_start_matches(char::is_whitespace)
+            .starts_with('=');
+        out.push((word, assigned));
+        rest = after;
+    }
+}
+
 /// The checks on every line that is not an include: no `cmd=`, and every
 /// value that names a file (`file=...`, `wavefile=...`, anything with a path
 /// separator) inside the allowed folders.
 fn check_values(
+    cx: &Cx,
     line: &str,
     lower: &str,
     base: &Path,
-    policy: &Policy,
     trusted: bool,
     out: &mut Vec<Violation>,
 ) {
+    let policy = cx.policy;
     if lower
         .split(|c: char| c.is_whitespace() || c == ',')
         .any(|t| t.starts_with("cmd=") || t == "cmd")
@@ -535,11 +936,13 @@ fn check_values(
         });
     }
     for value in path_like_values(line, trusted) {
-        if let Err(reason) = resolve(&value, base, policy) {
-            out.push(Violation {
+        match resolve(&value, base, policy) {
+            Err(reason) => out.push(Violation {
                 line: line.to_string(),
                 reason,
-            });
+            }),
+            Ok(Some(file)) if file.is_file() => cx.named.borrow_mut().push(file),
+            Ok(_) => {}
         }
     }
 }
@@ -784,6 +1187,7 @@ const FILE_KEYS: &[&str] = &[
     "rawfile",
     "input_file",
     "output_file",
+    "state_file",
     "filename",
     "path",
     "lib",
@@ -1260,8 +1664,77 @@ mod tests {
         .unwrap();
         assert!(check("t\n.include good.lib\n", &policy_at(&d)).is_empty());
         let v = check("t\n.include bad.lib\n", &policy_at(&d));
-        assert_eq!(v.len(), 1, "{v:?}");
-        assert!(v[0].reason.contains("bad.lib"));
+        // The `.control` block and the `shell` inside it are both refused.
+        assert!(
+            !v.is_empty() && v.iter().all(|v| v.reason.contains("bad.lib")),
+            "{v:?}"
+        );
+    }
+
+    /// The files a simulator reads for a deck: its includes, followed into
+    /// the files they include, and the files values name; no folder, and
+    /// nothing else of the project.
+    #[test]
+    fn the_files_a_deck_reads_are_its_includes_and_the_files_it_names() {
+        let d = temp("reads");
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join(".aispice")).unwrap();
+        std::fs::write(d.join(".aispice/state.json"), "{}").unwrap();
+        std::fs::write(d.join("models/top.lib"), "* top\n.include sub/inner.lib\n").unwrap();
+        std::fs::write(
+            d.join("models/sub/inner.lib"),
+            "* inner\n.model D1 D(Is=1n)\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("stim.txt"), "0 0\n1u 1\n").unwrap();
+        let deck = "t\n.include models/top.lib\nV1 a 0 PWL file=stim.txt\nD1 a 0 D1\n";
+        let (v, reads) = check_reads(deck, &policy_at(&d));
+        assert!(v.is_empty(), "{v:?}");
+        assert!(reads.linked.is_empty(), "{:?}", reads.linked);
+        let files = reads.files;
+        let real = |p: &str| d.join(p).canonicalize().unwrap();
+        let mut want = vec![
+            real("models/top.lib"),
+            real("models/sub/inner.lib"),
+            real("stim.txt"),
+        ];
+        want.sort();
+        assert_eq!(files, want);
+        assert_eq!(check(deck, &policy_at(&d)), v);
+    }
+
+    /// An include whose path goes through a link inside the project is
+    /// allowed and reported with the path as written and the file it
+    /// reaches; the deck's own includes, rewritten to the resolved file, are
+    /// not.
+    #[cfg(unix)]
+    #[test]
+    fn includes_through_a_link_are_reported() {
+        let d = temp("linked").canonicalize().unwrap();
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join("shared")).unwrap();
+        std::fs::write(d.join("shared/vref.inc"), "V2 b 0 2\n").unwrap();
+        let link = d.join("models/sub/link.inc");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("../../shared/vref.inc", &link).unwrap();
+        std::fs::write(d.join("models/bias.inc"), "* bias\n.include sub/link.inc\n").unwrap();
+        let policy = policy_at(&d);
+        let deck = canonical_includes("t\n.include models/bias.inc\n", &policy);
+        let (v, reads) = check_reads(&deck, &policy);
+        assert!(v.is_empty(), "{v:?}");
+        assert_eq!(
+            reads.linked,
+            vec![LinkedInclude {
+                include: "sub/link.inc".into(),
+                path: link.clone(),
+                file: d.join("shared/vref.inc"),
+            }]
+        );
+        assert!(reads.files.contains(&d.join("shared/vref.inc")));
+        assert!(!reads.files.contains(&link));
+        // A deck naming the link itself is rewritten to the file.
+        let deck = canonical_includes("t\n.include models/sub/link.inc\n", &policy);
+        assert!(check_reads(&deck, &policy).1.linked.is_empty(), "{deck}");
     }
 
     #[cfg(unix)]
@@ -1560,6 +2033,322 @@ mod tests {
             format!("t\n.control\npre_osdi {}\n.endc\n", osdi.display()),
         ] {
             assert!(!check(&deck, &policy).is_empty(), "{deck}");
+        }
+    }
+
+    #[test]
+    fn words_are_read_as_ngspice_reads_them() {
+        assert_eq!(
+            ngspice_words(".model,cnt (d_cosim  simulation = \"a.so\",x)"),
+            [
+                (".model", false),
+                ("cnt", false),
+                ("d_cosim", false),
+                ("simulation", true),
+                ("\"a.so\"", false),
+                ("x", false)
+            ]
+        );
+        assert!(ngspice_words(" ,=() ").is_empty());
+    }
+
+    /// A deck ngspice would read as a control script (`*ng_script` title)
+    /// is refused, on any line and in an included file, so it never runs as
+    /// a script instead of a netlist.
+    #[test]
+    fn ng_script_decks_are_refused() {
+        let d = temp("ngscript");
+        std::fs::write(d.join("script.lib"), "* x\n*ng_script\nosdi x.osdi\n").unwrap();
+        let policy = policy_at(&d);
+        for deck in [
+            "*ng_script\necho hi\n".to_string(),
+            "*NG_SCRIPT\nosdi x.osdi\n".to_string(),
+            "  *ng_script\nshell id\n".to_string(),
+            "t\n.include script.lib\n".to_string(),
+        ] {
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("ng_script")
+                    || v.reason.contains("confidential")
+                    || v.reason.contains("native")),
+                "{deck}: {v:?}"
+            );
+            assert!(!v.is_empty(), "{deck}");
+        }
+    }
+
+    /// With control blocks enabled, a control line runs only when its
+    /// first word is on the allowlist: anything else is refused, and so is
+    /// command substitution, redirection, a second command on the line, a
+    /// variable that is not plain or that ngspice reads files through, and
+    /// `wrdata`/`write` to anything but a bare file name.
+    #[test]
+    fn a_control_block_runs_only_the_allowlist() {
+        let d = temp("control-allowlist");
+        let mut policy = policy_at(&d);
+        policy.allow_control_blocks = true;
+        for line in [
+            // Not on the list.
+            "osdi /tmp/x.osdi",
+            "pre_osdi /tmp/x.osdi",
+            "codemodel /tmp/x.cm",
+            "source x.cir",
+            "SOURCE x.cir",
+            "shell id",
+            "shell",
+            "alias r run",
+            "define f(x) x",
+            "edit",
+            "hardcopy x.ps v(a)",
+            "load x.raw",
+            "cd /tmp",
+            "circbyline R9 a 0 1",
+            "altermod m simulation=x.so",
+            "$c x",
+            "frobnicate",
+            ".model q d_cosim simulation=\"x.so\"",
+            // On the list, but not as written.
+            "echo `id`",
+            "set x = `id`",
+            "print v(a) > out.txt",
+            "echo hi >> out.txt",
+            "wrdata < in.txt",
+            "run ; echo x",
+            "set sourcepath = /tmp",
+            "set editor = vi",
+            "set 9x = 1",
+            "set a-b = 1",
+            // Only the print and write format variables may be set, to a
+            // plain value.
+            "set rawfile = x.raw",
+            "set filetype = ascii",
+            "set ngbehavior = ps",
+            "set askquit",
+            "set noaskquit",
+            "set",
+            "unset rawfile",
+            "set numdgt = $x",
+            "set numdgt = /tmp",
+            // `$` only where it prints or computes.
+            "wrdata $f v(a)",
+            "tran $step 1u",
+            "meas tran x max $v",
+            "unset $x",
+            // Quotes only where they print.
+            "write \"out.raw\" v(a)",
+            "let x = 'a'",
+            // Escapes and in-line comments.
+            "echo a \\",
+            "echo \\shell",
+            "let x = 1 # note",
+            // A measurement that would name a file.
+            "meas tran x max v(a) out=x.txt",
+            "measure tran x max v(a) file=x.txt",
+            "unset $x",
+            "wrdata /tmp/out.txt v(a)",
+            "wrdata ../out.txt v(a)",
+            "write ~/out.raw v(a)",
+            "write $f v(a)",
+            "write sub/out.raw v(a)",
+            "wrdata .. v(a)",
+        ] {
+            let deck = format!("t\n.control\n{line}\n.endc\n.end\n");
+            let v = check(&deck, &policy);
+            assert!(!v.is_empty(), "{line}: was allowed");
+            assert!(
+                v.iter()
+                    .any(|v| v.reason.contains("control blocks allow only")),
+                "{line}: {v:?}"
+            );
+        }
+        // A measurement script on the list runs.
+        let script = "t\nV1 a 0 PULSE(0 1 0 1n 1n 5u 10u)\nR1 a 0 1k\n.tran 10n 20u\n.control\nrun\nmeas tran vmax max v(a)\nmeasure tran vmin min v(a)\nlet x = vmax - vmin\nif x gt 0.5\necho high\nelse\necho low\nend\nforeach t 1 2\necho $t\nend\nrepeat 2\necho r\nend\nwhile x lt 0\nlet x = x + 1\nend\nset numdgt = 6\nset wr_singlescale\nset wr_vecnames\nunset wr_singlescale\necho \"vmax is $vmax\"\nprint v(a)\nwrdata out.txt v(a)\nwrite out.raw v(a)\nop\nquit\n.endc\n.end\n";
+        let v = check(script, &policy);
+        assert!(v.is_empty(), "{v:?}");
+        // With control blocks off, the block is refused as a whole.
+        assert!(!check(script, &policy_at(&d)).is_empty());
+        // A `+` continuation inside a control block is refused, since
+        // aispice does not model how ngspice joins control lines.
+        let joined = "t\n.control\necho a\n+ b\n.endc\n.end\n";
+        assert!(
+            check(joined, &policy)
+                .iter()
+                .any(|v| v.reason.contains("continuation inside a control block")),
+            "{joined}"
+        );
+    }
+
+    /// ngspice opens a control block on any line that starts with
+    /// `.control` (and closes one on `.endc`), in any case, after blanks or
+    /// a byte-order mark, with anything after it, in the deck or in any file
+    /// it includes or a `.lib` section of one, before or after `.end`, with
+    /// LF or CRLF. With control blocks off every such line is refused; with
+    /// them on the deck counts as having control commands and the lines in
+    /// the block are held to the allowlist.
+    #[test]
+    fn every_spelling_of_a_control_block_is_seen() {
+        let d = temp("control-spellings");
+        std::fs::write(d.join("inc.lib"), "* lib\n.control\nshell id\n.endc\n").unwrap();
+        std::fs::write(
+            d.join("sec.lib"),
+            "* lib\n.lib sec\n.control\nshell id\n.endc\n.endl\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("bom.lib"), "\u{feff}.control\nshell id\n.endc\n").unwrap();
+        let off = policy_at(&d);
+        let mut on = policy_at(&d);
+        on.allow_control_blocks = true;
+        for deck in [
+            "t\nV1 a 0 1\n.CONTROL\nshell id\n.ENDC\n.end\n",
+            "t\nV1 a 0 1\n   .control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n\t.control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.control foo\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.controlx\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.end\n.control\nshell id\n.endc\n",
+            "t\r\nV1 a 0 1\r\n.control\r\nshell id\r\n.endc\r\n.end\r\n",
+            "\u{feff}t\nV1 a 0 1\n\u{feff}.control\nshell id\n.endc\n.end\n",
+            "t\nV1 a 0 1\n.include inc.lib\n.end\n",
+            "t\nV1 a 0 1\n.lib sec.lib sec\n.end\n",
+            "t\nV1 a 0 1\n.include bom.lib\n.end\n",
+        ] {
+            assert!(!check(deck, &off).is_empty(), "off: {deck:?}");
+            let (v, reads) = check_reads(deck, &on);
+            assert!(reads.control, "on, not seen: {deck:?}");
+            assert!(
+                v.iter()
+                    .any(|v| v.reason.contains("control blocks allow only")),
+                "on, shell allowed: {deck:?}: {v:?}"
+            );
+        }
+        // A lone `.endc` is refused with control blocks off.
+        let lone = "t\nV1 a 0 1\n.endc\n.end\n";
+        assert!(!check(lone, &off).is_empty());
+        assert!(check(lone, &on).is_empty());
+    }
+
+    /// A `*#` line is a control command to ngspice in some modes, so it is
+    /// refused unless control blocks are on, and then held to the same
+    /// allowlist, in the deck and in an included file. A `*#` title is
+    /// only a title.
+    #[test]
+    fn a_star_hash_line_is_a_control_line() {
+        let d = temp("star-hash");
+        std::fs::write(d.join("inc.lib"), "* lib\n*# shell id\nR1 a 0 1k\n").unwrap();
+        let off = policy_at(&d);
+        let mut on = policy_at(&d);
+        on.allow_control_blocks = true;
+        for deck in [
+            "t\nV1 a 0 1\n*# echo hi\n.op\n.end\n",
+            "t\nV1 a 0 1\n  *#echo hi\n.op\n.end\n",
+        ] {
+            let v = check(deck, &off);
+            assert!(v.iter().any(|v| v.reason.contains("`*#`")), "{deck}: {v:?}");
+            assert!(check(deck, &on).is_empty(), "{deck}");
+        }
+        for line in [
+            "*# shell id",
+            "*# source x.cir",
+            "*# echo `id`",
+            "*#osdi x.osdi",
+        ] {
+            let deck = format!("t\nV1 a 0 1\n{line}\n.op\n.end\n");
+            assert!(
+                check(&deck, &on)
+                    .iter()
+                    .any(|v| v.reason.contains("control blocks allow only")),
+                "{line}"
+            );
+        }
+        // In an included file too, with control blocks on or off.
+        assert!(!check("t\n.include inc.lib\n.op\n.end\n", &off).is_empty());
+        assert!(!check("t\n.include inc.lib\n.op\n.end\n", &on).is_empty());
+        // The title is a title.
+        assert!(check("*# a title\nV1 a 0 1\n.op\n.end\n", &off).is_empty());
+        // Only a banner of `#` (IHP's model files are framed with
+        // `*####...`) or nothing stays a comment; any other text after `*#`
+        // is a control line.
+        for banner in ["*#######", "*#", "*# ##  #"] {
+            let deck = format!("t\nV1 a 0 1\n{banner}\n.op\n.end\n");
+            assert!(check(&deck, &off).is_empty(), "{banner}");
+            assert!(!check_reads(&deck, &off).1.control, "{banner}");
+        }
+        for command in [
+            "*#$c x", "*#`id`", "*#!!", "*#9", "*#(x)", "*# ----", "*#=====", "*# ~~~", "*#**",
+            "*#|x", "*#=x", "*#-x", "*#+x", "*#/x",
+        ] {
+            let deck = format!("t\nV1 a 0 1\n{command}\n.op\n.end\n");
+            assert!(!check(&deck, &off).is_empty(), "{command}");
+        }
+        // The run is marked as having control commands.
+        assert!(
+            check_reads("t\nV1 a 0 1\n*# echo hi\n.end\n", &on)
+                .1
+                .control
+        );
+        assert!(
+            check_reads("t\n.control\nrun\n.endc\n.end\n", &on)
+                .1
+                .control
+        );
+        assert!(
+            !check_reads("t\nV1 a 0 1\n* a comment\n.end\n", &on)
+                .1
+                .control
+        );
+    }
+
+    #[test]
+    fn decks_cannot_choose_code_for_xspice_to_load_or_run() {
+        let d = temp("cosim");
+        std::fs::write(d.join("counter.so"), b"").unwrap();
+        std::fs::write(d.join("prog"), b"").unwrap();
+        let policy = policy_at(&d);
+        for card in [
+            ".model cnt d_cosim simulation=\"./counter.so\"",
+            ".MODEL cnt D_COSIM(simulation=\"counter.so\")",
+            ".model cnt d_cosim (simulation=\"counter.so\")",
+            ".model cnt\n+ d_cosim simulation=\"counter.so\"",
+            ".model p d_process process_file=\"./prog\"",
+            ".model p d_process(process_file=\"prog\" process_params=[\"-x\"])",
+            ".subckt s a\n.model p d_process process_file=\"prog\"\n.ends",
+            // Spellings ngspice reads as the same card: its words end at
+            // whitespace or any of `=(),`, the first word too.
+            ".model cnt d_cosim,simulation=\"counter.so\"",
+            ".model cnt (d_cosim simulation=\"counter.so\")",
+            ".model,cnt d_cosim simulation=\"counter.so\"",
+            ".model=cnt d_cosim simulation=\"counter.so\"",
+            ".model cnt=d_cosim simulation=\"counter.so\"",
+            ".model\tcnt\td_cosim\tsimulation=\"counter.so\"",
+            ".model cnt d_process,process_file=\"prog\"",
+            ".model cnt (d_process process_file=\"prog\")",
+            // The parameters alone, on another type, spaced or not.
+            ".model cnt d_dff simulation = \"counter.so\"",
+            ".model cnt d_dff(process_file=\"prog\")",
+        ] {
+            let deck = format!("t\nA1 [a] [b] null cnt\n{card}\n.end\n");
+            let v = check(&deck, &policy);
+            assert!(
+                v.iter().any(|v| v.reason.contains("native code")),
+                "{card}: {v:?}"
+            );
+        }
+        // The same card in an included file is refused there too.
+        std::fs::write(
+            d.join("models.lib"),
+            ".model cnt d_cosim simulation=\"counter.so\"\n",
+        )
+        .unwrap();
+        let v = check("t\n.include models.lib\n.end\n", &policy);
+        assert!(v.iter().any(|v| v.reason.contains("native code")), "{v:?}");
+        // Other code models and an ordinary model of a similar name pass.
+        for ok in [
+            ".model tobit adc_bridge(in_low=0.4 in_high=0.8)",
+            ".model d_cosimx d(is=1n)",
+            ".model g1 d_and(rise_delay=1n)",
+            ".param simulation_time=1m",
+        ] {
+            let deck = format!("t\n{ok}\n.end\n");
+            assert!(check(&deck, &policy).is_empty(), "{ok}");
         }
     }
 

@@ -238,6 +238,53 @@ From the die edge inward, a chip has IHP's seal ring, a band of 70 um bond pads 
 
 `assemble` writes `<name>.chip/` beside the description (or `--out`): `<name>.gds`, `<name>.lvs.spice`, `<name>.chip.json` (floorplan, routes and results) and `evidence/drc.json` and `evidence/lvs.json`, in one approved write. It replaces only a folder it made. The demo in `crates/aispice-tools/tests/chip_ihp.rs` (an OTA, a comparator and 13 pads) takes about four minutes.
 
+## Behavioural models and co-simulation
+
+A project can describe blocks by behaviour and simulate them with transistors and logic on ngspice:
+
+- **Verilog-A** models, compiled by [OpenVAF](https://openvaf.semimod.de/) 23.5 into OSDI libraries.
+- **Verilog**, co-simulated through XSPICE's `d_cosim` code model, compiled by Verilator 5 with a C++ compiler and `make`. ngspice 42 and newer have `d_cosim` and install the sources it needs (`share/ngspice/scripts/src`); aispice uses them from the ngspice it runs. A newer ngspice can sit beside the system one with `ngspice_path`.
+- **XSPICE devices**: gates, flip-flops, latches, oscillators, analog function blocks and the `adc_bridge` and `dac_bridge` between analog and digital nodes, used as `A` instances with a `.model` card of that type.
+
+`aispice doctor` shows what is installed and whether this machine can sandbox ngspice while it runs compiled models (see below); they load only on Linux. Declare the models in the project's `aispice.toml`:
+
+```toml
+veriloga = ["models/comparator.va"]
+
+[[cosim]]
+model = "counter"              # the name decks use
+sources = ["rtl/counter.v"]
+top = "counter"                # default: the model name
+```
+
+A deck uses a Verilog-A module as a model type and a co-simulated model by name; it never names a compiled file:
+
+```spice
+N1 inp inn cmp comparator
+.model comparator comparator_va(vdd=1 gain=1e3)
+Aclk [clk_a cmp] [clk en] tobit
+.model tobit adc_bridge(in_low=0.3 in_high=0.7)
+Acnt [clk en] [q3 q2 q1 q0] null counter
+```
+
+The pins of a co-simulated model follow its Verilog ports in order, inputs, outputs, then inouts, each bus most significant bit first; the `behavioral_models` tool prints the instance line for each model. Such a circuit runs on ngspice only.
+
+Compiled code is aispice's to load, never a deck's:
+
+- Sources are checked before anything compiles: Verilog-A at most 1 MiB, Verilog at most 16 files of 1 MiB, no includes (Verilog-A may include `disciplines.vams` and `constants.vams`), no DPI, no `$c` or SystemC blocks, no token pasting, and system tasks and functions only from a list of pure ones (no file input or output, `$system` or `$table_model`). A Verilog-A model may not define, test or use macros other than the constants of `constants.vams` (`M_PI`, `P_K`, ...), so what it does is decided on what the compiler sees.
+- A run that uses them may have at most 2 million output points (its `.tran` stop time over its step, written as plain numbers) and 4096 XSPICE instances; a longer one is refused before anything compiles, with the longest stop time its step allows.
+- OpenVAF and Verilator run from argument vectors in a private folder with a timeout, each step in the same sandbox a simulation gets (the build folder the only writable place, a fixed environment with none of your variables, the tools only from aispice's trusted path), so a model's sources cannot make the compiler reach outside the build. The libraries stay in memory, keyed by a hash of the sources and the compiler, and go into each run's private folder from there, checked against their SHA-256. The copy under `.aispice/build/` is a record and is never loaded: a library planted there is rebuilt.
+- A deck's own `d_cosim` and `d_process` models (which load a library or start a program) are refused in every spelling ngspice reads, and so are `simulation=` and `process_file=` parameters. XSPICE models that read files a deck names (`d_source`, `d_state`, `file_source`, `table2d`, `table3d`) are not passed to ngspice.
+- Their code runs inside ngspice, so a run that loads any runs in a sandbox ([SANDBOX.md](SANDBOX.md)), and only on Linux: bubblewrap 0.8 or later where it can start, else Landlock ABI 4 (Linux 6.7) or later, with seccomp either way. ngspice then reads only the system, its own install, the files the deck includes (and the files those include), the project's PDK and its private run folder, never the rest of the project (under bubblewrap, which shows each of those files at its real path only, a deck with an include that reaches its file through a symbolic link in the project is refused before it runs, naming the link: include the real file, or replace the link with the file); writes only that folder; executes nothing but itself; makes no socket of any family; signals nothing but itself; starts from a fixed environment (none of aispice's variables, so no API keys); and is limited in file size, address space and processes.
+- ngspice copies its input into a temporary file that glibc always makes in `/tmp`, so aispice builds a small library from a fixed C source and preloads it to make that file in the run folder instead; it never falls back to `/tmp`. This needs a C compiler (`cc`, `gcc` or `clang`) in `/usr/local/bin`, `/usr/bin` or `/bin`; aispice looks nowhere else, runs it with fixed flags and none of your compiler variables, builds the library once per process (no file is cached on disk), and reads back and checks each copy it places in a run folder against the bytes it built.
+- Without a sandbox, seccomp or a C compiler, and on macOS and Windows, compiled models are not loaded at all; the error and `aispice doctor` say what is missing. Decks that do not instantiate them run as usual.
+
+### Spec budgets and trim checks
+
+The `budget` tool splits a chip-level target into block specs with first-order equations, each shown with its numbers: an ADC sample-and-hold or residue stage from resolution, ENOB, full scale and sample rate to the sampling capacitor and the OTA's DC gain, gain-bandwidth, slew rate, phase margin and input noise; an LDO from dropout, load regulation, PSRR, noise and quiescent current to its divider, pass device, loop gain and error amplifier. It saves the block specs as `.specs` files that `check_specs` and `optimize` read.
+
+The `trim_check` tool proves a trimmed block can be trimmed into range: for each corner and each mismatch or tolerance sample it simulates every code of the trim `.param` and reports the samples no code brings into range, the code each sample needs, the codes left unused at either end, and the untrimmed yield. Codes (at most 64) times samples times corners may be at most 2000 runs, counted from the request before anything runs; a request over it is told the most samples per corner that fit.
+
 ## Model providers
 
 aispice works with Anthropic, OpenAI, Google Gemini, OpenRouter, Ollama, and any OpenAI-compatible endpoint (LM Studio, vLLM, a company gateway).
@@ -282,6 +329,9 @@ edit_mode = "apply"             # apply (with undo) or ask (approve each edit)
 # xyce_path = "/home/me/.local/xyce/bin/Xyce"   # a Xyce other than the one on PATH
 # klayout_path = "/opt/klayout/klayout"         # a KLayout other than the one on PATH
 # magic_path = "/opt/magic/bin/magic"           # a Magic other than the one on PATH
+# ngspice_path = "/home/me/.local/opt/ngspice/bin/ngspice"  # an ngspice other than the one on PATH
+# openvaf_path = "/home/me/.local/bin/openvaf"  # for Verilog-A models
+# verilator_path = "/opt/verilator/bin/verilator"  # for co-simulated Verilog
 # embedded_models_only = true   # never use models or symbols from LTspice's library
 
 [agent]
@@ -325,7 +375,8 @@ Cursor, Claude Desktop, and other clients that take a JSON server list:
 | Path | Contents |
 |---|---|
 | `<circuit>.specs` | The spec table for a circuit, one spec per line. Commit it with the circuit. |
-| `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project. Written only when you (or the agent, with approval) choose a PDK. |
+| `aispice.toml` | Project settings: `pdk = "<name>"` for an IC project, `veriloga` and `[[cosim]]` for behavioural models. aispice writes only `pdk`, when you (or the agent, with approval) choose a PDK. |
+| `.aispice/build/` | A record of the behavioural model libraries aispice built, with their SHA-256. Never read back. |
 | `.aispice/history/` | A snapshot before every edit, for undo |
 | `.aispice/runs/` | Recent simulation output |
 | `<cell>.gds`, `<cell>.layout.json` | A generated layout and how it was made (template, roles, parameters, devices, dummies). Commit both. |

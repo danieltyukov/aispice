@@ -1,6 +1,8 @@
 //! aispice-sim: run simulators and make sense of what they return.
 
 pub mod backend;
+pub mod behavioral;
+pub mod budget;
 pub mod corner;
 pub mod dataset;
 pub mod dialect;
@@ -22,6 +24,7 @@ pub mod sandbox;
 pub mod spec;
 pub mod stimulus;
 pub mod sweep;
+pub mod trim;
 pub mod xschem;
 
 pub use dataset::{AnalysisKind, Complex, Dataset, Quantity, Step, Vector, VectorData};
