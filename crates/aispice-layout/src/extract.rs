@@ -245,8 +245,10 @@ pub async fn run(
         substrate.as_ref().map(|(a, n)| (a.as_str(), n.as_str())),
     )
     .map_err(LayoutError::Input)?;
+    // Magic writes only in its own run folders, so `out_dir` holds
+    // aispice's results alone; an earlier one is replaced, a link refused.
     let path = out_dir.join(format!("{cell}.extracted.spice"));
-    tools::create_file(&path, text.as_bytes())?;
+    tools::replace_file(&path, text.as_bytes())?;
     Ok(Extracted {
         cell: cell.to_string(),
         ports,

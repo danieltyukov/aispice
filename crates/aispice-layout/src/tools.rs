@@ -245,6 +245,24 @@ pub fn create_file(path: &Path, bytes: &[u8]) -> Result<(), LayoutError> {
         .map_err(|e| LayoutError::Io(format!("{}: {e}", path.display())))
 }
 
+/// [`create_file`], replacing a plain file already at `path` (an earlier
+/// result of aispice's in a folder no run writes); anything else there, a
+/// link or a fifo, stops the write.
+pub fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), LayoutError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() => std::fs::remove_file(path)
+            .map_err(|e| LayoutError::Io(format!("{}: {e}", path.display())))?,
+        Ok(_) => {
+            return Err(LayoutError::Io(format!(
+                "{} is not a plain file",
+                path.display()
+            )));
+        }
+        Err(_) => {}
+    }
+    create_file(path, bytes)
+}
+
 /// Whether a run left a plain file at `path`; a link is not one.
 pub fn is_output(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
@@ -1001,6 +1019,11 @@ mod tests {
         assert_eq!(read_output_text(&plain, 5).unwrap(), "hello");
         assert!(read_output(&plain, 4).is_err());
         assert!(create_file(&plain, b"again").is_err());
+        // Replacing takes a plain file only.
+        replace_file(&plain, b"again").unwrap();
+        assert_eq!(read_output_text(&plain, 5).unwrap(), "again");
+        assert!(replace_file(&planted, b"x").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "SECRET");
         // A run folder serves one run, and takes no files after it.
         let run = RunDir::new().unwrap();
         run.script("a.py", "").unwrap();
