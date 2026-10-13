@@ -416,7 +416,7 @@ impl<'a> Netlister<'a> {
                 ));
             }
             if inst.sym.kind() == "label"
-                && is_global(&inst.sym.props)
+                && is_global(&inst.raw.props, &inst.sym.props)
                 && lab != "0"
                 && !self.globals.contains(&lab)
             {
@@ -1606,12 +1606,19 @@ fn collapse_parens(s: &str) -> String {
     t
 }
 
-/// Whether a label symbol makes its net global: `global=true` (or `1`,
-/// `yes`), or `global=ground` as xschem 3.4.8's `gnd.sym` has it, which
-/// xschem also lists in `.GLOBAL` (only in that spelling).
-fn is_global(props: &str) -> bool {
-    props::is_true(props, "global")
-        || props::get(props, "global").is_some_and(|v| v.trim() == "ground")
+/// Whether a label makes its net global, as xschem decides it: the
+/// instance's `global` if it has one, else its symbol's, is `true`, `1` or
+/// `yes` (in any case), or exactly `ground`, as xschem 3.4.8's `gnd.sym`
+/// has it.
+fn is_global(inst_props: &str, sym_props: &str) -> bool {
+    let Some(v) = props::get(inst_props, "global").or_else(|| props::get(sym_props, "global"))
+    else {
+        return false;
+    };
+    v == "ground"
+        || ["true", "1", "yes"]
+            .iter()
+            .any(|t| v.eq_ignore_ascii_case(t))
 }
 
 fn find_ignore_case(hay: &str, needle: &str) -> Option<usize> {

@@ -341,7 +341,9 @@ C {devices/simulator_commands_shown.sym} 1000 0 0 0 {name=s3 simulator=ngspice o
 }
 
 /// A label symbol with `global=ground`, as xschem 3.4.8's `gnd.sym` has it,
-/// makes its net global as `global=true` does; only that spelling does.
+/// makes its net global as `global=true` does; only that exact spelling
+/// does. An instance's own `global` comes before its symbol's, either way,
+/// as in xschem 3.4.8.
 #[test]
 fn ground_labels_are_global() {
     let tmp = tempfile::tempdir().unwrap();
@@ -365,6 +367,10 @@ C {g1.sym} 0 -30 0 0 {name=l1 lab=VSS}
 C {g2.sym} 0 30 0 0 {name=l2 lab=VNOT}
 C {devices/res.sym} 100 0 0 0 {name=R2 value=1k}
 C {g3.sym} 100 -30 0 0 {name=l3 lab=VYES}
+C {g2.sym} 100 30 0 0 {name=l4 lab=VINST global=true}
+C {devices/res.sym} 200 0 0 0 {name=R3 value=1k}
+C {g3.sym} 200 -30 0 0 {name=l5 lab=VOFF global=false}
+C {g2.sym} 200 30 0 0 {name=l6 lab=VSPACE global=" ground"}
 "#;
     let f = file::parse(top).unwrap();
     let r = Resolver::new(Vec::new(), vec![dir.clone()]);
@@ -372,7 +378,14 @@ C {g3.sym} 100 -30 0 0 {name=l3 lab=VYES}
     let l = lines(&n);
     assert!(l.iter().any(|x| x == ".GLOBAL VSS"), "{}", n.text);
     assert!(l.iter().any(|x| x == ".GLOBAL VYES"), "{}", n.text);
-    assert!(!n.text.contains(".GLOBAL VNOT"), "{}", n.text);
+    assert!(l.iter().any(|x| x == ".GLOBAL VINST"), "{}", n.text);
+    for not in ["VNOT", "VOFF", "VSPACE"] {
+        assert!(
+            !n.text.contains(&format!(".GLOBAL {not}")),
+            "{not}: {}",
+            n.text
+        );
+    }
 }
 
 #[test]
