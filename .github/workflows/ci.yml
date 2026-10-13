@@ -42,8 +42,13 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run and saved only by pushes to master (the last step):
+      # GitHub keeps 10 GB of caches per repository, and a cache per pull request
+      # evicted master's. A pull request starts from master's cache, by its exact
+      # key or by restore-keys when Cargo.lock changed, and saves nothing.
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -110,6 +115,19 @@ jobs:
       - name: Tests
         run: cargo test --no-fail-fast
 
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # The IC path against the real IHP SG13G2 PDK, fetched at a pinned commit
   # (only its ngspice models, Verilog-A sources, KLayout decks and pcells;
   # nothing is committed) with its OSDI models compiled by OpenVAF. Not a
@@ -134,8 +152,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run, saved only by pushes to master (see the engine job).
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -269,6 +289,19 @@ jobs:
           cargo test -p aispice-layout --test layout_sandbox -- --nocapture
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
 
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   shell:
     name: Desktop shell
     runs-on: ubuntu-latest
@@ -284,8 +317,10 @@ jobs:
         with:
           components: clippy
 
-      - name: Cache the Rust build
-        uses: actions/cache@v6
+      # Restored on every run, saved only by pushes to master (see the engine job).
+      - name: Restore the Rust build
+        id: cargo-cache
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -325,6 +360,19 @@ jobs:
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
           WEBKIT_DISABLE_COMPOSITING_MODE: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
+
+      # Only when every step above passed (a failed run saves nothing, as with
+      # actions/cache) and only on master, which every pull request restores from.
+      - name: Save the Rust build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - name: Upload screenshots on failure
         if: failure()
