@@ -13,7 +13,9 @@
 //! project that uses that PDK. Their specs hold at a set of corners the
 //! template names, which `check_specs`, `optimize` and `monte_carlo` take as
 //! `corners`, on the simulators it lists. A template whose block a layout
-//! generator draws names the generator and which instances play which part.
+//! generator draws names the generator and which instances play which part,
+//! and, where the generator's wiring changes what the block meets, the spec
+//! table it meets after layout and why.
 
 use aispice_core::schematic::{self, Schematic};
 use aispice_sim::corner::CornerSet;
@@ -52,6 +54,19 @@ pub struct Parameter {
 pub struct LayoutHint {
     pub generator: aispice_layout::generator::Template,
     pub roles: aispice_layout::generator::Roles,
+    /// The spec table the block meets after layout by the generator, at
+    /// every corner of the set, where the wiring changes what the
+    /// schematic's table holds; `None` when that table holds after layout
+    /// too. Same specs, same names, different limits.
+    #[serde(default)]
+    pub specs: Option<String>,
+    /// Why the table after layout differs from the schematic's.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// For a comparator: the largest input-referred offset after layout at
+    /// tt and 27 C, in mV, found by sweeping the input difference.
+    #[serde(default)]
+    pub offset_mv: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -394,6 +409,29 @@ mod tests {
             .unwrap_or_else(|e| panic!("{}: {e}", t.id));
             assert_eq!(planned.meta.roles, layout.roles, "{}", t.id);
             drawn.insert(layout.generator.name());
+            // A table after layout has the schematic's specs, by name, and
+            // says why it differs.
+            if let Some(after) = &layout.specs {
+                let names = |text: &str| -> Vec<String> {
+                    aispice_sim::spec::parse_specs(text)
+                        .unwrap_or_else(|e| panic!("{}: {e}", t.id))
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect()
+                };
+                assert_eq!(names(after), names(&t.specs), "{}", t.id);
+                assert!(
+                    layout.note.is_some(),
+                    "{}: a layout table needs a note",
+                    t.id
+                );
+            }
+            assert_eq!(
+                layout.offset_mv.is_some(),
+                layout.generator.name() == "comparator",
+                "{}: an offset belongs to a comparator",
+                t.id
+            );
         }
         assert_eq!(
             drawn.into_iter().collect::<Vec<_>>(),

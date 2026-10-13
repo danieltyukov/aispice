@@ -20,12 +20,13 @@ const OTA: &str = "* 5T OTA\nVDD vdd 0 1.2\nVINP inp 0 0.6 AC 1\nVINM inm 0 0.6\
 
 const OTA_SPECS: &str = "gain = gain_db_at(V(out), 10) >= 20\ngbw = unity_gain_freq(V(out)) >= 1Meg\npm = phase_margin(V(out)) >= 45\n";
 
-pub const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 0.61\nVM inm 0 0.59\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n.end\n";
+pub const STRONGARM: &str = "* StrongARM comparator\nVDD vdd 0 1.2\nVCLK clk 0 PULSE(0 1.2 1n 50p 50p 2n 4n)\nVP inp 0 PWL(0 0.61 4n 0.61 4.05n 0.59)\nVM inm 0 PWL(0 0.59 4n 0.59 4.05n 0.61)\nXM0 s clk 0 0 sg13_lv_nmos w=4u l=0.13u\nXM1 xp inp s 0 sg13_lv_nmos w=4u l=0.13u\nXM2 xn inm s 0 sg13_lv_nmos w=4u l=0.13u\nXM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u\nXM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u\nXM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u\nXM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nXM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u\nCP outp 0 5f\nCN outn 0 5f\n.tran 10p 8n\n.end\n";
 
 /// The comparator decides within the clock's high half: the side with the
 /// higher input stays high, the other falls.
-const COMPARATOR_SPECS: &str =
-    "decision = value_at(V(outp,outn), 2.9n) >= 0.8\noutn_low = value_at(V(outn), 2.9n) <= 0.3\n";
+/// Both decisions: inp above inm in the first clock cycle, below it in the
+/// second, so an offset cannot pass for one of them.
+const COMPARATOR_SPECS: &str = "decision = value_at(V(outp,outn), 2.9n) >= 0.8\noutn_low = value_at(V(outn), 2.9n) <= 0.3\nreverse = value_at(V(outp,outn), 6.9n) <= -0.8\noutp_low = value_at(V(outp), 6.9n) <= 0.3\n";
 
 fn workspace() -> Option<(tempfile::TempDir, Arc<Workspace>, String)> {
     let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {

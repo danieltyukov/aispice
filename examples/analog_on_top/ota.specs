@@ -1,0 +1,5 @@
+# Specs from the aispice template ota5t (Five-transistor OTA (IHP SG13G2)).
+# Edit them to your requirements; check_specs reads this file.
+gain = gain_db_at(V(out), 10) >= 24
+gbw = unity_gain_freq(V(out)) >= 15Meg
+pm = phase_margin(V(out)) >= 70

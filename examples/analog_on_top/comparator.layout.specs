@@ -1,0 +1,6 @@
+# The comparator template's table after layout (templates tool, action show): the same
+# specs, with the decision time the generator's wiring allows (375 ps against 250 ps).
+first = value_at(V(outp,outn), 0.95n) >= 1
+second = value_at(V(outp,outn), 2.95n) <= -1
+reset = value_at(V(outp), 1.95n) >= 1.1
+tdec = crossing(V(outn), 0.6, fall) <= 375p

@@ -6,7 +6,7 @@
     <title>aispice: design circuits by describing them</title>
     <meta
       name="description"
-      content="aispice edits LTspice schematics, simulates them on ngspice, LTspice, Xyce or Spectre, and checks every change against your specs. Desktop app, CLI and MCP server. Open source, runs on your machine."
+      content="aispice edits LTspice schematics, simulates them on ngspice, LTspice, Xyce or Spectre, and checks every change against your specs. On the IHP SG13G2 open PDK it takes IC blocks through corners and mismatch to a layout checked with DRC and LVS, and hands them to ChipLeap as macros. Desktop app, CLI and MCP server. Open source, runs on your machine."
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#fafaf8" media="(prefers-color-scheme: light)" />
@@ -20,7 +20,7 @@
     <meta property="og:title" content="aispice: design circuits by describing them" />
     <meta
       property="og:description"
-      content="An agent that edits LTspice schematics, simulates them and checks every change against your specs."
+      content="An agent that edits schematics, simulates them and checks every change against your specs, on a board or on an open PDK down to a checked layout."
     />
     <meta property="og:url" content="https://danieltyukov.github.io/aispice/" />
     <meta property="og:image" content="https://danieltyukov.github.io/aispice/og.png" />
@@ -31,7 +31,7 @@
     <meta name="twitter:title" content="aispice: design circuits by describing them" />
     <meta
       name="twitter:description"
-      content="An agent that edits LTspice schematics, simulates them and checks every change against your specs."
+      content="An agent that edits schematics, simulates them and checks every change against your specs, on a board or on an open PDK down to a checked layout."
     />
     <meta name="twitter:image" content="https://danieltyukov.github.io/aispice/og.png" />
 
@@ -70,6 +70,7 @@
 
         <nav class="links" aria-label="Site">
           <a href="#product">Product</a>
+          <a href="#ic">IC design</a>
           <a href="#use">Use it</a>
           <a href="https://github.com/danieltyukov/aispice/tree/master/docs">Docs</a>
           <a href="https://github.com/danieltyukov/aispice/blob/master/CHANGELOG.md">Changelog</a>
@@ -100,12 +101,13 @@
       <section class="hero">
         <div class="wrap hero-copy">
           <a class="pill" href="https://github.com/danieltyukov/aispice/blob/master/CHANGELOG.md">
-            <span class="pill-tag">New</span> aispice 0.2<span class="pill-long">: Spectre, netlist to schematic, verified templates</span>
+            <span class="pill-tag">New</span> IC design on an open PDK<span class="pill-long">: corners, layout, DRC and LVS, chips</span>
           </a>
           <h1>Design circuits<br />by describing them.</h1>
           <p class="sub">
             aispice reads your LTspice schematics, makes the change you ask for, and proves it in
-            simulation on ngspice, LTspice, Xyce or Spectre. Every edit is a diff you can undo.
+            simulation on ngspice, LTspice, Xyce or Spectre. Every edit is a diff you can undo. On
+            an open PDK it takes IC blocks down to a layout checked with DRC and LVS.
           </p>
           <div class="cta">
             <a class="btn btn-accent js-download" href="#download">Download</a>
@@ -144,12 +146,17 @@
 
       <section class="works" aria-labelledby="works-title">
         <div class="wrap">
-          <h2 id="works-title" class="works-title">Works with the simulators and models you already use</h2>
+          <h2 id="works-title" class="works-title">Works with the simulators, PDK and models you already use</h2>
           <ul class="works-list">
             <li>ngspice</li>
             <li>LTspice</li>
             <li>Xyce</li>
             <li>Spectre</li>
+            <li class="sep" aria-hidden="true"></li>
+            <li>IHP SG13G2</li>
+            <li>KLayout</li>
+            <li>Magic</li>
+            <li>xschem</li>
             <li class="sep" aria-hidden="true"></li>
             <li>Claude</li>
             <li>GPT</li>
@@ -247,6 +254,148 @@
         </div>
       </section>
 
+      <section id="ic" class="product ic">
+        <div class="wrap">
+          <div class="feature">
+            <div class="feature-copy">
+              <p class="eyebrow">IC design</p>
+              <h2>Transistor-level blocks on an open PDK.</h2>
+              <p>
+                Register IHP SG13G2 once and a project simulates with the PDK's own device models
+                on ngspice or Xyce. The agent sizes transistors by gm/Id from tables it builds,
+                starts from templates checked at every corner, and checks each spec across process,
+                temperature, supply and mismatch.
+              </p>
+              <ul class="checks">
+                <li>Six templates, from a current mirror to an LDO, at every corner of their set</li>
+                <li>The worst corner named for each spec; mismatch Monte Carlo on IHP's statistical models</li>
+                <li>Noise, PSRR and CMRR, input or output referred</li>
+              </ul>
+            </div>
+            <div class="feature-art stack stack-ic">
+              <!-- ic-art:start -->
+              <div class="card card-wide card-light">
+                <img src="/img/ic/two-stage-schematic.webp" srcset="/img/ic/two-stage-schematic-1x.webp 1x, /img/ic/two-stage-schematic.webp 2x" width="1600" height="687" loading="lazy" alt="The two-stage Miller op-amp template on IHP SG13G2, drawn by aispice: the differential pair and its current-mirror load, the tail and bias transistors, the second stage and its Miller capacitor" />
+              </div>
+              <div class="card card-pad">
+                <p class="card-label">aispice check two_stage.asc --process tt,ss,ff,sf,fs --temp=-40,27,125</p>
+<pre class="result">all 3 specs pass at all 15 corners
+  PASS gain: 51.1dB worst at fs/125C (&gt;= 48dB) pass, margin +6.5%
+  PASS gbw: 15.21MHz worst at ss/125C (&gt;= 13MHz) pass, margin +17.0%
+  PASS pm: 57&#176; worst at ff/-40C (&gt;= 52&#176;) pass, margin +9.6%</pre>
+              </div>
+              <!-- ic-art:end -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="layout" class="layout-band" aria-labelledby="layout-title">
+        <div class="wrap layout-grid">
+          <div class="feature-copy">
+            <p class="eyebrow">Layout</p>
+            <h2 id="layout-title">From schematic to a checked layout.</h2>
+            <p>
+              Generators draw the block with IHP's own pcells: matched devices in common-centroid
+              or interdigitated units, dummies and guard rings. IHP's KLayout decks check DRC and
+              LVS, Magic extracts the parasitics, and every spec is reported before and after
+              layout. When a check fails, the agent changes the generator's parameters and draws
+              again; it never edits the GDS.
+            </p>
+            <!-- layout-facts:start -->
+            <dl class="facts">
+              <div><dt>Two-stage op-amp, drawn</dt><dd>22.2 x 44.1<small>um</small></dd></div>
+              <div><dt>Devices and dummies</dt><dd>9 + 8</dd></div>
+              <div><dt>Draw, DRC, LVS</dt><dd>1.1 + 2.5 + 2.5<small>s</small></dd></div>
+              <div><dt>DRC and LVS, IHP's decks</dt><dd>clean</dd></div>
+            </dl>
+            <p class="facts-note">
+              After layout, the five-transistor OTA's unity-gain frequency goes from 113.7 to
+              105.2 MHz and its phase margin from 84.5 to 82.5 degrees, rerun on the extracted
+              netlist.
+            </p>
+            <!-- layout-facts:end -->
+          </div>
+          <figure class="layout-art">
+            <!-- layout-art:start -->
+            <img src="/img/ic/two-stage-layout.webp" srcset="/img/ic/two-stage-layout-1x.webp 1x, /img/ic/two-stage-layout.webp 2x" width="800" height="1564" loading="lazy" alt="The two-stage op-amp's layout drawn from the GDS aispice generated: the matched transistor rows with dummies and guard rings beside the MIM compensation capacitor" />
+            <figcaption>The two-stage op-amp, drawn by aispice's generator with IHP's pcells, from its GDS.</figcaption>
+            <!-- layout-art:end -->
+          </figure>
+        </div>
+      </section>
+
+      <!-- mixed-signal:start -->
+      <section id="mixed-signal" class="product ms">
+        <div class="wrap">
+          <div class="feature feature-flip">
+            <div class="feature-copy">
+              <p class="eyebrow">Mixed signal</p>
+              <h2>Analog and logic in one simulation.</h2>
+              <p>
+                A project declares Verilog-A models and Verilog to co-simulate. aispice builds
+                them itself with OpenVAF and Verilator, runs the result in a sandbox, and ngspice
+                simulates the transistors and the logic together. Above the block, the budget tool
+                splits a target into block specs with every equation, and the trim check finds the
+                code that brings a trimmed block into range at every corner and mismatch sample.
+              </p>
+              <ul class="checks">
+                <li>Behavioural models and co-simulated Verilog, sandboxed</li>
+                <li>ADC front-end and LDO budgets written as spec tables</li>
+                <li>Every trim code at every corner and sample</li>
+              </ul>
+            </div>
+            <div class="feature-art stack stack-ic">
+              <figure class="card card-light ms-plot">
+                <img src="/img/ic/mixed-signal.webp" srcset="/img/ic/mixed-signal-1x.webp 1x, /img/ic/mixed-signal.webp 2x" width="1400" height="836" loading="lazy" alt="The StrongARM comparator's clock and outputs over eight 2 ns cycles, and the co-simulated counter stepping from 0 to 5" />
+              </figure>
+              <div class="card card-pad">
+                <p class="card-label">budget: a 10-bit ADC front end, ENOB 9.5, 50 MS/s</p>
+<pre class="result">  sampling capacitor (each side) = 207.9fF
+  OTA gain-bandwidth = 404.5MHz
+  OTA DC gain in dB = 72.25dB
+  OTA input noise density = 11.2nV/rtHz</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- mixed-signal:end -->
+
+      <section id="chips" class="chips" aria-labelledby="chips-title">
+        <div class="wrap chips-grid">
+          <figure class="chips-art">
+            <!-- chip-art:start -->
+            <img src="/img/ic/demo-chip.webp" srcset="/img/ic/demo-chip-1x.webp 1x, /img/ic/demo-chip.webp 2x" width="1400" height="1400" loading="lazy" alt="An analog-on-top chip assembled by aispice, drawn from its GDS: IHP's pad ring with 16 pads around a core holding the OTA, the StrongARM comparator and a two-bit counter hardened by LibreLane" />
+            <figcaption>An OTA, a StrongARM comparator and a counter hardened by LibreLane in IHP's pad ring, from the chip's GDS.</figcaption>
+            <!-- chip-art:end -->
+          </figure>
+          <div class="feature-copy">
+            <p class="eyebrow">Chips</p>
+            <h2 id="chips-title">Blocks for chips, with ChipLeap.</h2>
+            <p>
+              A finished block becomes a macro package: GDS, LEF, liberty, a Verilog model, the
+              SPICE netlist, specs measured at every corner and the DRC and LVS evidence. aispice
+              and its digital counterpart, ChipLeap, check a package with the same rules. aispice
+              assembles analog-on-top chips in IHP's pad ring with ChipLeap's hardened logic
+              inside; ChipLeap places aispice's blocks in its digital chips.
+            </p>
+            <!-- chip-facts:start -->
+            <dl class="facts">
+              <div><dt>Die</dt><dd>1.04 x 1.04<small>mm</small></dd></div>
+              <div><dt>Pads</dt><dd>16</dd></div>
+              <div><dt>DRC, all four decks</dt><dd>clean</dd></div>
+              <div><dt>LVS, to the counter's cells</dt><dd>clean</dd></div>
+            </dl>
+            <!-- chip-facts:end -->
+            <div class="chips-links">
+              <a class="btn btn-ghost" href="https://danieltyukov.github.io/chipleap/">ChipLeap</a>
+              <a class="btn btn-ghost" href="https://github.com/danieltyukov/aispice/blob/master/docs/macro-package.md">The package format</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="band" aria-labelledby="band-title">
         <div class="wrap band-copy">
           <h2 id="band-title">Every change is simulated before it reaches you.</h2>
@@ -270,16 +419,16 @@
             <p class="num-label">schematics netlisted exactly as LTspice does</p>
           </div>
           <div>
-            <p class="num">4</p>
-            <p class="num-label">simulators that agree within 0.2% on the same circuit</p>
+            <p class="num">49<span>/49</span></p>
+            <p class="num-label">of IHP's xschem test benches netlisted line for line as xschem does</p>
           </div>
           <div>
-            <p class="num">17</p>
-            <p class="num-label">reference circuits, each passing its specs in simulation</p>
+            <p class="num">23</p>
+            <p class="num-label">reference circuits passing their specs, 6 of them IC blocks at every corner</p>
           </div>
           <div>
-            <p class="num">12<span>/13</span></p>
-            <p class="num-label">design tasks solved by a small model in the eval suite</p>
+            <p class="num">5</p>
+            <p class="num-label">layout generators, DRC and LVS clean on IHP's own decks</p>
           </div>
         </div>
       </section>
@@ -331,7 +480,15 @@
             </details>
             <details>
               <summary>Can it use my PDK?</summary>
-              <p>Yes, through Spectre over SSH: simulations run on your own server with your own models, and model files never leave it.</p>
+              <p>Yes. Register an installed PDK with <code>aispice pdk add</code> (IHP SG13G2 from IHP-Open-PDK first): simulations load its device models on ngspice or Xyce, and layouts use its pcells and its DRC and LVS decks. A licensed PDK works through Spectre on your own server over SSH, and its model files never leave it.</p>
+            </details>
+            <details>
+              <summary>Does it do layout?</summary>
+              <p>For IC blocks on IHP SG13G2, yes: five generators (current mirror, differential pair, five-transistor OTA, two-stage op-amp, StrongARM comparator) draw with the PDK's pcells, then IHP's decks check DRC and LVS and Magic extracts the parasitics. Board layout is not part of aispice.</p>
+            </details>
+            <details>
+              <summary>How does it work with ChipLeap?</summary>
+              <p>ChipLeap is the digital counterpart: RTL to a chip with a pad ring. The two exchange hardened blocks as macro packages, checked by both with the same rules, so an aispice comparator can sit in a ChipLeap chip and ChipLeap's logic in an aispice chip.</p>
             </details>
             <details>
               <summary>Is it affiliated with Analog Devices?</summary>
@@ -373,6 +530,7 @@
           <a href="https://github.com/danieltyukov/aispice/tree/master/docs">Docs</a>
           <a href="https://github.com/danieltyukov/aispice/blob/master/CHANGELOG.md">Changelog</a>
           <a href="https://github.com/danieltyukov/aispice/blob/master/SECURITY.md">Security</a>
+          <a href="https://danieltyukov.github.io/chipleap/">ChipLeap</a>
         </nav>
         <p class="fine">
           Set in subsets of Instrument Sans, JetBrains Mono and Inter under the SIL Open Font License

@@ -99,6 +99,22 @@ fn ic_text(t: &Template) -> String {
             layout.generator.name(),
             serde_json::to_string(&layout.roles).unwrap_or_default()
         ));
+        if let Some(after) = &layout.specs {
+            s.push_str(
+                "After layout it meets this table instead (check_specs with post_layout and these specs):\n",
+            );
+            for line in after.lines().filter(|l| !l.trim().is_empty()) {
+                s.push_str(&format!("  {}\n", line.trim()));
+            }
+        }
+        if let Some(note) = &layout.note {
+            s.push_str(&format!("{note}\n"));
+        }
+        if let Some(mv) = layout.offset_mv {
+            s.push_str(&format!(
+                "Its input-referred offset after layout is under {mv} mV at tt and 27 C.\n"
+            ));
+        }
     }
     s
 }

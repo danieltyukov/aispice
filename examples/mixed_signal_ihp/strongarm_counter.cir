@@ -1,19 +1,20 @@
 * The IHP SG13G2 StrongARM comparator template drives a co-simulated counter
-* Eight decisions at a 500 MHz clock, inp 1 mV above inm in five of them
-* (cycles 0, 1, 3, 5 and 6). The counter, clocked on each falling clock
-* edge while the comparator still holds its decision, counts the cycles in
-* which outn fell, so it reads 5 (q = 0101) after the last one.
-XM5 outn outp vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
-XM3 outn outp xp 0 sg13_lv_nmos w=2u l=0.13u ng=1 m=1
-XM6 outp outn vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
-XM4 outp outn xn 0 sg13_lv_nmos w=2u l=0.13u ng=1 m=1
-XM1 xp inp s 0 sg13_lv_nmos w=8u l=0.13u ng=1 m=1
-XM2 xn inm s 0 sg13_lv_nmos w=8u l=0.13u ng=1 m=1
-XM0 s clk 0 0 sg13_lv_nmos w=8u l=0.13u ng=1 m=1
-XM7 outn clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
-XM9 xp clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
-XM8 outp clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
-XM10 xn clk vdd vdd sg13_lv_pmos w=1u l=0.13u ng=1 m=1
+* Eight decisions at a 500 MHz clock, inp 0.5 mV above inm (0.7 V) in five
+* of them (cycles 0, 1, 3, 5 and 6) and 0.5 mV below in the other three.
+* The counter, clocked on each falling clock edge while the comparator still
+* holds its decision, counts the cycles in which outn fell, so it reads 5
+* (q = 0101) after the last one.
+XM5 outn outp vdd vdd sg13_lv_pmos w=4u l=0.13u ng=1 m=1
+XM3 outn outp xp 0 sg13_lv_nmos w=4u l=0.13u ng=1 m=1
+XM6 outp outn vdd vdd sg13_lv_pmos w=4u l=0.13u ng=1 m=1
+XM4 outp outn xn 0 sg13_lv_nmos w=4u l=0.13u ng=1 m=1
+XM1 xp inp s 0 sg13_lv_nmos w=16u l=0.13u ng=2 m=1
+XM2 xn inm s 0 sg13_lv_nmos w=16u l=0.13u ng=2 m=1
+XM0 s clk 0 0 sg13_lv_nmos w=16u l=0.13u ng=2 m=1
+XM7 outn clk vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
+XM9 xp clk vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
+XM8 outp clk vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
+XM10 xn clk vdd vdd sg13_lv_pmos w=2u l=0.13u ng=1 m=1
 CN outn 0 5f
 CP outp 0 5f
 VDD vdd 0 1.2

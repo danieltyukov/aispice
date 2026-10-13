@@ -71,6 +71,11 @@ impl RowDev {
 pub struct Island {
     pub devices: Vec<RowDev>,
     pub source: String,
+    /// Mirror pairs of a differential block, as indices into `devices`
+    /// (left device first, outermost pair first): the units are then
+    /// ordered so that reflecting the island about its centre swaps each
+    /// device for its partner ([`mirror_order`]). Empty for the pattern.
+    pub mirror: Vec<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +88,9 @@ pub struct RowSpec {
     pub bulk: String,
     /// The net dummy gates go to (the bulk rail turns them off).
     pub off: String,
+    /// Dummy fingers at each end of every island, when the row sets its own
+    /// count instead of the parameters'.
+    pub dummies: Option<u32>,
 }
 
 /// Where a terminal leaves the row: the Via1 it ends in and its net.
@@ -199,6 +207,48 @@ pub fn unit_order(counts: &[usize], pattern: Pattern) -> Vec<usize> {
     }
 }
 
+/// Unit order for an island whose devices come in mirror pairs: the left
+/// half holds, for each pair in turn (outermost first), the units of its
+/// left device, and the right half is the left half reflected with every
+/// device swapped for its partner (`A A B B` for a pair of two units each).
+/// So the island is symmetric about its centre with the two sides of the
+/// block exchanged, and each device's drains and gates stay on its own
+/// side, where its net and its partner's share one track height and are
+/// wired as mirror images. This gives up a common centroid: interleaved
+/// units (`ABAB`, `ABBA`) put the pair's nets on two stacked tracks with
+/// different neighbours, which after extraction loaded one side more than
+/// the other. `None` when a device is in no pair or two partners have
+/// different unit counts.
+pub fn mirror_order(counts: &[usize], pairs: &[(usize, usize)]) -> Option<Vec<usize>> {
+    let mut paired = vec![false; counts.len()];
+    for &(l, r) in pairs {
+        if l == r || l >= counts.len() || r >= counts.len() || counts[l] != counts[r] {
+            return None;
+        }
+        if paired[l] || paired[r] {
+            return None;
+        }
+        paired[l] = true;
+        paired[r] = true;
+    }
+    if paired.iter().any(|p| !p) {
+        return None;
+    }
+    let partner = |i: usize| {
+        pairs
+            .iter()
+            .find_map(|&(l, r)| (l == i).then_some(r).or((r == i).then_some(l)))
+            .unwrap_or(i)
+    };
+    let mut left = Vec::new();
+    for &(l, _) in pairs {
+        left.extend(std::iter::repeat_n(l, counts[l]));
+    }
+    let mut out = left.clone();
+    out.extend(left.iter().rev().map(|&u| partner(u)));
+    Some(out)
+}
+
 /// Lay out one row.
 pub fn build(spec: &RowSpec, params: &Params) -> Result<RowLayout, String> {
     let devs: Vec<&RowDev> = spec.islands.iter().flat_map(|i| i.devices.iter()).collect();
@@ -214,7 +264,7 @@ pub fn build(spec: &RowSpec, params: &Params) -> Result<RowLayout, String> {
     }
     let wf = finger_width(&devs, params.fingers)?;
     let p = l + PCELL_PITCH_EXTRA;
-    let dummies = i64::from(params.dummies);
+    let dummies = i64::from(spec.dummies.unwrap_or(params.dummies));
     let model = first.model;
 
     let mut plan = Plan::default();
@@ -240,7 +290,8 @@ pub fn build(spec: &RowSpec, params: &Params) -> Result<RowLayout, String> {
         for (d, n) in island.devices.iter().zip(&counts) {
             fingers.insert(d.name.clone(), 2 * *n as i64);
         }
-        let order = unit_order(&counts, params.pattern);
+        let order = mirror_order(&counts, &island.mirror)
+            .unwrap_or_else(|| unit_order(&counts, params.pattern));
         let mut gates: Vec<Option<usize>> = Vec::new();
         let mut columns: Vec<String> = vec![island.source.clone()];
         for _ in 0..dummies {
@@ -483,6 +534,40 @@ mod tests {
     }
 
     #[test]
+    fn mirror_orders_swap_partners_under_reflection() {
+        // One pair, two units each: each device on its own side.
+        assert_eq!(mirror_order(&[2, 2], &[(0, 1)]), Some(vec![0, 0, 1, 1]));
+        assert_eq!(mirror_order(&[2, 2], &[(1, 0)]), Some(vec![1, 1, 0, 0]));
+        // A comparator's reset row, outermost pair first: xp, outn | outp, xn.
+        assert_eq!(
+            mirror_order(&[1, 1, 1, 1], &[(0, 3), (1, 2)]),
+            Some(vec![0, 1, 2, 3])
+        );
+        for (counts, pairs) in [
+            (vec![2, 2], vec![(0, 1)]),
+            (vec![3, 3], vec![(1, 0)]),
+            (vec![1, 2, 2, 1], vec![(0, 3), (1, 2)]),
+        ] {
+            let o = mirror_order(&counts, &pairs).unwrap();
+            let partner = |i: usize| {
+                pairs
+                    .iter()
+                    .find_map(|&(l, r)| (l == i).then_some(r).or((r == i).then_some(l)))
+                    .unwrap()
+            };
+            for k in 0..o.len() {
+                assert_eq!(o[o.len() - 1 - k], partner(o[k]), "{o:?}");
+            }
+            for (d, n) in counts.iter().enumerate() {
+                assert_eq!(o.iter().filter(|u| **u == d).count(), *n);
+            }
+        }
+        // Unequal partners or an unpaired device: no mirror order.
+        assert_eq!(mirror_order(&[2, 1], &[(0, 1)]), None);
+        assert_eq!(mirror_order(&[1, 1, 1], &[(0, 1)]), None);
+    }
+
+    #[test]
     fn finger_widths_are_common_and_even() {
         let a = dev("M1", 2000, 500, "x", "g", "0");
         let b = dev("M2", 4000, 500, "y", "g", "0");
@@ -519,9 +604,11 @@ mod tests {
                     dev("M2", 2000, 500, "out", "ref", "0"),
                 ],
                 source: "0".into(),
+                mirror: Vec::new(),
             }],
             bulk: "0".into(),
             off: "0".into(),
+            dummies: None,
         };
         let row = build(&spec, &Params::default()).unwrap();
         assert_eq!(row.summary.order, ["d M1 M2 d"]);
