@@ -272,9 +272,10 @@ fn net_caps(text: &str) -> BTreeMap<String, f64> {
 /// The comparator template laid out by its generator, which draws it
 /// mirror-symmetric: DRC and LVS clean, the two outputs loaded alike after
 /// extraction, both decisions at every corner of the template's set with its
-/// table after layout, and an input-referred offset after layout within the
-/// template's bound: a constant input difference of that size, either way,
-/// decides the right way at tt and 27 C.
+/// table after layout, exported as a macro package (pins at the edge) at
+/// three process corners and temperatures, and an input-referred offset
+/// after layout within the template's bound: a constant input difference of
+/// that size, either way, decides the right way at tt and 27 C.
 #[tokio::test]
 async fn the_comparator_template_decides_both_ways_after_layout() {
     let Some((dir, ws)) = workspace() else {
@@ -312,6 +313,25 @@ async fn the_comparator_template_decides_both_ways_after_layout() {
     let v = &out.data.as_ref().unwrap()["value"];
     assert!(
         v["corners_post"]["failed"].as_array().unwrap().is_empty(),
+        "{}",
+        out.text_content()
+    );
+
+    // As a macro package: redrawn with its pins at the bottom edge, which
+    // must keep it as balanced, and characterized at three corners.
+    let out = call(
+        &ws,
+        "macro_export",
+        json!({"circuit": "comparator.asc", "layout": "comparator.gds", "name": "strongarm",
+               "specs": after,
+               "corners": {"process": ["tt", "ss", "ff"], "temperatures": [-40, 27, 125]},
+               "pins": {"clk": {"kind": "clock"}, "outp": {"kind": "signal"}, "outn": {"kind": "signal"}}}),
+    )
+    .await;
+    assert!(
+        dir.path()
+            .join("macros/strongarm.macro/macro.toml")
+            .is_file(),
         "{}",
         out.text_content()
     );

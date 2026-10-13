@@ -504,7 +504,9 @@ pub const PIN_PITCH: i64 = 1200;
 /// in their channel (or only a mirror partner on the other side of the
 /// axis), so no two nets meet on one layer. In a symmetric block the right
 /// net of a pair has its column right of everything, as far out as its
-/// partner's on the left.
+/// partner's on the left (to the nearest grid line), and a net that is its
+/// own mirror image gets a second column there too, the same metal without
+/// the pin, so neither side carries more.
 fn edge_pins(
     plan: &mut Plan,
     ports: &[String],
@@ -515,8 +517,13 @@ fn edge_pins(
         return;
     };
     let first = (bbox.x1 - SPINE_GAP - TRACK_W / 2).div_euclid(PIN_PITCH) * PIN_PITCH;
-    let first_right =
-        (bbox.x2 + SPINE_GAP + TRACK_W / 2 + PIN_PITCH - 1).div_euclid(PIN_PITCH) * PIN_PITCH;
+    // A left column's mirror image on the right, on the nearest grid line
+    // that clears the block.
+    let clear = bbox.x2 + SPINE_GAP + TRACK_W / 2;
+    let mirrored = |x: i64| {
+        let m = (bbox.x1 + bbox.x2 - x + PIN_PITCH / 2).div_euclid(PIN_PITCH) * PIN_PITCH;
+        if m < clear { m + PIN_PITCH } else { m }
+    };
     // The feet stand below everything else, so even the column of a track
     // at the very bottom is long enough for `Mn.d` (0.144 um2).
     let bottom = bbox.y1 - PIN_FOOT;
@@ -529,47 +536,19 @@ fn edge_pins(
         .map(|(p, _)| *p)
         .filter(|p| !sym.is_right(p))
         .collect();
-    for (port, (x1, x2, ty)) in pinned {
-        let column = if sym.is_right(port) {
-            let partner = sym.pair(port).map(|(_, l, _)| l).unwrap_or("");
-            let i = left
-                .iter()
-                .position(|p| *p == partner)
-                .unwrap_or(left.len());
-            Some(first_right + i as i64 * PIN_PITCH)
+    // A column from the track at `ty` down to the bottom edge, joined to the
+    // track's end at `reach` by extending the track.
+    let column = |plan: &mut Plan, port: &str, cx: i64, reach: i64, ty: i64| {
+        let (a, b) = if cx < reach {
+            (cx - VIA / 2 - VIA_ENDCAP, reach)
         } else {
-            None
+            (reach, cx + VIA / 2 + VIA_ENDCAP)
         };
-        let cx = match column {
-            Some(cx) => {
-                plan.add(
-                    Layer::Metal3,
-                    Rect::new(
-                        x2 - TRACK_W,
-                        ty - TRACK_W / 2,
-                        cx + VIA / 2 + VIA_ENDCAP,
-                        ty + TRACK_W / 2,
-                    ),
-                    Some(port),
-                );
-                cx
-            }
-            None => {
-                let i = left.iter().position(|p| *p == port).unwrap_or(0);
-                let cx = first - i as i64 * PIN_PITCH;
-                plan.add(
-                    Layer::Metal3,
-                    Rect::new(
-                        cx - VIA / 2 - VIA_ENDCAP,
-                        ty - TRACK_W / 2,
-                        x1 + TRACK_W,
-                        ty + TRACK_W / 2,
-                    ),
-                    Some(port),
-                );
-                cx
-            }
-        };
+        plan.add(
+            Layer::Metal3,
+            Rect::new(a, ty - TRACK_W / 2, b, ty + TRACK_W / 2),
+            Some(port),
+        );
         plan.add(Layer::Via3, Rect::centred(cx, ty, VIA, VIA), Some(port));
         plan.add(
             Layer::Metal4,
@@ -581,6 +560,27 @@ fn edge_pins(
             ),
             Some(port),
         );
+    };
+    let left_x = |i: usize| first - i as i64 * PIN_PITCH;
+    for (port, (x1, x2, ty)) in pinned {
+        let cx = if sym.is_right(port) {
+            let partner = sym.pair(port).map(|(_, l, _)| l).unwrap_or("");
+            let i = left
+                .iter()
+                .position(|p| *p == partner)
+                .unwrap_or(left.len());
+            let cx = mirrored(left_x(i));
+            column(plan, port, cx, x2 - TRACK_W, ty);
+            cx
+        } else {
+            let i = left.iter().position(|p| *p == port).unwrap_or(0);
+            let cx = left_x(i);
+            column(plan, port, cx, x1 + TRACK_W, ty);
+            if !sym.pairs.is_empty() && sym.pair(port).is_none() {
+                column(plan, port, mirrored(cx), x2 - TRACK_W, ty);
+            }
+            cx
+        };
         plan.labels.push(Label {
             layer: Layer::Metal4,
             text: port.clone(),

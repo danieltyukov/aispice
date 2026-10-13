@@ -467,6 +467,27 @@ mod tests {
                     );
                 }
             }
+            // A net that is its own mirror image has as much routing metal
+            // on each side of the axis, its pin column included.
+            let bbox = g.plan.bbox().unwrap();
+            let axis = (bbox.x1 + bbox.x2) / 2;
+            for net in ["clk", "vdd", "0"] {
+                let (mut left, mut right) = (0i64, 0i64);
+                for s in g.plan.shapes.iter().filter(|s| {
+                    s.net.as_deref() == Some(net)
+                        && matches!(s.layer, plan::Layer::Metal3 | plan::Layer::Metal4)
+                }) {
+                    let r = s.rect;
+                    let area = |a: i64, b: i64| (b - a).max(0) * r.height();
+                    left += area(r.x1, r.x2.min(axis));
+                    right += area(r.x1.max(axis), r.x2);
+                }
+                let diff = (left - right).abs() as f64 / left.max(right) as f64;
+                assert!(
+                    diff < 0.05,
+                    "{net}: {left} nm2 left of the axis, {right} right (pin_edge {pin_edge})"
+                );
+            }
             let errors = g.plan.spacing_errors(&BTreeMap::new());
             assert!(errors.is_empty(), "{errors:?}");
         }
