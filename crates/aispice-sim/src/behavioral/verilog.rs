@@ -16,7 +16,7 @@
 
 use super::scan::{self, Kind};
 use super::{
-    BuildError, Direction, Library, LibraryKind, MAX_VERILOG_BYTES, MAX_VERILOG_FILE_BYTES,
+    BuildError, Direction, Jail, Library, LibraryKind, MAX_VERILOG_BYTES, MAX_VERILOG_FILE_BYTES,
     MAX_VERILOG_FILES, Module, Port, Source, VERILATOR_TIMEOUT, build_dir, clean_log, read_library,
     safe_name, sha256_hex, step, write,
 };
@@ -331,6 +331,7 @@ fn port_headers(ports: &[Port], header: &str) -> [String; 3] {
 /// use; `top` the Verilog module it runs. `tool` is Verilator's version line.
 #[allow(clippy::too_many_arguments)]
 pub async fn build(
+    jail: &Jail,
     verilator: &Path,
     tool: &str,
     cxx: &Path,
@@ -342,7 +343,7 @@ pub async fn build(
 ) -> Result<Library, BuildError> {
     let modules = check(sources)?;
     build_checked(
-        verilator, tool, cxx, shim, model, top, sources, &modules, cancel,
+        jail, verilator, tool, cxx, shim, model, top, sources, &modules, cancel,
     )
     .await
 }
@@ -352,6 +353,7 @@ pub async fn build(
 /// holds even when a check is wrong.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_checked(
+    jail: &Jail,
     verilator: &Path,
     tool: &str,
     cxx: &Path,
@@ -430,10 +432,14 @@ pub(crate) async fn build_checked(
         a.extend(extra.iter().map(|s| s.to_string()));
         a
     };
+    // The sources and the shim are copied into the build folder, so a step
+    // reads from there; the shim's own folder is granted as well in case
+    // Verilator reaches back into it.
+    let reads = [shim.to_path_buf()];
     // 1. The model's class, to read its ports.
     let mut args = base(&["--cc"]);
     args.extend(files.iter().cloned());
-    let out = step(verilator, &args, d, deadline, cancel).await?;
+    let out = step(jail, verilator, &args, d, &reads, deadline, cancel).await?;
     if !out.success() {
         return Err(fail(&out));
     }
@@ -453,7 +459,7 @@ pub(crate) async fn build_checked(
     args.push(d.join("verilator_main.cpp").display().to_string());
     args.push(d.join("verilator_shim.cpp").display().to_string());
     args.extend(files.iter().cloned());
-    let out = step(verilator, &args, d, deadline, cancel).await?;
+    let out = step(jail, verilator, &args, d, &reads, deadline, cancel).await?;
     if !out.success() {
         return Err(fail(&out));
     }
@@ -476,7 +482,7 @@ pub(crate) async fn build_checked(
         "-o".into(),
         "model.so".into(),
     ]);
-    let out = step(cxx, &args, d, deadline, cancel).await?;
+    let out = step(jail, cxx, &args, d, &reads, deadline, cancel).await?;
     if !out.success() {
         return Err(BuildError::Failed {
             tool: "the link".into(),

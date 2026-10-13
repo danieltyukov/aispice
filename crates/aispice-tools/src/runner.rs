@@ -200,6 +200,7 @@ impl Runner {
         project: &Project,
         netlist: &Netlist,
         declared: &crate::behavioral::Declared,
+        sandbox: &aispice_sim::sandbox::Sandbox,
         cancel: &CancellationToken,
     ) -> Result<Vec<Arc<aispice_sim::behavioral::Library>>, RunError> {
         let (va, cosim) = crate::behavioral::used(netlist, declared);
@@ -209,8 +210,9 @@ impl Runner {
             verilator: c.verilator_exe,
             ngspice: c.ngspice_exe,
         };
+        let jail = aispice_sim::behavioral::Jail::new(sandbox.clone());
         self.behavioral
-            .build(project, &tools, &va, &cosim, cancel)
+            .build(project, &tools, &va, &cosim, &jail, cancel)
             .await
             .map_err(RunError::Netlist)
     }
@@ -249,8 +251,12 @@ impl Runner {
             verilator: c.verilator_exe,
             ngspice: c.ngspice_exe,
         };
+        // The compilers run in the same sandbox a run gets, so building is
+        // refused where a run would be (not Linux, no sandbox, no compiler).
+        let sandbox = aispice_sim::backend::native_code::ready(cancel).await?;
+        let jail = aispice_sim::behavioral::Jail::new(sandbox);
         self.behavioral
-            .build(project, &tools, &va, &cosim, cancel)
+            .build(project, &tools, &va, &cosim, &jail, cancel)
             .await
     }
 
@@ -708,7 +714,7 @@ impl Runner {
             )
             .map_err(RunError::Netlist)?;
             let libraries = self
-                .behavioral_build(project, netlist, &declared, cancel)
+                .behavioral_build(project, netlist, &declared, &sandbox, cancel)
                 .await?;
             (libraries, Some(sandbox))
         } else {

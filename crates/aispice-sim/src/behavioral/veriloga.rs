@@ -13,10 +13,10 @@
 
 use super::scan::{self, Kind, Token};
 use super::{
-    BuildError, Direction, Library, LibraryKind, MAX_VERILOGA_BYTES, Module, OPENVAF_TIMEOUT, Port,
-    Source, build_dir, clean_log, read_library, safe_name, sha256_hex, step, write,
+    BuildError, Direction, Jail, Library, LibraryKind, MAX_VERILOGA_BYTES, Module, OPENVAF_TIMEOUT,
+    Port, Source, build_dir, clean_log, read_library, safe_name, sha256_hex, step, write,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -292,6 +292,7 @@ fn is_discipline_word(w: &str) -> bool {
 /// Compile a checked source with OpenVAF in a private folder. `tool` is
 /// OpenVAF's version line, recorded with the library.
 pub async fn build(
+    jail: &Jail,
     openvaf: &Path,
     tool: &str,
     src: &Source,
@@ -306,10 +307,19 @@ pub async fn build(
     let dir = build_dir()?;
     let file = format!("{name}.va");
     write(dir.path(), &file, src.text.as_bytes())?;
+    // OpenVAF may sit outside the system folders (it is downloaded, not
+    // packaged), so the folder it runs from is a read as well.
+    let reads: Vec<PathBuf> = openvaf
+        .parent()
+        .and_then(Path::parent)
+        .map(|p| vec![p.to_path_buf()])
+        .unwrap_or_default();
     let out = step(
+        jail,
         openvaf,
         &["-o".into(), format!("{name}.osdi"), file.clone()],
         dir.path(),
+        &reads,
         std::time::Instant::now() + OPENVAF_TIMEOUT,
         cancel,
     )

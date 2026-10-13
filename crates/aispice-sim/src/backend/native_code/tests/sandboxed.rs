@@ -533,7 +533,8 @@ async fn a_model_the_source_check_refuses_still_cannot_write_outside_its_run() {
     let Some((ngspice, _, sandboxes)) = setup().await else {
         return;
     };
-    let (Some(verilator), Some(cxx)) = (which("verilator"), verilog::cxx()) else {
+    let jail = crate::behavioral::Jail::new(sandboxes[0].clone());
+    let (Some(verilator), Some(cxx)) = (which("verilator"), jail.cxx()) else {
         eprintln!("skipped: needs Verilator and a C++ compiler");
         return;
     };
@@ -554,6 +555,7 @@ async fn a_model_the_source_check_refuses_still_cannot_write_outside_its_run() {
     let refused = verilog::check(&sources).unwrap_err().to_string();
     assert!(refused.contains("$fopen"), "{refused}");
     let lib = verilog::build_checked(
+        &jail,
         &verilator,
         "verilator (test)",
         &cxx,

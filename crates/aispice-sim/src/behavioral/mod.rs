@@ -16,9 +16,12 @@ pub mod verilog;
 pub mod veriloga;
 
 use crate::backend::SimError;
-use crate::backend::process::{self, ProcessSpec};
+use crate::backend::native_code::TOOL_PATH;
+use crate::backend::process::{self};
+use crate::sandbox::{Limits, Plan, Profile, Sandbox};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -297,12 +300,112 @@ pub(crate) fn read_library(path: &Path) -> Result<Vec<u8>, BuildError> {
     std::fs::read(path).map_err(|e| BuildError::Io(format!("cannot read the library: {e}")))
 }
 
-/// Run one build step in `dir` with `HOME` there, so no start-up file of the
-/// user's is read, within what is left of `deadline`.
+/// System folders a compiler toolchain runs from: the compiler driver, the
+/// assembler and linker it spawns, its helper programs and `make`. Granting
+/// execute on them lets the whole toolchain run while the untrusted sources
+/// and anything compiled from them stay in the writable build folder, which
+/// has no execute right.
+const TOOLCHAIN: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/usr/local"];
+
+/// The largest file a build step may write (`RLIMIT_FSIZE`): a Verilator
+/// build or an OSDI is a few megabytes; this is generous.
+const BUILD_MAX_FILE: u64 = 256 << 20;
+/// A build step's address space (`RLIMIT_AS`): compilers are memory-hungry.
+const BUILD_MAX_MEMORY: u64 = 6 << 30;
+
+/// Where a compiler aispice runs may reach, besides the program and the
+/// step's own reads: the tools come only from aispice's trusted path, so no
+/// project folder a `PATH` names can supply one. The sandbox that runs each
+/// step, and the system folders it already shows, come from [`Sandbox`].
+#[derive(Debug, Clone)]
+pub struct Jail {
+    sandbox: Sandbox,
+}
+
+impl Jail {
+    pub fn new(sandbox: Sandbox) -> Self {
+        Self { sandbox }
+    }
+
+    /// A C++ compiler for Verilator's link step, from the trusted path only.
+    pub fn cxx(&self) -> Option<PathBuf> {
+        tool(&["g++", "c++", "clang++"])
+    }
+
+    /// `make`, which Verilator runs, from the trusted path only.
+    pub fn make(&self) -> Option<PathBuf> {
+        tool(&["make", "gmake"])
+    }
+}
+
+/// The first of `names` found in [`TOOL_PATH`], aispice's trusted tool path.
+pub fn tool(names: &[&str]) -> Option<PathBuf> {
+    names.iter().find_map(|n| {
+        TOOL_PATH
+            .iter()
+            .map(|d| Path::new(d).join(n))
+            .find(|p| crate::backend::is_executable(p))
+    })
+}
+
+/// The fixed environment a build step runs with: nothing of aispice's own
+/// (no API keys, `CFLAGS`, `MAKEFLAGS`, `CPATH` or the like), the trusted
+/// path so a tool the compiler spawns comes from there, and the build
+/// folder as `HOME` and `TMPDIR`.
+fn build_env(dir: &Path) -> Vec<(OsString, OsString)> {
+    vec![
+        ("PATH".into(), TOOL_PATH.join(":").into()),
+        ("HOME".into(), dir.into()),
+        ("TMPDIR".into(), dir.into()),
+        ("LC_ALL".into(), "C".into()),
+    ]
+}
+
+/// The sandbox plan for one build step: `program` may read the system, the
+/// toolchain, `dir` and `reads`; execute the toolchain and `program`; write
+/// only `dir`; and starts from the fixed [`build_env`]. The seccomp denylist
+/// leaves a compiler its ordinary calls while refusing sockets, tracing,
+/// namespaces and the like.
+fn build_plan(program: &Path, args: &[String], dir: &Path, reads: &[PathBuf]) -> Plan {
+    // Only real directories: on a merged-`/usr` system `/bin`, `/lib` and
+    // the rest are symlinks into `/usr`, which the sandbox will not open as
+    // a rule (and `/usr` already covers them); on a split system they are
+    // real folders that must be granted.
+    let toolchain: Vec<PathBuf> = TOOLCHAIN
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
+        .collect();
+    let mut read = reads.to_vec();
+    read.extend(toolchain.iter().cloned());
+    let mut exec = toolchain;
+    exec.push(program.to_path_buf());
+    Plan {
+        program: program.to_path_buf(),
+        args: args.iter().map(OsString::from).collect(),
+        env: build_env(dir),
+        cwd: dir.to_path_buf(),
+        read,
+        exec,
+        write: vec![dir.to_path_buf()],
+        profile: Profile::Denylist,
+        limits: Limits {
+            file_size: Some(BUILD_MAX_FILE),
+            address_space: Some(BUILD_MAX_MEMORY),
+            nproc_headroom: Some(256),
+        },
+    }
+}
+
+/// Run one build step for `program` in the build folder `dir`, confined by
+/// `jail` ([`build_plan`]). Runs within what is left of `deadline`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn step(
+    jail: &Jail,
     program: &Path,
     args: &[String],
     dir: &Path,
+    reads: &[PathBuf],
     deadline: std::time::Instant,
     cancel: &CancellationToken,
 ) -> Result<process::ProcessOutput, BuildError> {
@@ -310,12 +413,11 @@ pub(crate) async fn step(
     if left.is_zero() {
         return Err(BuildError::Refused("the build took too long".into()));
     }
-    let mut spec = ProcessSpec::new(program, dir)
-        .env("HOME", dir)
-        .env("USERPROFILE", dir);
-    for a in args {
-        spec = spec.arg(a);
-    }
+    let plan = build_plan(program, args, dir, reads);
+    let spec = jail
+        .sandbox
+        .command(&plan)
+        .map_err(|e| BuildError::Io(e.to_string()))?;
     process::run(&spec, left, cancel)
         .await
         .map_err(|e| match e {
@@ -371,18 +473,19 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// A program's version line, from `--version`, within ten seconds.
+/// A program's version line, from `--version`, within ten seconds. This
+/// runs the trusted compiler itself on no input, so it needs no sandbox,
+/// but it still starts from a fixed environment (nothing of aispice's, the
+/// trusted path) so it matches a build and leaks no variable.
 pub async fn version(program: &Path) -> Option<String> {
     let dir = build_dir().ok()?;
-    let out = step(
-        program,
-        &["--version".to_string()],
-        dir.path(),
-        std::time::Instant::now() + Duration::from_secs(10),
-        &CancellationToken::new(),
-    )
-    .await
-    .ok()?;
+    let mut spec = process::ProcessSpec::new(program, dir.path());
+    spec.args = vec![OsString::from("--version")];
+    spec.clear_env = true;
+    spec.env = build_env(dir.path());
+    let out = process::run(&spec, Duration::from_secs(10), &CancellationToken::new())
+        .await
+        .ok()?;
     out.combined()
         .lines()
         .map(str::trim)
@@ -458,6 +561,56 @@ impl Toolchain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build step may write only its build folder, reads the system, the
+    /// toolchain, the build folder and the step's own reads (never the
+    /// project), executes only the toolchain and the compiler, runs under
+    /// the seccomp denylist, and starts from a fixed environment with
+    /// nothing of aispice's own and the trusted path.
+    #[test]
+    fn a_build_step_is_confined_to_the_build_folder_and_the_toolchain() {
+        let dir = Path::new("/tmp/aispice-build-xyz");
+        let shim = PathBuf::from("/opt/ngspice/share/ngspice/scripts/src");
+        let cc = PathBuf::from("/opt/openvaf/bin/openvaf");
+        let reads = [shim.clone()];
+        let plan = build_plan(&cc, &["-o".into(), "x.osdi".into()], dir, &reads);
+        assert_eq!(plan.profile, Profile::Denylist);
+        assert_eq!(plan.write, vec![dir.to_path_buf()]);
+        assert_eq!(plan.cwd, dir.to_path_buf());
+        assert!(plan.read.contains(&shim), "{:?}", plan.read);
+        assert!(plan.exec.contains(&cc), "{:?}", plan.exec);
+        // The toolchain folders present on this machine are read and
+        // executable; `/usr` is on every supported machine.
+        assert!(plan.read.contains(&PathBuf::from("/usr")));
+        assert!(plan.exec.contains(&PathBuf::from("/usr")));
+        // A merged-/usr symlink such as `/bin` is never a rule path.
+        for p in &plan.read {
+            assert!(
+                !std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()),
+                "{p:?} is a symlink"
+            );
+        }
+        // Nothing of the environment but the fixed five.
+        let keys: Vec<_> = plan.env.iter().map(|(k, _)| k.to_str().unwrap()).collect();
+        assert_eq!(keys, ["PATH", "HOME", "TMPDIR", "LC_ALL"]);
+        let path = &plan.env[0].1;
+        assert_eq!(path, "/usr/local/bin:/usr/bin:/bin");
+        assert_eq!(plan.env[1].1, dir);
+        assert!(plan.limits.file_size.is_some() && plan.limits.nproc_headroom.is_some());
+    }
+
+    #[test]
+    fn the_build_tools_come_only_from_the_trusted_path() {
+        for name in ["g++", "c++", "clang++", "make", "verilator", "openvaf"] {
+            if let Some(p) = tool(&[name]) {
+                let dir = p.parent().unwrap().to_string_lossy().into_owned();
+                assert!(
+                    TOOL_PATH.contains(&dir.as_str()),
+                    "{name} resolved outside the trusted path: {p:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn long_or_wide_runs_are_refused_before_anything_builds() {

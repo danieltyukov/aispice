@@ -226,6 +226,7 @@ impl Builder {
         tools: &Tools,
         va: &[&VaModel],
         cosim: &[&CosimModel],
+        jail: &aispice_sim::behavioral::Jail,
         cancel: &CancellationToken,
     ) -> Result<Vec<Arc<Library>>, String> {
         let mut out = Vec::new();
@@ -244,7 +245,7 @@ impl Builder {
                     continue;
                 }
                 let lib = Arc::new(
-                    veriloga::build(&exe, &version, &m.source, cancel)
+                    veriloga::build(jail, &exe, &version, &m.source, cancel)
                         .await
                         .map_err(build_error)?,
                 );
@@ -254,14 +255,17 @@ impl Builder {
             }
         }
         if !cosim.is_empty() {
+            // Verilator and the C++ compiler come from aispice's trusted tool
+            // path (or the configured Verilator), never a project's `PATH`.
             let exe = tools
                 .verilator
                 .clone()
-                .or_else(|| aispice_sim::backend::which("verilator"))
-                .ok_or("co-simulation needs Verilator (verilator on PATH, or verilator_path in the settings)")?;
+                .or_else(|| aispice_sim::behavioral::tool(&["verilator"]))
+                .ok_or("co-simulation needs Verilator (on aispice's tool path, or verilator_path in the settings)")?;
             let version = self.version(&exe).await?;
-            let cxx =
-                verilog::cxx().ok_or("co-simulation needs a C++ compiler (g++ or clang++)")?;
+            let cxx = jail.cxx().ok_or(
+                "co-simulation needs a C++ compiler (g++ or clang++) on aispice's tool path",
+            )?;
             let ngspice = tools
                 .ngspice
                 .clone()
@@ -287,7 +291,7 @@ impl Builder {
                 }
                 let lib = Arc::new(
                     verilog::build(
-                        &exe, &version, &cxx, &shim, &m.model, &m.top, &m.sources, cancel,
+                        jail, &exe, &version, &cxx, &shim, &m.model, &m.top, &m.sources, cancel,
                     )
                     .await
                     .map_err(build_error)?,

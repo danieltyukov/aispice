@@ -221,15 +221,18 @@ async fn a_deck_cannot_name_a_library_or_a_program() {
     let (dir, ws) = project("mixed_signal", RunnerConfig::default());
     let root = dir.path().join("mixed_signal");
     std::fs::write(root.join("lib.so"), b"").unwrap();
+    // The d_cosim/d_process card itself is refused as native code, with no
+    // `A` instance, so the refusal is the policy's and not the translator
+    // dropping an instance of an unknown type.
     for card in [
-        ".model counter d_cosim simulation=\"./lib.so\"",
-        ".model counter d_cosim,simulation=\"lib.so\"",
-        ".model counter (d_cosim simulation=\"lib.so\")",
+        ".model mycode d_cosim simulation=\"./lib.so\"",
+        ".model mycode d_cosim,simulation=\"lib.so\"",
+        ".model mycode (d_cosim simulation=\"lib.so\")",
         ".model p d_process process_file=\"./lib.so\"",
     ] {
         std::fs::write(
             root.join("evil.cir"),
-            format!("* evil\nV1 a 0 1\nAbr [a] [ad] tobit\n.model tobit adc_bridge\nA1 [ad] [q] null counter\n{card}\n.tran 1u 10u\n.end\n"),
+            format!("* evil\nV1 a 0 1\nR1 a 0 1k\n{card}\n.op\n.end\n"),
         )
         .unwrap();
         let out = call(
