@@ -16,8 +16,8 @@ use crate::workspace::{FileWrite, Workspace};
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
 use aispice_core::macropkg::{
-    CheckOptions, Corner, Direction, Domain, Evidence, MANIFEST, MacroKind, Manifest, Pdk, PinKind,
-    Producer, SCHEMA_VERSION, Size, Status, check_package,
+    CheckOptions, Corner, Direction, Domain, Evidence, MANIFEST, MacroKind, Manifest, Pdk, PdkLibs,
+    PinKind, Producer, SCHEMA_VERSION, Size, Status, check_package,
 };
 use aispice_layout::drc::{self, DrcChecks};
 use aispice_layout::extract;
@@ -421,8 +421,8 @@ async fn build(
     let env = layout::env(ws)?;
     // A macro named like a cell of the PDK would clash with it in a chip and
     // in SPICE, which ignores case.
-    let pdk_cells = mx::pdk_cell_names(&env.files.root)?;
-    if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
+    let pdk_libs = PdkLibs::load(&env.files.root)?;
+    if let Some(why) = mx::pdk_name_clash(&name, &pdk_libs.names) {
         return Err(format!("{why}; choose another name with `name`"));
     }
     let p = env.project.clone();
@@ -846,7 +846,7 @@ async fn build(
         &pkg,
         &CheckOptions {
             pdk: Some(format!("{}@{commit}", pdk.name)),
-            pdk_cells,
+            pdk_libs: Some(pdk_libs),
             ..Default::default()
         },
     )

@@ -34,7 +34,6 @@ version = "0.2.0"
 dependencies = [
  "aispice-agent",
  "aispice-core",
- "aispice-layout",
  "aispice-tools",
  "anyhow",
  "assert_cmd",
@@ -136,6 +135,7 @@ name = "aispice-sim"
 version = "0.2.0"
 dependencies = [
  "aispice-core",
+ "aispice-sim",
  "async-trait",
  "dirs",
  "futures",

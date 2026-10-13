@@ -10,6 +10,10 @@ the edges on Metal2 and Metal3, so aispice's chip router reaches every pin
 from outside the block.
 
 The package holds PDK cell layouts, so it is a test output, never committed.
+Its GDS keeps the standard cells it uses under their own names, byte for byte
+the PDK's, which macro/v1's pdk.cell_name accepts from a check that has the
+PDK's libraries (the chip's has them). Its SPICE netlist instantiates those
+cells and defines only the block, since LVS takes the cells from the PDK's CDL.
 
     python3 harden_counter.py OUT_DIR [--librelane librelane]
 
