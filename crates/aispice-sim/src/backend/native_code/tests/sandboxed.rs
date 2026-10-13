@@ -2,15 +2,19 @@
 //!
 //! A probe library, built here from C and handed to the backend as if
 //! aispice had compiled it from a project's Verilog-A, runs as soon as
-//! ngspice loads it. It tries what the sandbox must stop (a socket of every
-//! family, a signal to a sibling of ngspice, to aispice and to everyone, a
-//! file outside the run folder, in a folder it may only read and in `/tmp`,
-//! reading a file it was not given) and what it must allow (a file in the
-//! run folder, a signal to itself, `tmpfile()`, which must land in the run
-//! folder), and prints what happened and its whole environment. The same
-//! probe in an unconfined ngspice reaches everything, so a probe that
-//! silently did nothing cannot pass. Skips without ngspice, a C compiler or
-//! a sandbox, unless `AISPICE_REQUIRE_SANDBOXES` asks for one.
+//! ngspice loads it, in a project whose deck includes one model file. The
+//! run may read what the netlist policy says the deck reads
+//! ([`aispice_core::netlist::check_reads`]), as aispice's runner grants it.
+//! The probe tries what the sandbox must stop (a socket of every family, a
+//! signal to a sibling of ngspice, to aispice and to everyone, a file
+//! outside the run folder, in the project and in `/tmp`, reading aispice's
+//! state in the project's `.aispice` folder, another project file and a
+//! file outside) and what it must allow (a file in the run folder, a signal
+//! to itself, reading the included file, `tmpfile()`, which must land in
+//! the run folder), and prints what happened and its whole environment.
+//! The same probe in an unconfined ngspice reaches everything, so a probe
+//! that silently did nothing cannot pass. Skips without ngspice, a C
+//! compiler or a sandbox, unless `AISPICE_REQUIRE_SANDBOXES` asks for one.
 
 use super::*;
 use crate::backend::ngspice::with_cosim_models;
@@ -42,20 +46,27 @@ static void create(const char *what, const char *path) {
     if (fd >= 0) close(fd);
 }
 
+static void readable(const char *what, const char *path) {
+    int fd = open(path, O_RDONLY);
+    report(what, fd);
+    if (fd >= 0) close(fd);
+}
+
 __attribute__((constructor)) static void probe(void) {
     fprintf(stderr, "PROBE start\n");
     for (char **e = environ; *e; e++)
         fprintf(stderr, "PROBE env %.*s\n", (int) strcspn(*e, "="), *e);
     create("write-inside", "inside.txt");
     create("write-outside", OUTSIDE);
-    create("write-readable", READABLE "/planted.txt");
+    create("write-project", PROJECT "/models/planted.txt");
     create("write-tmp", TMPTAG);
     int fd = open("/tmp", O_RDWR | O_TMPFILE, 0600);
     report("tmp-unnamed", fd);
     if (fd >= 0) close(fd);
-    fd = open(SECRET, O_RDONLY);
-    report("read-outside", fd);
-    if (fd >= 0) close(fd);
+    readable("read-included", PROJECT "/models/r.lib");
+    readable("read-state", PROJECT "/.aispice/state.json");
+    readable("read-project", PROJECT "/notes.txt");
+    readable("read-outside", SECRET);
     FILE *t = tmpfile();
     report("tmpfile", t ? 0 : -1);
     if (t) {
@@ -103,12 +114,10 @@ __attribute__((constructor)) static void probe(void) {
 /// The attempts that must fail in every sandbox. `kill(-1)` returns 0
 /// whenever it had a target, even when every target refused, so Landlock's
 /// signal scope alone would let it read as allowed while it reaches
-/// nothing; seccomp's signal program refuses it outright. Writing outside
-/// the run folder and in `/tmp` is refused under Landlock; bubblewrap lets
-/// both land in its own `/tmp`, which nobody sees, so for both the test
-/// looks for the files on the real filesystem.
+/// nothing; seccomp's signal program refuses it outright.
 const MUST_FAIL: &[&str] = &[
-    "write-readable",
+    "read-state",
+    "read-project",
     "read-outside",
     "kill-sibling",
     "tkill-sibling",
@@ -119,32 +128,67 @@ const MUST_FAIL: &[&str] = &[
     "kill-everyone",
 ];
 
+/// Writes the probe makes that Landlock refuses. bubblewrap lets them land
+/// in its own root and `/tmp`, which nobody sees, so for every sandbox the
+/// test also looks for the files on the real filesystem.
+const LANDLOCK_REFUSES: &[&str] = &["write-outside", "write-project", "write-tmp", "tmp-unnamed"];
+
 /// What the probe sends its sibling in a sandbox: a signal that would end
 /// it.
 const SIGTERM: i32 = 15;
 
-const DECK: &str = "* probe\nV1 a 0 1\nR1 a 0 1k\n.op\n.end\n";
-
-/// Where one probe reaches: files and processes outside the run.
+/// Where one probe reaches: a project with aispice's state, a model file
+/// its deck includes and another file, and files and processes outside.
 struct Targets {
+    project: PathBuf,
     outside: PathBuf,
-    readable: PathBuf,
     secret: PathBuf,
     tmp_tag: PathBuf,
 }
 
 impl Targets {
     fn new(dir: &Path, n: usize) -> Self {
-        let readable = dir.join("readable");
-        std::fs::create_dir_all(&readable).unwrap();
+        let project = dir.join("project");
+        std::fs::create_dir_all(project.join("models")).unwrap();
+        std::fs::create_dir_all(project.join(".aispice")).unwrap();
+        std::fs::write(project.join("models/r.lib"), "R1 a 0 1k\n").unwrap();
+        std::fs::write(project.join(".aispice/state.json"), "{}").unwrap();
+        std::fs::write(project.join("notes.txt"), "not for the model").unwrap();
         let secret = dir.join("secret.txt");
         std::fs::write(&secret, "not for the model").unwrap();
         Self {
+            project: project.canonicalize().unwrap(),
             outside: dir.join("escaped.txt"),
-            readable,
             secret,
             tmp_tag: PathBuf::from(format!("/tmp/aispice-probe-{}-{n}", std::process::id())),
         }
+    }
+
+    fn policy(&self) -> aispice_core::netlist::Policy {
+        aispice_core::netlist::Policy {
+            base_dir: self.project.clone(),
+            allowed_dirs: vec![self.project.clone()],
+            allow_control_blocks: false,
+            trusted_dirs: Vec::new(),
+        }
+    }
+
+    /// The deck, its include naming the checked file as the runner writes
+    /// it.
+    fn deck(&self) -> String {
+        aispice_core::netlist::canonical_includes(
+            "* probe\nV1 a 0 1\n.include models/r.lib\n.op\n.end\n",
+            &self.policy(),
+        )
+    }
+
+    /// What the runner grants the run: the files the policy says the deck
+    /// reads, here the one model file.
+    fn reads(&self) -> Vec<PathBuf> {
+        let (violations, files) = aispice_core::netlist::check_reads(&self.deck(), &self.policy());
+        assert!(violations.is_empty(), "{violations:?}");
+        assert_eq!(files, vec![self.project.join("models/r.lib")]);
+        files
     }
 }
 
@@ -166,7 +210,7 @@ fn probe(cc: &Path, dir: &Path, t: &Targets, sibling: u32, signal: i32) -> Libra
         .args(["-shared", "-fPIC", "-O0", "-o"])
         .arg(&so)
         .arg(quoted("OUTSIDE", &t.outside))
-        .arg(quoted("READABLE", &t.readable))
+        .arg(quoted("PROJECT", &t.project))
         .arg(quoted("SECRET", &t.secret))
         .arg(quoted("TMPTAG", &t.tmp_tag))
         .arg(define("SIBLING", &sibling))
@@ -219,17 +263,13 @@ fn environment_seen(log: &str) -> Vec<String> {
 }
 
 /// ngspice's output with `lib` loaded through the backend in `sandbox`,
-/// reading `reads`. A run without results stopped before the deck ran,
-/// and shows nothing about what a working simulation can reach.
-async fn sandboxed(
-    sandbox: &Sandbox,
-    lib: &Library,
-    reads: Vec<PathBuf>,
-    run_dir: &Path,
-) -> String {
-    let mut job = SimJob::new(DECK, run_dir);
+/// running the probe deck and reading what the runner would grant. A run
+/// without results stopped before the deck ran, and shows nothing about
+/// what a working simulation can reach.
+async fn sandboxed(sandbox: &Sandbox, lib: &Library, t: &Targets, run_dir: &Path) -> String {
+    let mut job = SimJob::new(t.deck(), run_dir);
     job.libraries = vec![Arc::new(lib.clone())];
-    job.reads = reads;
+    job.reads = t.reads();
     job.sandbox = Some(sandbox.clone());
     let what = sandbox.describe();
     match Ngspice::default()
@@ -244,7 +284,7 @@ async fn sandboxed(
 }
 
 /// ngspice's output with the probe loaded and nothing confining it.
-fn unconfined(exe: &Path, lib: &Library) -> String {
+fn unconfined(exe: &Path, lib: &Library, t: &Targets) -> String {
     let dir = tempfile::tempdir().unwrap();
     let so = dir.path().join(lib.file_name());
     std::fs::write(&so, &lib.bytes).unwrap();
@@ -253,7 +293,7 @@ fn unconfined(exe: &Path, lib: &Library) -> String {
         format!("osdi '{}'\n", so.display()),
     )
     .unwrap();
-    std::fs::write(dir.path().join("probe.cir"), DECK).unwrap();
+    std::fs::write(dir.path().join("probe.cir"), t.deck()).unwrap();
     let out = Command::new(exe)
         .args(["-b", "probe.cir"])
         .current_dir(dir.path())
@@ -314,18 +354,18 @@ async fn compiled_code_in_a_sandboxed_ngspice_reaches_nothing_outside_its_run() 
         let t = Targets::new(dir.path(), n);
         let mut sibling = Sibling::start();
         let lib = probe(&cc, dir.path(), &t, sibling.pid(), SIGTERM);
-        let log = sandboxed(
-            sandbox,
-            &lib,
-            vec![t.readable.clone()],
-            &dir.path().join("runs"),
-        )
-        .await;
+        let log = sandboxed(sandbox, &lib, &t, &dir.path().join("runs")).await;
         assert!(
             log.contains("PROBE start") && log.contains("PROBE end"),
             "{what}: the probe did not run to the end:\n{log}"
         );
-        for what_ok in ["write-inside", "kill-self", "tmpfile", "tmpfile-in-run"] {
+        for what_ok in [
+            "write-inside",
+            "read-included",
+            "kill-self",
+            "tmpfile",
+            "tmpfile-in-run",
+        ] {
             assert_eq!(
                 allowed(&log, what_ok),
                 Some(true),
@@ -340,7 +380,7 @@ async fn compiled_code_in_a_sandboxed_ngspice_reaches_nothing_outside_its_run() 
             );
         }
         if !sandbox.is_bwrap() {
-            for what_not in ["write-outside", "write-tmp", "tmp-unnamed"] {
+            for what_not in LANDLOCK_REFUSES {
                 assert_eq!(
                     allowed(&log, what_not),
                     Some(false),
@@ -362,8 +402,8 @@ async fn compiled_code_in_a_sandboxed_ngspice_reaches_nothing_outside_its_run() 
         );
         assert!(!t.outside.exists(), "{what}: a file was written outside");
         assert!(
-            !t.readable.join("planted.txt").exists(),
-            "{what}: a file was written in a folder it may only read"
+            !t.project.join("models/planted.txt").exists(),
+            "{what}: a file was written in the project"
         );
         assert!(sibling.alive(), "{what}: the sibling was killed");
     }
@@ -381,12 +421,15 @@ async fn the_probe_reaches_all_of_it_when_ngspice_runs_unconfined() {
     let mut sibling = Sibling::start();
     // Signal 0 only checks that a signal could be sent.
     let lib = probe(&cc, dir.path(), &t, sibling.pid(), 0);
-    let log = unconfined(&exe, &lib);
+    let log = unconfined(&exe, &lib, &t);
     for what in [
         "write-inside",
         "write-outside",
-        "write-readable",
+        "write-project",
         "write-tmp",
+        "read-included",
+        "read-state",
+        "read-project",
         "read-outside",
         "kill-sibling",
         "kill-aispice",
@@ -405,6 +448,7 @@ async fn the_probe_reaches_all_of_it_when_ngspice_runs_unconfined() {
     );
     assert!(environment_seen(&log).len() > 5, "{log}");
     assert!(t.outside.exists() && t.tmp_tag.exists());
+    assert!(t.project.join("models/planted.txt").exists());
     assert!(sibling.alive());
 }
 
@@ -418,7 +462,7 @@ async fn below_landlock_4_compiled_code_is_not_loaded() {
     let dir = tempfile::tempdir().unwrap();
     let t = Targets::new(dir.path(), 98);
     let lib = probe(&cc, dir.path(), &t, std::process::id(), 0);
-    let mut job = SimJob::new(DECK, dir.path().join("runs"));
+    let mut job = SimJob::new(t.deck(), dir.path().join("runs"));
     job.libraries = vec![Arc::new(lib)];
     job.sandbox = Some(Sandbox::landlock_for_tests(3));
     let e = Ngspice::default()

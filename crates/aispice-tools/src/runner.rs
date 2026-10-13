@@ -647,8 +647,8 @@ impl Runner {
         };
         let deck = netlist::canonical_includes(&deck, &policy);
         // Check again after the rewrites, so the deck the simulator receives
-        // is exactly a deck the policy accepted.
-        let violations = netlist::check_policy(&deck, &policy);
+        // is exactly a deck the policy accepted, and note the files it reads.
+        let (violations, deck_reads) = netlist::check_reads(&deck, &policy);
         if !violations.is_empty() {
             let msg = violations
                 .iter()
@@ -704,12 +704,11 @@ impl Runner {
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
         job.sandbox = sandbox;
-        // What a confined run may read of the user's: what the policy let
-        // the deck include.
-        job.reads = std::iter::once(policy.base_dir.clone())
-            .chain(policy.allowed_dirs.iter().cloned())
-            .chain(trusted.iter().cloned())
-            .collect();
+        // What a sandboxed run may read of the user's: the files the deck
+        // reads, as the policy resolved them, and the project's PDK. Not the
+        // project folder, which holds aispice's own state under `.aispice/`.
+        job.reads = deck_reads;
+        job.reads.extend(pdk.iter().map(|p| p.root.clone()));
         for lib in &libraries {
             notes.push(format!(
                 "loaded {} built by aispice from the project's {} (SHA-256 {})",

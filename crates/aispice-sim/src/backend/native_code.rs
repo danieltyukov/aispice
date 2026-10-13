@@ -7,9 +7,10 @@
 //! sandbox ([`crate::sandbox`]) holds whatever gets past them. ngspice runs
 //! there under seccomp's [`Profile::NativeCode`] and:
 //!
-//! - reads the system, its own install, the folders the netlist policy lets
-//!   the deck include from (the project, the model folders, the registered
-//!   PDKs) and the run folder;
+//! - reads the system, its own install, the files the deck includes and
+//!   names as the netlist policy resolved them, the project's PDK and the
+//!   run folder, and nothing else of the project: not the project folder,
+//!   which holds aispice's own state under `.aispice/`;
 //! - executes only itself and the dynamic loader;
 //! - writes only the run folder. ngspice copies its input into `tmpfile()`
 //!   in every batch run, and glibc makes that file in `/tmp` whatever
@@ -415,8 +416,8 @@ pub fn environment(run: &Path) -> Vec<(OsString, OsString)> {
 }
 
 /// What ngspice at `exe` may touch while it runs in the run folder `run`
-/// with `args`: `reads` are the folders and files the deck may include and
-/// load. A run folder whose path has a space or a colon is refused, since
+/// with `args`: `reads` are the files the deck includes and names and the
+/// project's PDK folder ([`super::SimJob::reads`]). A run folder whose path has a space or a colon is refused, since
 /// `LD_PRELOAD` splits at both.
 pub(crate) fn plan(
     exe: &Path,

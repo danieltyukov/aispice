@@ -159,12 +159,23 @@ const MAX_INCLUDE_TOTAL: u64 = 256 * 1024 * 1024;
 
 /// Check netlist text. An empty result means the deck may run.
 pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
+    check_reads(text, policy).0
+}
+
+/// [`check`], and the files a simulator running the deck reads: every file
+/// it includes, resolved and followed into the files those include, as
+/// [`check`] follows them, and every existing file a value on a line names
+/// (`file=...`). Symbolic links are resolved. With no violations, these are
+/// all the files of the project and the model folders the deck can make a
+/// simulator open; a sandbox grants reading them and nothing else there.
+pub fn check_reads(text: &str, policy: &Policy) -> (Vec<Violation>, Vec<PathBuf>) {
     let mut out = Vec::new();
     let mut seen = Vec::new();
     let cx = Cx {
         policy,
         trusted: canonical_dirs(&policy.trusted_dirs),
         read: std::cell::Cell::new(0),
+        named: std::cell::RefCell::new(Vec::new()),
     };
     check_inner(
         &cx,
@@ -182,7 +193,11 @@ pub fn check(text: &str, policy: &Policy) -> Vec<Violation> {
             unique.push(v);
         }
     }
-    unique
+    let mut files = seen;
+    files.extend(cx.named.into_inner());
+    files.sort();
+    files.dedup();
+    (unique, files)
 }
 
 struct Cx<'a> {
@@ -191,6 +206,8 @@ struct Cx<'a> {
     trusted: Vec<PathBuf>,
     /// Bytes of included files read so far.
     read: std::cell::Cell<u64>,
+    /// Existing files that values on checked lines name.
+    named: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 fn canonical_dirs(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -440,7 +457,7 @@ fn check_lines(
             }
             Some(Ok(include)) => include,
             None => {
-                check_values(line, &lower, base, policy, trusted, out);
+                check_values(cx, line, &lower, base, trusted, out);
                 continue;
             }
         };
@@ -589,13 +606,14 @@ fn ngspice_words(lower: &str) -> Vec<(&str, bool)> {
 /// value that names a file (`file=...`, `wavefile=...`, anything with a path
 /// separator) inside the allowed folders.
 fn check_values(
+    cx: &Cx,
     line: &str,
     lower: &str,
     base: &Path,
-    policy: &Policy,
     trusted: bool,
     out: &mut Vec<Violation>,
 ) {
+    let policy = cx.policy;
     if lower
         .split(|c: char| c.is_whitespace() || c == ',')
         .any(|t| t.starts_with("cmd=") || t == "cmd")
@@ -606,11 +624,13 @@ fn check_values(
         });
     }
     for value in path_like_values(line, trusted) {
-        if let Err(reason) = resolve(&value, base, policy) {
-            out.push(Violation {
+        match resolve(&value, base, policy) {
+            Err(reason) => out.push(Violation {
                 line: line.to_string(),
                 reason,
-            });
+            }),
+            Ok(Some(file)) if file.is_file() => cx.named.borrow_mut().push(file),
+            Ok(_) => {}
         }
     }
 }
@@ -1333,6 +1353,36 @@ mod tests {
         let v = check("t\n.include bad.lib\n", &policy_at(&d));
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].reason.contains("bad.lib"));
+    }
+
+    /// The files a simulator reads for a deck: its includes, followed into
+    /// the files they include, and the files values name; no folder, and
+    /// nothing else of the project.
+    #[test]
+    fn the_files_a_deck_reads_are_its_includes_and_the_files_it_names() {
+        let d = temp("reads");
+        std::fs::create_dir_all(d.join("models/sub")).unwrap();
+        std::fs::create_dir_all(d.join(".aispice")).unwrap();
+        std::fs::write(d.join(".aispice/state.json"), "{}").unwrap();
+        std::fs::write(d.join("models/top.lib"), "* top\n.include sub/inner.lib\n").unwrap();
+        std::fs::write(
+            d.join("models/sub/inner.lib"),
+            "* inner\n.model D1 D(Is=1n)\n",
+        )
+        .unwrap();
+        std::fs::write(d.join("stim.txt"), "0 0\n1u 1\n").unwrap();
+        let deck = "t\n.include models/top.lib\nV1 a 0 PWL file=stim.txt\nD1 a 0 D1\n";
+        let (v, files) = check_reads(deck, &policy_at(&d));
+        assert!(v.is_empty(), "{v:?}");
+        let real = |p: &str| d.join(p).canonicalize().unwrap();
+        let mut want = vec![
+            real("models/top.lib"),
+            real("models/sub/inner.lib"),
+            real("stim.txt"),
+        ];
+        want.sort();
+        assert_eq!(files, want);
+        assert_eq!(check(deck, &policy_at(&d)), v);
     }
 
     #[cfg(unix)]

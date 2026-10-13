@@ -115,9 +115,10 @@ pub struct SimJob {
     /// private run folder, checks each SHA-256 and loads them; the other
     /// backends refuse a job that has any.
     pub libraries: Vec<std::sync::Arc<crate::behavioral::Library>>,
-    /// The folders the deck's includes may come from: the netlist policy's
-    /// project, model and PDK folders. A run that loads `libraries` may
-    /// read these and nothing else of the user's.
+    /// What the deck reads of the user's: the files it includes and names,
+    /// as the netlist policy resolved them, and the folder of the project's
+    /// PDK. A run that loads `libraries` may read these and nothing else of
+    /// the user's.
     pub reads: Vec<PathBuf>,
     /// The sandbox a run that loads `libraries` runs in; `None` finds one
     /// with [`native_code::ready`] when the run starts.
