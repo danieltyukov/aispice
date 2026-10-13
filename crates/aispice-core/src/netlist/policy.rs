@@ -148,9 +148,33 @@ const CONTROL_ALLOWED: &[&str] = &[
     "quit", "exit",
 ];
 
-/// Variables a control block may not set: where ngspice looks for files it
-/// reads, and the editor it would start.
-const CONTROL_REFUSED_VARS: &[&str] = &["sourcepath", "editor"];
+/// The only variables a control line may `set` or `unset`: how numbers and
+/// vectors are printed and written. A variable can change what an allowed
+/// command does (where `write` puts its file, which program or folder
+/// ngspice uses, how it reads the deck), so the list names the harmless
+/// ones and every other is refused.
+const CONTROL_SET_VARS: &[&str] = &[
+    "numdgt",
+    "units",
+    "wr_singlescale",
+    "wr_vecnames",
+    "appendwrite",
+    "width",
+    "height",
+];
+
+/// Commands whose arguments may substitute a variable with `$`: they only
+/// print or compute. Anywhere else (the command word, a file name, a
+/// variable's value, an analysis) a `$` could build what the allowlist
+/// would refuse, so it is refused.
+const CONTROL_DOLLAR_OK: &[&str] = &["echo", "print", "let", "if", "while", "foreach", "repeat"];
+
+/// Commands whose arguments may hold quotes: they only print.
+const CONTROL_QUOTES_OK: &[&str] = &["echo", "print"];
+
+/// `meas` keys that would name a file. ngspice's measurements write none
+/// that aispice knows of; these are refused should a version add one.
+const MEAS_FILE_KEYS: &[&str] = &["out", "outfile", "file", "filename", "path", "rawfile"];
 
 /// A line that starts with this is read by ngspice as a control command in
 /// some modes (through `source`, interactively), so the policy treats it as
@@ -538,7 +562,15 @@ fn check_lines(
         // Control blocks are allowed only by the user's setting, and then
         // only the commands on the allowlist; the run itself is sandboxed.
         if in_control {
-            if let Some(reason) = control_line(&lower) {
+            // aispice joins `+` lines as ngspice joins netlist lines; inside
+            // a control block it does not model the joining, so a joined
+            // line is refused rather than read differently.
+            let reason = if logical.continued {
+                Some("a `+` continuation inside a control block; write each control command on one line".to_string())
+            } else {
+                control_line(&lower)
+            };
+            if let Some(reason) = reason {
                 out.push(Violation {
                     line: line.clone(),
                     reason,
@@ -721,10 +753,13 @@ fn code_running_model(lower: &str) -> Option<String> {
 /// a command, so the line is a control line.
 fn star_hash_command(line: &str) -> Option<&str> {
     let rest = line.strip_prefix(CONTROL_COMMENT)?;
-    match rest.trim_start().chars().next() {
-        None => None,
-        Some(c) if "#*-=~+/|".contains(c) => None,
-        Some(_) => Some(rest),
+    // Only a banner of `#` (IHP frames its model files with `*####...`) or
+    // nothing at all is a comment; any other text after `*#` is read as a
+    // control command.
+    if rest.chars().all(|c| c == '#' || c.is_whitespace()) {
+        None
+    } else {
+        Some(rest)
     }
 }
 
@@ -742,6 +777,10 @@ fn control_line(lower: &str) -> Option<String> {
             "{why}; control blocks allow only analyses, measurements, vectors and plain variables, printing, loops and conditions, and wrdata/write to a bare file name"
         ))
     };
+    // Characters whose meaning in ngspice's control language aispice does
+    // not model (command substitution, redirection, a second command, an
+    // escape or line continuation, a comment inside the line): a line with
+    // any of them is refused rather than read differently from ngspice.
     if lower.contains('`') {
         return refused("a backquote runs a command and substitutes its output".into());
     }
@@ -753,6 +792,12 @@ fn control_line(lower: &str) -> Option<String> {
     if lower.contains(';') {
         return refused("`;` would put another command on the line".into());
     }
+    if lower.contains('\\') {
+        return refused("a backslash escapes a character or continues the line".into());
+    }
+    if lower.contains('#') {
+        return refused("`#` starts a comment inside a control line".into());
+    }
     let words: Vec<&str> = lower.split_whitespace().collect();
     let &command = words.first()?;
     if !CONTROL_ALLOWED.contains(&command) {
@@ -760,31 +805,49 @@ fn control_line(lower: &str) -> Option<String> {
             "`{command}` is not on aispice's list of control commands"
         ));
     }
+    if lower.contains('$') && !CONTROL_DOLLAR_OK.contains(&command) {
+        return refused(format!(
+            "`$` substitutes a variable, which `{command}` may not do (only echo, print, let and loop conditions may)"
+        ));
+    }
+    if lower.contains(['"', '\'']) && !CONTROL_QUOTES_OK.contains(&command) {
+        return refused(format!(
+            "quotes group words in ways `{command}` may not use (only echo and print may)"
+        ));
+    }
     match command {
         "set" | "unset" => {
             // `set a = 1`, `set a=1`, `set a`, `unset a b`: the names are
-            // the words before an `=` (or each word for `unset`).
+            // the words before an `=` (or each word for `unset`), and a
+            // value is a plain number or word.
             let rest = lower[command.len()..].trim();
-            let names: Vec<&str> = if command == "set" {
-                rest.split('=')
+            let (names, value): (Vec<&str>, Option<&str>) = if command == "set" {
+                let mut parts = rest.splitn(2, '=');
+                let names = parts
                     .next()
                     .map(|n| n.split_whitespace().collect())
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                (names, parts.next().map(str::trim))
             } else {
-                rest.split_whitespace().collect()
+                (rest.split_whitespace().collect(), None)
             };
+            if names.is_empty() {
+                return refused(format!("`{command}` names no variable"));
+            }
             for name in names {
-                let plain = name
+                if !CONTROL_SET_VARS.contains(&name) {
+                    return refused(format!(
+                        "`{name}` is not one of the variables a control block may set ({})",
+                        CONTROL_SET_VARS.join(", ")
+                    ));
+                }
+            }
+            if let Some(v) = value
+                && !v
                     .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                if !plain {
-                    return refused(format!("`{name}` is not a plain variable name"));
-                }
-                if CONTROL_REFUSED_VARS.contains(&name) {
-                    return refused(format!("the `{name}` variable may not be set"));
-                }
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+            {
+                return refused(format!("`{v}` is not a plain value"));
             }
         }
         "wrdata" | "write" => {
@@ -799,6 +862,15 @@ fn control_line(lower: &str) -> Option<String> {
                     return refused(format!(
                         "`{command}` may write only to a bare file name in the run folder, not `{file}`"
                     ));
+                }
+            }
+        }
+        "meas" | "measure" => {
+            for w in &words[1..] {
+                if let Some((key, _)) = w.split_once('=')
+                    && MEAS_FILE_KEYS.contains(&key)
+                {
+                    return refused(format!("`{key}=` would name a file for `{command}`"));
                 }
             }
         }
@@ -2035,6 +2107,32 @@ mod tests {
             "set editor = vi",
             "set 9x = 1",
             "set a-b = 1",
+            // Only the print and write format variables may be set, to a
+            // plain value.
+            "set rawfile = x.raw",
+            "set filetype = ascii",
+            "set ngbehavior = ps",
+            "set askquit",
+            "set noaskquit",
+            "set",
+            "unset rawfile",
+            "set numdgt = $x",
+            "set numdgt = /tmp",
+            // `$` only where it prints or computes.
+            "wrdata $f v(a)",
+            "tran $step 1u",
+            "meas tran x max $v",
+            "unset $x",
+            // Quotes only where they print.
+            "write \"out.raw\" v(a)",
+            "let x = 'a'",
+            // Escapes and in-line comments.
+            "echo a \\",
+            "echo \\shell",
+            "let x = 1 # note",
+            // A measurement that would name a file.
+            "meas tran x max v(a) out=x.txt",
+            "measure tran x max v(a) file=x.txt",
             "unset $x",
             "wrdata /tmp/out.txt v(a)",
             "wrdata ../out.txt v(a)",
@@ -2053,11 +2151,20 @@ mod tests {
             );
         }
         // A measurement script on the list runs.
-        let script = "t\nV1 a 0 PULSE(0 1 0 1n 1n 5u 10u)\nR1 a 0 1k\n.tran 10n 20u\n.control\nrun\nmeas tran vmax max v(a)\nmeasure tran vmin min v(a)\nlet x = vmax - vmin\nif x gt 0.5\necho high\nelse\necho low\nend\nforeach t 1 2\necho $t\nend\nrepeat 2\necho r\nend\nwhile x lt 0\nlet x = x + 1\nend\nset filetype = ascii\nset wr_singlescale\nunset wr_singlescale\nprint v(a)\nwrdata out.txt v(a)\nwrite out.raw v(a)\nop\nquit\n.endc\n.end\n";
+        let script = "t\nV1 a 0 PULSE(0 1 0 1n 1n 5u 10u)\nR1 a 0 1k\n.tran 10n 20u\n.control\nrun\nmeas tran vmax max v(a)\nmeasure tran vmin min v(a)\nlet x = vmax - vmin\nif x gt 0.5\necho high\nelse\necho low\nend\nforeach t 1 2\necho $t\nend\nrepeat 2\necho r\nend\nwhile x lt 0\nlet x = x + 1\nend\nset numdgt = 6\nset wr_singlescale\nset wr_vecnames\nunset wr_singlescale\necho \"vmax is $vmax\"\nprint v(a)\nwrdata out.txt v(a)\nwrite out.raw v(a)\nop\nquit\n.endc\n.end\n";
         let v = check(script, &policy);
         assert!(v.is_empty(), "{v:?}");
         // With control blocks off, the block is refused as a whole.
         assert!(!check(script, &policy_at(&d)).is_empty());
+        // A `+` continuation inside a control block is refused, since
+        // aispice does not model how ngspice joins control lines.
+        let joined = "t\n.control\necho a\n+ b\n.endc\n.end\n";
+        assert!(
+            check(joined, &policy)
+                .iter()
+                .any(|v| v.reason.contains("continuation inside a control block")),
+            "{joined}"
+        );
     }
 
     /// A `*#` line is a control command to ngspice in some modes, so it is
@@ -2098,15 +2205,18 @@ mod tests {
         assert!(!check("t\n.include inc.lib\n.op\n.end\n", &on).is_empty());
         // The title is a title.
         assert!(check("*# a title\nV1 a 0 1\n.op\n.end\n", &off).is_empty());
-        // A banner names no command and stays a comment (IHP's model files
-        // are framed with `*####...`), but anything that could begin a
-        // command is a control line.
-        for banner in ["*#######", "*#", "*# ----", "*#=====", "*# ~~~", "*#**"] {
+        // Only a banner of `#` (IHP's model files are framed with
+        // `*####...`) or nothing stays a comment; any other text after `*#`
+        // is a control line.
+        for banner in ["*#######", "*#", "*# ##  #"] {
             let deck = format!("t\nV1 a 0 1\n{banner}\n.op\n.end\n");
             assert!(check(&deck, &off).is_empty(), "{banner}");
             assert!(!check_reads(&deck, &off).1.control, "{banner}");
         }
-        for command in ["*#$c x", "*#`id`", "*#!!", "*#9", "*#(x)"] {
+        for command in [
+            "*#$c x", "*#`id`", "*#!!", "*#9", "*#(x)", "*# ----", "*#=====", "*# ~~~", "*#**",
+            "*#|x", "*#=x", "*#-x", "*#+x", "*#/x",
+        ] {
             let deck = format!("t\nV1 a 0 1\n{command}\n.op\n.end\n");
             assert!(!check(&deck, &off).is_empty(), "{command}");
         }
