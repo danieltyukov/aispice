@@ -87,14 +87,6 @@ pub struct Plan {
     pub exec: Vec<PathBuf>,
     /// Folders it may write, plain files and folders only.
     pub write: Vec<PathBuf>,
-    /// The program makes unnamed files in `/tmp` whatever `TMPDIR` says
-    /// (glibc's `tmpfile()`, which ngspice calls at start in every mode).
-    /// bubblewrap gives every run a private `/tmp` anyway. Landlock cannot,
-    /// so this grants reading and writing files beneath the real `/tmp`,
-    /// which makes `O_TMPFILE` work but also lets the program read and
-    /// overwrite (not create, delete, rename or truncate) the user's
-    /// existing files there. Leave it off unless the program needs it.
-    pub unnamed_tmp: bool,
     pub profile: Profile,
     pub limits: Limits,
 }
@@ -178,7 +170,6 @@ impl Sandbox {
             read: Vec::new(),
             exec: Vec::new(),
             write: vec![dir],
-            unnamed_tmp: false,
             profile: Profile::Denylist,
             limits: Limits::default(),
         };
@@ -242,11 +233,7 @@ impl Sandbox {
                     read,
                     exec: executables(&program, &plan.exec),
                     write: plan.write.clone(),
-                    rw: if plan.unnamed_tmp {
-                        vec![PathBuf::from("/dev/null"), PathBuf::from("/tmp")]
-                    } else {
-                        vec![PathBuf::from("/dev/null")]
-                    },
+                    rw: vec![PathBuf::from("/dev/null")],
                     min_abi: abi,
                     scopes: if scoped {
                         Scopes::ALL

@@ -10,7 +10,6 @@ fn plan_in(dir: &Path, program: &Path, profile: Profile) -> Plan {
         read: Vec::new(),
         exec: Vec::new(),
         write: vec![dir.to_path_buf()],
-        unnamed_tmp: false,
         profile,
         limits: Limits {
             file_size: Some(64 << 20),
@@ -259,9 +258,47 @@ async fn landlock_narrows_exec_and_signals() {
     }
 }
 
+/// A `tmpfile()` that makes its unnamed file in `TMPDIR`. glibc's always
+/// uses `/tmp`, which no sandbox grants under Landlock, and ngspice calls it
+/// at start in every mode, so a caller has to preload one like this.
+#[cfg(unix)]
+const TMPFILE_SHIM: &str = r#"#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+FILE *tmpfile(void) {
+    const char *dir = getenv("TMPDIR");
+    int fd = open(dir ? dir : ".", O_TMPFILE | O_RDWR | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "w+");
+    if (!f) close(fd);
+    return f;
+}
+FILE *tmpfile64(void) { return tmpfile(); }
+"#;
+
+/// [`TMPFILE_SHIM`] built into `dir` with the system's C compiler, or None
+/// when there is none.
+#[cfg(unix)]
+fn tmpfile_shim(dir: &Path) -> Option<PathBuf> {
+    let cc = which("cc")?;
+    let src = dir.join("tmpfile.c");
+    let lib = dir.join("libtmpfile.so");
+    std::fs::write(&src, TMPFILE_SHIM).ok()?;
+    let built = std::process::Command::new(cc)
+        .args(["-shared", "-fPIC", "-O2", "-o"])
+        .arg(&lib)
+        .arg(&src)
+        .status()
+        .ok()?;
+    built.success().then_some(lib)
+}
+
 /// ngspice, the untrusted-native-code case, runs under the allowlist in
 /// every sandbox here: a plain deck, and with `AISPICE_PDK_IHP` an IHP deck
-/// that loads the PSP model as OSDI. Gated on ngspice.
+/// that loads the PSP model as OSDI. It gets [`TMPFILE_SHIM`] and no access
+/// to `/tmp`. Gated on ngspice; under Landlock also on a C compiler.
 #[cfg(unix)]
 #[tokio::test]
 async fn ngspice_runs_under_the_native_code_profile() {
@@ -272,7 +309,16 @@ async fn ngspice_runs_under_the_native_code_profile() {
     let pdk = std::env::var_os("AISPICE_PDK_IHP")
         .map(PathBuf::from)
         .filter(|p| p.join("libs.tech/ngspice/osdi/psp103.osdi").is_file());
+    let shim_dir = tempfile::tempdir().unwrap();
+    let shim = tmpfile_shim(&shim_dir.path().canonicalize().unwrap());
     for sandbox in every_available().await {
+        if shim.is_none() && !sandbox.is_bwrap() {
+            eprintln!(
+                "skipped under {}: no C compiler for the tmpfile() shim",
+                sandbox.describe()
+            );
+            continue;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
         let mut decks = vec![(
@@ -304,8 +350,11 @@ async fn ngspice_runs_under_the_native_code_profile() {
             let mut plan = plan_in(&dir, &ngspice, Profile::NativeCode);
             plan.args = vec!["-b".into(), "-r".into(), raw.clone().into(), cir.into()];
             plan.read = read.clone();
-            // ngspice makes an unnamed file in /tmp at start, in every mode.
-            plan.unnamed_tmp = true;
+            plan.env.push(("TMPDIR".into(), dir.clone().into()));
+            if let Some(lib) = &shim {
+                plan.read.push(lib.clone());
+                plan.env.push(("LD_PRELOAD".into(), lib.clone().into()));
+            }
             let spec = sandbox.command(&plan).unwrap();
             let out = process::run(&spec, Duration::from_secs(60), &CancellationToken::new())
                 .await
@@ -333,47 +382,5 @@ async fn select_picks_one_that_starts() {
     match Sandbox::select(&cancel).await {
         Ok(s) => s.probe(&cancel).await.unwrap(),
         Err(e) => eprintln!("note: {e}"),
-    }
-}
-
-/// With `unnamed_tmp`, a program may make an unnamed file in `/tmp` but
-/// no named one appears in the real `/tmp`: Landlock grants no creating
-/// there, and bubblewrap's `/tmp` is its own.
-#[cfg(unix)]
-#[tokio::test]
-async fn unnamed_tmp_makes_no_named_files() {
-    use std::os::unix::fs::PermissionsExt;
-    for sandbox in every_available().await {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().canonicalize().unwrap();
-        let tag = PathBuf::from("/tmp").join(format!("aispice-unnamed-{}", std::process::id()));
-        let program = dir.join("stand-in");
-        std::fs::write(
-            &program,
-            format!(
-                "#!/bin/sh\nprintf 'ok\\n' > result\nprintf x > '{}' 2>/dev/null\n",
-                tag.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let out = dir.join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        let mut plan = plan_in(&out, &program, Profile::Denylist);
-        plan.exec.push(PathBuf::from("/bin/sh"));
-        plan.unnamed_tmp = true;
-        let spec = sandbox.command(&plan).unwrap();
-        process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
-            .await
-            .unwrap();
-        let made = tag.exists();
-        let _ = std::fs::remove_file(&tag);
-        assert_eq!(
-            std::fs::read_to_string(out.join("result")).ok().as_deref(),
-            Some("ok\n"),
-            "{}",
-            sandbox.describe()
-        );
-        assert!(!made, "{}: made a named file in /tmp", sandbox.describe());
     }
 }

@@ -31,7 +31,7 @@ With **`Signals::SelfOnly`** (Landlock below ABI 6), a further program lets a si
 
 - Nothing caps the total bytes written across many files in a writable folder; the limit is per file.
 - Executing is limited to the plan's programs and the loader. That keeps a program from starting others by path, but it is not a boundary on its own, since the loader can run any readable binary. seccomp and Landlock's file, network and scope rules are what hold.
-- `Plan::unnamed_tmp` is for programs that make unnamed files in `/tmp` whatever `TMPDIR` says. glibc's `tmpfile()` does this, and ngspice calls it at start in every mode. bubblewrap gives each run a private `/tmp` anyway. Landlock cannot, so the flag grants reading and writing beneath the real `/tmp`. That makes `O_TMPFILE` work, but it also lets the program read and overwrite (not create, delete, rename or truncate) your existing files there.
+- Nothing is granted in the real `/tmp` under Landlock. glibc's `tmpfile()` always makes its file there, whatever `TMPDIR` says, and ngspice calls it at start in every mode. bubblewrap gives each run a private `/tmp`, so it works there; under Landlock the caller has to give the program a `tmpfile()` of its own, such as a preloaded one that makes the file in `TMPDIR` (one of the `write` folders). The sandbox tests run ngspice that way.
 
 ## Using bubblewrap on Ubuntu 24.04
 
