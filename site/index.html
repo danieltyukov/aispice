@@ -263,7 +263,7 @@
               <p>
                 Register IHP SG13G2 once and a project simulates with the PDK's own device models
                 on ngspice or Xyce. The agent sizes transistors by gm/Id from tables it builds,
-                starts from templates proven at every corner, and checks each spec across process,
+                starts from templates checked at every corner, and checks each spec across process,
                 temperature, supply and mismatch.
               </p>
               <ul class="checks">
@@ -306,7 +306,7 @@
             <dl class="facts">
               <div><dt>Two-stage op-amp, drawn</dt><dd>22.2 x 44.1<small>um</small></dd></div>
               <div><dt>Devices and dummies</dt><dd>9 + 8</dd></div>
-              <div><dt>Draw, DRC, LVS</dt><dd>1.1 + 2.7 + 2.6<small>s</small></dd></div>
+              <div><dt>Draw, DRC, LVS</dt><dd>1.1 + 2.5 + 2.5<small>s</small></dd></div>
               <div><dt>DRC and LVS, IHP's decks</dt><dd>clean</dd></div>
             </dl>
             <p class="facts-note">
@@ -320,7 +320,7 @@
             <!-- layout-art:start -->
             <img src="/img/ic/two-stage-layout.webp" srcset="/img/ic/two-stage-layout-1x.webp 1x, /img/ic/two-stage-layout.webp 2x" width="800" height="1564" loading="lazy" alt="The two-stage op-amp's layout drawn from the GDS aispice generated: the matched transistor rows with dummies and guard rings beside the MIM compensation capacitor" />
             <figcaption>The two-stage op-amp, drawn by aispice's generator with IHP's pcells, from its GDS.</figcaption>
-              <!-- layout-art:end -->
+            <!-- layout-art:end -->
           </figure>
         </div>
       </section>
@@ -336,8 +336,8 @@
                 A project declares Verilog-A models and Verilog to co-simulate. aispice builds
                 them itself with OpenVAF and Verilator, runs the result in a sandbox, and ngspice
                 simulates the transistors and the logic together. Above the block, the budget tool
-                splits a target into block specs with every equation, and the trim check proves a
-                trimmed block reaches its range at every corner and mismatch sample.
+                splits a target into block specs with every equation, and the trim check finds the
+                code that brings a trimmed block into range at every corner and mismatch sample.
               </p>
               <ul class="checks">
                 <li>Behavioural models and co-simulated Verilog, sandboxed</li>
@@ -368,7 +368,7 @@
             <!-- chip-art:start -->
             <img src="/img/ic/demo-chip.webp" srcset="/img/ic/demo-chip-1x.webp 1x, /img/ic/demo-chip.webp 2x" width="1400" height="1400" loading="lazy" alt="An analog-on-top chip assembled by aispice, drawn from its GDS: IHP's pad ring with 16 pads around a core holding the OTA, the StrongARM comparator and a two-bit counter hardened by LibreLane" />
             <figcaption>An OTA, a StrongARM comparator and a counter hardened by LibreLane in IHP's pad ring, from the chip's GDS.</figcaption>
-              <!-- chip-art:end -->
+            <!-- chip-art:end -->
           </figure>
           <div class="feature-copy">
             <p class="eyebrow">Chips</p>
@@ -387,7 +387,7 @@
               <div><dt>DRC, all four decks</dt><dd>clean</dd></div>
               <div><dt>LVS, to the counter's cells</dt><dd>clean</dd></div>
             </dl>
-              <!-- chip-facts:end -->
+            <!-- chip-facts:end -->
             <div class="chips-links">
               <a class="btn btn-ghost" href="https://danieltyukov.github.io/chipleap/">ChipLeap</a>
               <a class="btn btn-ghost" href="https://github.com/danieltyukov/aispice/blob/master/docs/macro-package.md">The package format</a>
