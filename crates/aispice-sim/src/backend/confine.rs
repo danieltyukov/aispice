@@ -40,7 +40,7 @@
 #![allow(unsafe_code)]
 
 use crate::sandbox::policy::{
-    Confinement, LandlockPolicy, PROFILE_PROGRAMS, Profile, SeccompPolicy, Signals,
+    Confinement, LandlockPolicy, MAX_PROGRAMS, PROFILE_PROGRAMS, Profile, SeccompPolicy, Signals,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, PathBeneath, Ruleset,
@@ -937,7 +937,7 @@ unsafe fn cloexec_from(first: libc::c_int) -> io::Result<()> {
 /// so moving one never overwrites another. Syscalls only, safe in
 /// `pre_exec`.
 unsafe fn pass_fds(fds: &[OwnedFd]) -> io::Result<()> {
-    let mut high = [0 as libc::c_int; PROFILE_PROGRAMS];
+    let mut high = [0 as libc::c_int; MAX_PROGRAMS];
     if fds.len() > high.len() {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));
     }
@@ -1518,19 +1518,23 @@ mod tests {
         assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
         let flag = |fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC;
         assert_eq!(flag(p[0]), 0, "pipe() makes descriptors without CLOEXEC");
-        let passed = vec![memfd_with(b"one").unwrap(), memfd_with(b"two").unwrap()];
+        // As many as any policy hands bubblewrap: the profile's programs
+        // and the signal program.
+        let passed: Vec<OwnedFd> = (0..MAX_PROGRAMS)
+            .map(|i| memfd_with(&[i as u8]).unwrap())
+            .collect();
+        let top = 3 + passed.len() as libc::c_int;
         let code = in_child(|| {
             let moved = unsafe { pass_fds(&passed) }.is_ok();
-            let swept = unsafe { cloexec_from(3 + passed.len() as libc::c_int) }.is_ok();
-            first_failed(&[
-                moved,
-                swept,
-                flag(3) == 0,
-                flag(4) == 0,
-                flag(p[0]) != 0 || p[0] < 5,
-                flag(p[1]) != 0 || p[1] < 5,
+            let swept = unsafe { cloexec_from(top) }.is_ok();
+            let mut checks = vec![moved, swept];
+            checks.extend((3..top).map(|fd| flag(fd) == 0));
+            checks.extend([
+                flag(p[0]) != 0 || p[0] < top,
+                flag(p[1]) != 0 || p[1] < top,
                 flag(2) == 0,
-            ])
+            ]);
+            first_failed(&checks)
         });
         unsafe {
             libc::close(p[0]);

@@ -26,6 +26,10 @@ pub const MAX_LANDLOCK_ABI: u8 = 6;
 /// [`SeccompPolicy::programs`]. bubblewrap gets one descriptor for each,
 /// numbered from 3, and installs them in that order.
 pub(crate) const PROFILE_PROGRAMS: usize = if cfg!(target_arch = "x86_64") { 3 } else { 2 };
+/// The most programs any policy installs: the profile's and the signal
+/// program. Read only where confinement is enforced.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) const MAX_PROGRAMS: usize = PROFILE_PROGRAMS + 1;
 
 /// How a child process is confined. Made by [`Confinement::builder`].
 #[derive(Debug, Clone)]
