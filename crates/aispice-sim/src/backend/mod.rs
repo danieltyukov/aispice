@@ -117,12 +117,14 @@ pub struct SimJob {
     pub libraries: Vec<std::sync::Arc<crate::behavioral::Library>>,
     /// What the deck reads of the user's: the files it includes and names,
     /// as the netlist policy resolved them, and the folder of the project's
-    /// PDK. A run that loads `libraries` may read these and nothing else of
+    /// PDK. An ngspice run in a sandbox may read these and nothing else of
     /// the user's.
     pub reads: Vec<PathBuf>,
-    /// The sandbox a run that loads `libraries` or has control commands
-    /// runs in; `None` finds one with [`native_code::ready_for`] when the
-    /// run starts.
+    /// The sandbox ngspice runs in. `None` finds one when the run starts:
+    /// with [`native_code::ready_for`] for a run that loads `libraries` or
+    /// has control commands, which without one does not run, and with
+    /// [`native_code::plain_sandbox`] for any other run, which without one
+    /// runs unconfined and says so.
     pub sandbox: Option<crate::sandbox::Sandbox>,
     /// The deck has control commands (a `.control` block or a `*#` line),
     /// which the netlist policy allowed because the user enabled control

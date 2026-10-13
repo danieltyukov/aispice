@@ -362,6 +362,8 @@ async fn run_deck(
         osdi,
         xyce_plugins: Vec::new(),
     });
+    // The deck reads only the PDK's own files.
+    job.reads = vec![pdk.root.clone()];
     let mut out = ngspice
         .run(&job, cancel)
         .await

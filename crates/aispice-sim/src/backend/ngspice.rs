@@ -22,7 +22,9 @@
 //! `d_cosim` model cards added to the deck after the netlist policy checked
 //! it. No path a deck or a project names is ever loaded. A run that loads
 //! any of them runs in a sandbox, since their code runs inside ngspice:
-//! see [`super::native_code`].
+//! see [`super::native_code`]. Every other run goes in the same sandbox
+//! under the denylist where one can start, and unconfined, with a warning
+//! in its output, where none can.
 //!
 //! ngspice refuses to evaluate `.meas` in batch mode when it writes a raw
 //! file, so a deck with measurements runs twice: once for the raw file and
@@ -38,6 +40,7 @@ use super::{
 use crate::behavioral::{Library, LibraryKind, sha256_hex};
 use crate::log::parse_ngspice_output;
 use crate::pdk::PdkRun;
+use crate::sandbox::{Plan, Profile, Sandbox};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -137,6 +140,31 @@ impl Ngspice {
     pub fn meas_args(stem: &str) -> Vec<String> {
         vec!["-b".into(), format!("{stem}_meas.cir")]
     }
+}
+
+/// The sandbox and plan of a run in `ws`: the preloaded library placed
+/// there, and reads of the job's files, its PDK's compiled models and
+/// ngspice's install. A run that loads no compiled models of the project's
+/// gets the denylist and its process margin.
+async fn confine(
+    job: &SimJob,
+    exe: &Path,
+    ws: &Workspace,
+    sandbox: Sandbox,
+    cancel: &CancellationToken,
+) -> Result<(Sandbox, Plan), SimError> {
+    let preload = native_code::preload(cancel).await?;
+    native_code::place_preload(ws.path(), &preload)?;
+    let mut reads = job.reads.clone();
+    if let Some(pdk) = &job.pdk {
+        reads.extend(pdk.osdi.iter().cloned());
+    }
+    let mut plan = native_code::plan(exe, ws.path(), &reads, Vec::new())?;
+    if job.libraries.is_empty() {
+        plan.profile = Profile::Denylist;
+        plan.limits.nproc_headroom = Some(native_code::DENYLIST_NPROC_HEADROOM);
+    }
+    Ok((sandbox, plan))
 }
 
 /// Whether a path can be written into a `.spiceinit` command or a quoted
@@ -271,6 +299,10 @@ impl Simulator for Ngspice {
         if let Some(c) = &self.compat {
             d.notes.push(format!("runs with ngbehavior={c}"));
         }
+        d.notes.push(match native_code::plain_sandbox().await {
+            Ok(s) => format!("runs in a sandbox: {}", s.describe()),
+            Err(why) => format!("runs without a sandbox ({why})"),
+        });
         d
     }
 
@@ -301,10 +333,11 @@ impl Simulator for Ngspice {
         // run only in the sandbox, with the preloaded library that keeps
         // ngspice's temporary file in the run folder. Compiled code gets
         // the native-code allowlist; control commands alone get the
-        // denylist.
-        let sandboxed = if job.libraries.is_empty() && !job.control {
-            None
-        } else {
+        // denylist. A run with neither, such as a PDK run, gets the
+        // denylist where it can, and otherwise runs unconfined, as before,
+        // with a warning.
+        let mut unconfined = None;
+        let sandboxed = if !job.libraries.is_empty() || job.control {
             let purpose = if job.libraries.is_empty() {
                 native_code::Purpose::ControlCommands
             } else {
@@ -316,17 +349,25 @@ impl Simulator for Ngspice {
                     .await
                     .map_err(SimError::Config)?,
             };
-            let preload = native_code::preload(cancel).await?;
-            native_code::place_preload(ws.path(), &preload)?;
-            let mut reads = job.reads.clone();
-            if let Some(pdk) = &job.pdk {
-                reads.extend(pdk.osdi.iter().cloned());
+            Some(confine(job, &exe, &ws, sandbox, cancel).await?)
+        } else {
+            let sandbox = match &job.sandbox {
+                Some(s) => Ok(s.clone()),
+                None => native_code::plain_sandbox().await,
+            };
+            let confined = match sandbox {
+                Ok(s) => confine(job, &exe, &ws, s, cancel)
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(why) => Err(why),
+            };
+            match confined {
+                Ok(c) => Some(c),
+                Err(why) => {
+                    unconfined = Some(native_code::unconfined_warning(&why));
+                    None
+                }
             }
-            let mut plan = native_code::plan(&exe, ws.path(), &reads, Vec::new())?;
-            if job.libraries.is_empty() {
-                plan.profile = crate::sandbox::Profile::Denylist;
-            }
-            Some((sandbox, plan))
         };
         let command = |args: Vec<String>| match &sandboxed {
             Some((sandbox, plan)) => {
@@ -383,12 +424,16 @@ impl Simulator for Ngspice {
             .iter()
             .find(|p| p.extension().is_some_and(|e| e == "raw"))
             .cloned();
+        let mut warnings = report.warnings;
+        if let Some(w) = unconfined {
+            warnings.insert(0, w);
+        }
         let result = SimOutput {
             datasets,
             log,
             measurements: report.measurements,
             errors: report.errors,
-            warnings: report.warnings,
+            warnings,
             duration: out.elapsed,
             raw_path,
             files,
@@ -473,6 +518,60 @@ mod tests {
         assert_eq!(with_cosim_models(deck, &[]), deck);
         assert!(!plain_path("/tmp/it's"));
         assert!(!plain_path("/tmp/a\\b"));
+    }
+
+    /// A run that loads none of the project's compiled models gets the
+    /// denylist and its process margin, with the job's reads and its PDK's
+    /// models; one that loads them keeps the native-code profile.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_run_without_compiled_models_gets_the_denylist() {
+        if native_code::compiler().is_none() {
+            eprintln!("skipped: no C compiler");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let [exe, inc, osdi] = ["ngspice", "r.inc", "psp103.osdi"].map(|f| {
+            std::fs::write(root.join(f), "").unwrap();
+            root.join(f)
+        });
+        let mut job = SimJob::new("t\n.end\n", root.join("runs"));
+        job.reads = vec![inc.clone()];
+        job.pdk = Some(PdkRun {
+            osdi: vec![osdi.clone()],
+            xyce_plugins: Vec::new(),
+        });
+        let cancel = CancellationToken::new();
+        let sandbox = Sandbox::landlock_for_tests(6);
+        let ws = Workspace::new().unwrap();
+        let (_, plan) = confine(&job, &exe, &ws, sandbox.clone(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(plan.profile, Profile::Denylist);
+        assert_eq!(
+            plan.limits.nproc_headroom,
+            Some(native_code::DENYLIST_NPROC_HEADROOM)
+        );
+        assert!(plan.read.contains(&inc) && plan.read.contains(&osdi));
+        assert_eq!(plan.write, vec![ws.path().canonicalize().unwrap()]);
+        assert!(ws.path().join(native_code::PRELOAD_FILE).is_file());
+
+        job.libraries = vec![Arc::new(Library {
+            kind: LibraryKind::Osdi,
+            name: "m".into(),
+            modules: Vec::new(),
+            bytes: Arc::from(b"osdi bytes".to_vec()),
+            sha256: sha256_hex(b"osdi bytes"),
+            tool: String::new(),
+        })];
+        let ws = Workspace::new().unwrap();
+        let (_, plan) = confine(&job, &exe, &ws, sandbox, &cancel).await.unwrap();
+        assert_eq!(plan.profile, Profile::NativeCode);
+        assert_ne!(
+            plan.limits.nproc_headroom,
+            Some(native_code::DENYLIST_NPROC_HEADROOM)
+        );
     }
 
     /// Unix only: a Windows temporary folder has backslashes, which a

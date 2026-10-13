@@ -35,6 +35,14 @@
 //! nor Landlock ABI 4) or there is no C compiler, the libraries are not
 //! loaded at all, and [`ready`] says what is missing and how to simulate
 //! without them; there is no unconfined fallback.
+//!
+//! A run that loads none of the project's code (a PDK run, a board-level
+//! run) goes in the same sandbox under seccomp's [`Profile::Denylist`],
+//! with the same reads, writes, environment and preloaded library: ngspice
+//! still parses a deck and model files aispice did not write. Where no
+//! sandbox can start or there is no C compiler, such a run goes unconfined,
+//! as before, and its output says so ([`plain_sandbox`],
+//! [`unconfined_warning`]).
 
 use super::process::{self, ProcessSpec};
 use super::{RAW_SIZE_LIMIT, SimError};
@@ -173,6 +181,54 @@ pub async fn ready_for(purpose: Purpose, cancel: &CancellationToken) -> Result<S
     }
 }
 
+/// The sandbox a run that loads none of the project's code uses: the one
+/// [`ready`] would give, chosen once per process. `Err` says what this
+/// machine lacks for it (a sandbox, or the C compiler the preloaded library
+/// is built with); such a run then goes unconfined.
+pub async fn plain_sandbox() -> Result<Sandbox, String> {
+    static CHOSEN: tokio::sync::OnceCell<Result<Sandbox, String>> =
+        tokio::sync::OnceCell::const_new();
+    // The test-only ABI override changes the choice after the fact.
+    #[cfg(all(target_os = "linux", feature = "testing"))]
+    if super::confine::abi_override_for_tests().is_some() {
+        return choose_plain().await;
+    }
+    CHOSEN.get_or_init(choose_plain).await.clone()
+}
+
+async fn choose_plain() -> Result<Sandbox, String> {
+    // Not a run's token: a cancelled run must not leave every later run
+    // without a sandbox.
+    let sandbox = if !cfg!(target_os = "linux") {
+        Err("this system is not Linux".to_string())
+    } else if !seccomp_here() {
+        Err("the kernel has no seccomp filters".to_string())
+    } else {
+        Sandbox::select(&CancellationToken::new()).await
+    };
+    with_compiler(sandbox, compiler().is_some())
+}
+
+/// A sandbox counts only with the C compiler the preloaded library needs.
+fn with_compiler<T>(sandbox: Result<T, String>, compiler: bool) -> Result<T, String> {
+    match sandbox {
+        Ok(_) if !compiler => Err(format!(
+            "there is no C compiler ({} in {}), which the sandboxed ngspice needs",
+            COMPILERS.join(", "),
+            TOOL_PATH.join(", ")
+        )),
+        other => other,
+    }
+}
+
+/// The warning a run that loads none of the project's code carries when it
+/// went unconfined because of `why`.
+pub fn unconfined_warning(why: &str) -> String {
+    format!(
+        "ngspice ran without a sandbox ({why}); the deck loads none of the project's code, so it ran unconfined, as before"
+    )
+}
+
 /// Refuse, under bubblewrap, a deck that includes a file through a symbolic
 /// link outside the folders the sandbox shows whole (`whole`, such as the
 /// project's PDK, and the system). bubblewrap shows every other file the
@@ -195,7 +251,7 @@ pub fn check_links(
             continue;
         }
         return Err(format!(
-            "the include `{}` reaches {} through the symbolic link {}, which ngspice cannot follow in the bubblewrap sandbox that runs the project's compiled models (it shows each file the deck reads at its real path only). Include {} itself, or replace the link with the file.",
+            "the include `{}` reaches {} through the symbolic link {}, which ngspice cannot follow in the bubblewrap sandbox it runs in (it shows each file the deck reads at its real path only). Include {} itself, or replace the link with the file.",
             l.include,
             l.file.display(),
             link.display(),
@@ -475,6 +531,14 @@ fn install_dirs(exe: &Path) -> Vec<PathBuf> {
     v.retain(|p| p.is_dir());
     v
 }
+
+/// How many processes and threads a run under the denylist may add to what
+/// its user runs. It loads no code of the project's, so the margin only has
+/// to stop a runaway ngspice, and it is relative to everything the user
+/// runs: the native-code margin below leaves 128 on a 32-core machine,
+/// which a busy machine's other work uses up while ngspice runs, as it did
+/// for xschem.
+pub(crate) const DENYLIST_NPROC_HEADROOM: u64 = 1024;
 
 /// How many processes and threads a confined run may add to what its user
 /// runs: ngspice starts a thread per core, and a little more.

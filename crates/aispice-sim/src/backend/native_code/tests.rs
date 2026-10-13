@@ -38,6 +38,26 @@ fn a_refusal_says_what_is_missing_and_what_to_do_instead() {
     );
 }
 
+/// A run without the project's code counts a sandbox only with a C
+/// compiler, and its warning says why it went unconfined.
+#[test]
+fn a_plain_run_needs_a_compiler_and_says_why_it_went_unconfined() {
+    assert_eq!(with_compiler(Ok(()), true), Ok(()));
+    assert_eq!(
+        with_compiler(Ok(()), false),
+        Err("there is no C compiler (cc, gcc, clang in /usr/local/bin, /usr/bin, /bin), which the sandboxed ngspice needs".to_string())
+    );
+    let none = "no sandbox is available here: bubblewrap (bwrap) is not installed";
+    assert_eq!(
+        with_compiler::<()>(Err(none.into()), false),
+        Err(none.to_string())
+    );
+    assert_eq!(
+        unconfined_warning("this system is not Linux"),
+        "ngspice ran without a sandbox (this system is not Linux); the deck loads none of the project's code, so it ran unconfined, as before"
+    );
+}
+
 #[cfg(unix)]
 fn fake_ngspice(dir: &Path) -> PathBuf {
     let bin = dir.join("opt/ngspice/bin");

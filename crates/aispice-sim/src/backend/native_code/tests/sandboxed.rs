@@ -18,7 +18,7 @@
 
 use super::*;
 use crate::backend::ngspice::with_cosim_models;
-use crate::backend::{Ngspice, SimError, SimJob, Simulator, which};
+use crate::backend::{Ngspice, SimError, SimJob, SimOutput, Simulator, which};
 use crate::behavioral::{Library, LibraryKind, Source, verilog};
 use crate::sandbox::every_available;
 use std::process::{Child, Command};
@@ -559,6 +559,82 @@ async fn control_commands_in_a_sandboxed_ngspice_cannot_write_outside_the_run() 
             "{what}: a control command wrote outside the run folder:\n{log}"
         );
     }
+}
+
+/// A run that loads none of the project's code also runs in the sandbox,
+/// in every sandbox here and in the one the backend picks itself, and
+/// reads only what its job grants: the deck's include is read when the job
+/// lists it and refused when it does not. Unconfined, ngspice reads it
+/// either way, so the refusal comes from the sandbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_the_projects_code_reads_only_its_grants() {
+    let Some((exe, _, sandboxes)) = setup().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let inc = root.join("models/vref.inc");
+    std::fs::create_dir(root.join("models")).unwrap();
+    std::fs::write(&inc, "V2 b 0 2\nR2 b 0 1k\n").unwrap();
+    let deck = format!(
+        "* plain\nV1 a 0 1\nR1 a 0 1k\n.include {}\n.op\n.end\n",
+        inc.display()
+    );
+    let read_b = |r: &Result<SimOutput, SimError>| {
+        r.as_ref()
+            .is_ok_and(|o| o.datasets.iter().any(|d| d.vector("b").is_some()))
+    };
+
+    // Unconfined, ngspice reads the include whatever a job would grant.
+    let plain = root.join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(plain.join("d.cir"), &deck).unwrap();
+    let out = Command::new(&exe)
+        .args(["-b", "-r", "d.raw", "d.cir"])
+        .current_dir(&plain)
+        .env("HOME", &plain)
+        .output()
+        .unwrap();
+    let raw = std::fs::read(plain.join("d.raw")).unwrap_or_default();
+    assert!(
+        raw.windows(4).any(|w| w == b"v(b)"),
+        "the unconfined run did not read the include, so this test shows nothing:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let mut runs: Vec<(String, Option<Sandbox>)> = sandboxes
+        .iter()
+        .map(|s| (s.describe(), Some(s.clone())))
+        .collect();
+    runs.push(("the backend's own choice".into(), None));
+    for (n, (what, sandbox)) in runs.into_iter().enumerate() {
+        let mut job = SimJob::new(deck.clone(), root.join(format!("runs-{n}")));
+        job.sandbox = sandbox;
+        let refused = Ngspice::default()
+            .run(&job, &CancellationToken::new())
+            .await;
+        assert!(
+            !read_b(&refused),
+            "{what}: a run read an include its job does not grant:\n{:?}",
+            refused.map(|o| o.log)
+        );
+        job.reads = vec![inc.clone()];
+        let granted = Ngspice::default()
+            .run(&job, &CancellationToken::new())
+            .await;
+        assert!(read_b(&granted), "{what}: {:?}", granted.map(|o| o.log));
+        let warnings = granted.unwrap().warnings;
+        assert!(
+            !warnings.iter().any(|w| w.contains("without a sandbox")),
+            "{what}: {warnings:?}"
+        );
+    }
+    let notes = Ngspice::default().detect().await.notes;
+    assert!(
+        notes.iter().any(|n| n.starts_with("runs in a sandbox: ")),
+        "{notes:?}"
+    );
 }
 
 /// A ruleset below ABI 4 is never written: the run is refused before
