@@ -238,24 +238,6 @@ fn bubblewrap_refuses_an_include_through_a_link_and_names_it() {
 }
 
 #[test]
-fn the_cache_key_follows_the_source_the_compiler_and_its_version() {
-    let a = cache_key(Path::new("/nonexistent/a/cc"), "cc (GCC) 13.2.0");
-    assert_eq!(
-        a,
-        cache_key(Path::new("/nonexistent/a/cc"), "cc (GCC) 13.2.0")
-    );
-    assert_ne!(
-        a,
-        cache_key(Path::new("/nonexistent/a/cc"), "cc (GCC) 14.1.0")
-    );
-    assert_ne!(
-        a,
-        cache_key(Path::new("/nonexistent/b/cc"), "cc (GCC) 13.2.0")
-    );
-    assert_eq!(a.len(), 32);
-}
-
-#[test]
 fn the_compiler_comes_from_the_system_folders_with_fixed_flags_and_environment() {
     if let Some(cc) = compiler() {
         let dir = cc.parent().unwrap();
@@ -324,67 +306,19 @@ fn a_placed_library_must_hold_the_bytes_recorded_when_it_was_built() {
     assert!(e.to_string().contains("does not match the SHA-256"), "{e}");
 }
 
-/// The cache: a build is stored with its SHA-256; a cached copy is used
-/// only while it has that SHA-256 and is a plain file not every user may
-/// write, and is rebuilt otherwise.
+/// The preload is built from the fixed source, with its SHA-256 over its
+/// own bytes, and there is no file left on disk to tamper with.
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn the_preloaded_library_is_cached_with_its_sha256_and_rebuilt_when_it_changes() {
-    use std::os::unix::fs::PermissionsExt;
-    let Some(cc) = compiler() else {
+async fn the_preloaded_library_is_built_from_the_fixed_source() {
+    if compiler().is_none() {
         eprintln!("skipped: no C compiler");
         return;
-    };
-    let cache = tempfile::tempdir().unwrap();
-    let cancel = CancellationToken::new();
-    let built = load_or_build(Some(cache.path()), &cancel).await.unwrap();
-    assert_eq!(built.sha256, sha256_hex(&built.bytes));
-    assert!(built.bytes.starts_with(b"\x7fELF"));
-    let key = cache_key(&cc, &compiler_version(&cc, &cancel).await.unwrap());
-    let so = cache.path().join(format!("{key}.so"));
-    let record = cache.path().join(format!("{key}.sha256"));
-    assert_eq!(std::fs::read(&so).unwrap(), &built.bytes[..]);
-    assert_eq!(std::fs::read_to_string(&record).unwrap(), built.sha256);
-
-    // A copy that matches its record is what is used.
-    std::fs::write(&so, b"stand-in").unwrap();
-    std::fs::write(&record, sha256_hex(b"stand-in")).unwrap();
-    let cached = load_or_build(Some(cache.path()), &cancel).await.unwrap();
-    assert_eq!(&cached.bytes[..], b"stand-in");
-
-    // One that does not, is a link, or others may write is rebuilt, and
-    // the cache holds the new build.
-    let decoy = cache.path().join("decoy");
-    std::fs::write(&decoy, b"stand-in").unwrap();
-    let tampered: [&dyn Fn(); 3] = [
-        &|| std::fs::write(&so, b"changed").unwrap(),
-        &|| {
-            std::fs::remove_file(&so).unwrap();
-            std::os::unix::fs::symlink(&decoy, &so).unwrap();
-        },
-        &|| {
-            std::fs::remove_file(&so).unwrap();
-            std::fs::write(&so, b"stand-in").unwrap();
-            std::fs::set_permissions(&so, std::fs::Permissions::from_mode(0o666)).unwrap();
-        },
-    ];
-    for (i, tamper) in tampered.iter().enumerate() {
-        std::fs::write(&record, sha256_hex(b"stand-in")).unwrap();
-        tamper();
-        let p = load_or_build(Some(cache.path()), &cancel).await.unwrap();
-        assert!(p.bytes.starts_with(b"\x7fELF"), "case {i}");
-        assert_eq!(p.sha256, sha256_hex(&p.bytes), "case {i}");
-        assert_eq!(
-            std::fs::read_to_string(&record).unwrap(),
-            p.sha256,
-            "case {i}"
-        );
-        assert!(
-            !std::fs::symlink_metadata(&so).unwrap().is_symlink(),
-            "case {i}"
-        );
     }
-    assert_eq!(std::fs::read(&decoy).unwrap(), b"stand-in");
+    let built = build(&CancellationToken::new()).await.unwrap();
+    assert!(built.bytes.starts_with(b"\x7fELF"));
+    assert_eq!(built.sha256, sha256_hex(&built.bytes));
+    assert!(!built.sha256.is_empty());
 }
 
 /// Calls `tmpfile()` and prints where the file is (`file <path>`) or
@@ -463,9 +397,7 @@ async fn the_preloaded_tmpfile_uses_tmpdir_and_never_falls_back_to_tmp() {
     };
     let work = tempfile::tempdir().unwrap();
     let work = real(work.path());
-    let preload = load_or_build(None, &CancellationToken::new())
-        .await
-        .unwrap();
+    let preload = build(&CancellationToken::new()).await.unwrap();
     let shim = work.join(PRELOAD_FILE);
     std::fs::write(&shim, &preload.bytes).unwrap();
     std::fs::write(work.join("harness.c"), HARNESS).unwrap();

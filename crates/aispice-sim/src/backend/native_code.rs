@@ -228,8 +228,7 @@ fn refusal(no_sandbox: Option<&str>, no_compiler: bool) -> String {
     )
 }
 
-/// The library a confined run preloads, with the SHA-256 recorded when it
-/// was built.
+/// The library a confined run preloads, with the SHA-256 of its bytes.
 #[derive(Debug, Clone)]
 pub struct Preload {
     bytes: Arc<[u8]>,
@@ -242,64 +241,26 @@ impl Preload {
     }
 }
 
-/// The library this process preloads, once it has one.
+/// The library this process preloads, built the first time it is needed.
+/// There is no disk cache: the shim is a few kilobytes and one `cc` run,
+/// and a cache in `~/.cache` would be another file to verify and a place a
+/// project could point `XDG_CACHE_HOME` at. It is built once per process
+/// and kept here.
 fn memo() -> &'static tokio::sync::Mutex<Option<Preload>> {
     static MEMO: OnceLock<tokio::sync::Mutex<Option<Preload>>> = OnceLock::new();
     MEMO.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
-/// aispice's cache folder for the preloaded library.
-fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("aispice").join("preload"))
-}
-
-/// The preloaded library: the one this process already has, else the copy
-/// in aispice's cache when it matches its record, else a new build.
+/// The preloaded library: the one this process already built, else a new
+/// build.
 pub async fn preload(cancel: &CancellationToken) -> Result<Preload, SimError> {
     let mut memo = memo().lock().await;
     if let Some(p) = memo.as_ref() {
         return Ok(p.clone());
     }
-    let p = load_or_build(cache_dir().as_deref(), cancel).await?;
+    let p = build(cancel).await?;
     *memo = Some(p.clone());
     Ok(p)
-}
-
-/// [`preload`] with the cache in `cache` (none: always build).
-pub(crate) async fn load_or_build(
-    cache: Option<&Path>,
-    cancel: &CancellationToken,
-) -> Result<Preload, SimError> {
-    let cc = compiler().ok_or_else(|| SimError::Config(refusal(None, true)))?;
-    let key = cache_key(&cc, &compiler_version(&cc, cancel).await?);
-    if let Some(p) = cache.and_then(|dir| cached(dir, &key)) {
-        return Ok(p);
-    }
-    let bytes = build(&cc, cancel).await?;
-    let p = Preload {
-        sha256: sha256_hex(&bytes),
-        bytes: bytes.into(),
-    };
-    if let Some(dir) = cache {
-        // A cache that cannot be written only means building again later.
-        if let Err(e) = store(dir, &key, &p) {
-            tracing::debug!("could not cache {PRELOAD_FILE} in {}: {e}", dir.display());
-        }
-    }
-    Ok(p)
-}
-
-/// The cache key: the source's hash and the compiler's real path and
-/// version, hashed.
-fn cache_key(cc: &Path, version: &str) -> String {
-    let real = cc.canonicalize().unwrap_or_else(|_| cc.to_path_buf());
-    let text = format!(
-        "{}\0{}\0{}",
-        sha256_hex(TMPFILE_SOURCE.as_bytes()),
-        real.display(),
-        version
-    );
-    sha256_hex(text.as_bytes())[..32].to_string()
 }
 
 /// The compiler's environment: nothing of aispice's (no `CFLAGS`,
@@ -318,30 +279,9 @@ fn compiler_spec(cc: &Path, dir: &Path, args: &[&str]) -> ProcessSpec {
     spec
 }
 
-/// What `cc --version` prints.
-async fn compiler_version(cc: &Path, cancel: &CancellationToken) -> Result<String, SimError> {
-    let dir = tempfile::Builder::new()
-        .prefix("aispice-preload-")
-        .tempdir()
-        .map_err(|e| SimError::Io(format!("cannot make a build folder: {e}")))?;
-    let out = process::run(
-        &compiler_spec(cc, dir.path(), &["--version"]),
-        BUILD_TIMEOUT,
-        cancel,
-    )
-    .await?;
-    if !out.success() {
-        return Err(SimError::Config(format!(
-            "{} --version failed: {}",
-            cc.display(),
-            out.combined().trim()
-        )));
-    }
-    Ok(out.stdout.trim().to_string())
-}
-
-/// Build [`TMPFILE_SOURCE`] with `cc` in a private folder.
-async fn build(cc: &Path, cancel: &CancellationToken) -> Result<Vec<u8>, SimError> {
+/// Build [`TMPFILE_SOURCE`] with the system C compiler in a private folder.
+pub(crate) async fn build(cancel: &CancellationToken) -> Result<Preload, SimError> {
+    let cc = compiler().ok_or_else(|| SimError::Config(refusal(None, true)))?;
     let dir = tempfile::Builder::new()
         .prefix("aispice-preload-")
         .tempdir()
@@ -349,7 +289,7 @@ async fn build(cc: &Path, cancel: &CancellationToken) -> Result<Vec<u8>, SimErro
     std::fs::write(dir.path().join("tmpfile.c"), TMPFILE_SOURCE)
         .map_err(|e| SimError::Io(format!("cannot write tmpfile.c: {e}")))?;
     let out = process::run(
-        &compiler_spec(cc, dir.path(), COMPILER_ARGS),
+        &compiler_spec(&cc, dir.path(), COMPILER_ARGS),
         BUILD_TIMEOUT,
         cancel,
     )
@@ -361,40 +301,13 @@ async fn build(cc: &Path, cancel: &CancellationToken) -> Result<Vec<u8>, SimErro
             out.combined().trim()
         )));
     }
-    read_plain(&dir.path().join(PRELOAD_FILE), MAX_PRELOAD_BYTES)
-        .ok_or_else(|| SimError::Config(format!("{} wrote no usable {PRELOAD_FILE}", cc.display())))
-}
-
-/// The cached library under `key`, when its bytes have the SHA-256 recorded
-/// beside them.
-fn cached(dir: &Path, key: &str) -> Option<Preload> {
-    let record = read_plain(&dir.join(format!("{key}.sha256")), 64)?;
-    let sha256 = String::from_utf8(record).ok()?;
-    let bytes = read_plain(&dir.join(format!("{key}.so")), MAX_PRELOAD_BYTES)?;
-    (sha256_hex(&bytes) == sha256).then(|| Preload {
+    let bytes = read_plain(&dir.path().join(PRELOAD_FILE), MAX_PRELOAD_BYTES).ok_or_else(|| {
+        SimError::Config(format!("{} wrote no usable {PRELOAD_FILE}", cc.display()))
+    })?;
+    Ok(Preload {
+        sha256: sha256_hex(&bytes),
         bytes: bytes.into(),
-        sha256,
     })
-}
-
-/// Cache `p` under `key`: the library, then its SHA-256, each written to a
-/// new file and renamed into place, in a folder only this user may enter.
-fn store(dir: &Path, key: &str, p: &Preload) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut builder = std::fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    builder.create(dir)?;
-    for (name, bytes) in [
-        (format!("{key}.so"), &p.bytes[..]),
-        (format!("{key}.sha256"), p.sha256.as_bytes()),
-    ] {
-        let mut file = tempfile::NamedTempFile::new_in(dir)?;
-        file.write_all(bytes)?;
-        file.persist(dir.join(name)).map_err(|e| e.error)?;
-    }
-    Ok(())
 }
 
 /// A file's bytes, only when it is a plain file (not a link) that not every
