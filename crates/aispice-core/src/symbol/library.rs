@@ -322,14 +322,17 @@ mod tests {
 
     #[test]
     fn project_folder_overrides_builtin() {
-        let dir = std::env::temp_dir().join(format!("aispice-symlib-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Removed when dropped, also when the test fails.
+        let tmp = tempfile::Builder::new()
+            .prefix("aispice-symlib-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
         std::fs::write(dir.join("res.asy"), "SymbolType CELL\nSYMATTR Prefix R\nPIN 0 0 NONE 0\nPINATTR PinName A\nPIN 0 64 NONE 0\nPINATTR PinName B\n").unwrap();
-        let lib = SymbolLibrary::builtin_only().with_dir(&dir, SymbolSource::Project);
+        let lib = SymbolLibrary::builtin_only().with_dir(dir, SymbolSource::Project);
         let (res, source) = lib.resolve("res").unwrap();
         assert_eq!(source, SymbolSource::Project);
         assert_eq!(res.pins[1].at.y, 64);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

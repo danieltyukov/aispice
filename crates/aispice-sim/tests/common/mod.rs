@@ -117,12 +117,20 @@ pub fn job(text: &str, run_dir: &Path, name: &str) -> SimJob {
     }
 }
 
+/// Run a deck in a fresh run folder, removed afterwards unless
+/// `AISPICE_KEEP` is set, to inspect it.
 pub async fn run(sim: &dyn Simulator, text: &str, name: &str) -> Result<SimOutput, SimError> {
-    let dir = tempfile::tempdir().unwrap();
-    // Keep the run folder for inspection when a test fails.
-    let dir = dir.keep();
-    sim.run(&job(text, &dir, name), &CancellationToken::new())
-        .await
+    let dir = tempfile::Builder::new()
+        .prefix("aispice-test-run-")
+        .tempdir()
+        .unwrap();
+    let out = sim
+        .run(&job(text, dir.path(), name), &CancellationToken::new())
+        .await;
+    if std::env::var_os("AISPICE_KEEP").is_some() {
+        eprintln!("kept {}", dir.keep().display());
+    }
+    out
 }
 
 /// aispice's netlist of an authored schematic. LTspice writes library

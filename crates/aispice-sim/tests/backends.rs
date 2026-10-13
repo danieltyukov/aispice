@@ -55,7 +55,15 @@ async fn detection_finds_installed_simulators() {
 #[tokio::test]
 async fn ngspice_ac_run() {
     let Some(ng) = ngspice().await else { return };
-    let out = run(&ng, &deck("rc_ac"), "rc_ac").await.unwrap();
+    // Its own run folder, since the kept raw file is checked after the run.
+    let dir = tempfile::tempdir().unwrap();
+    let out = ng
+        .run(
+            &job(&deck("rc_ac"), dir.path(), "rc_ac"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     assert!(out.errors.is_empty(), "{:?}", out.errors);
     let ds = out.dataset(AnalysisKind::Ac).unwrap();
     assert_eq!(ds.len(), 41);
