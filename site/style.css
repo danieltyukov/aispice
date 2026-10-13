@@ -682,6 +682,7 @@ code {
   margin: 0;
 }
 
+/* aispice draws layouts on white, like its schematics; they keep it in the dark theme. */
 .layout-art img,
 .chips-art img {
   display: block;
@@ -689,7 +690,15 @@ code {
   height: auto;
   border: 1px solid var(--line);
   border-radius: var(--r-card);
-  background: #0d1512;
+  background: #ffffff;
+}
+
+.layout-art img {
+  width: auto;
+  max-width: 100%;
+  max-height: 720px;
+  margin: 0 auto;
+  padding: 16px;
 }
 
 .layout-art figcaption,
@@ -725,6 +734,12 @@ code {
   font-size: 13px;
   font-weight: 500;
   letter-spacing: 0;
+}
+
+.facts-note {
+  margin-top: 20px;
+  color: var(--ink-2);
+  font-size: 15px;
 }
 
 .chips-links {
