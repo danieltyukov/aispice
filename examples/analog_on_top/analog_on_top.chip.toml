@@ -1,0 +1,108 @@
+# An analog-on-top chip on IHP SG13G2: the OTA and the StrongARM comparator from
+# aispice's templates and a two-bit counter hardened by LibreLane, in a ring of
+# IHP's sg13g2_io pads. The comparator's outp enables the counter, so the counter
+# counts the comparator's decisions. Build the three packages first (README.md).
+name = "analog_on_top"
+
+[[macros]]
+instance = "ota"
+package = "macros/ota5t.macro"
+nets = { inp = "ota_inp", inm = "ota_inm", out = "ota_out", vbn = "ota_bias" }
+
+[[macros]]
+instance = "cmp"
+package = "macros/strongarm.macro"
+nets = { inp = "cmp_inp", inm = "cmp_inm", outp = "cmp_outp", outn = "cmp_outn" }
+
+[[macros]]
+instance = "cnt"
+package = "macros/tiny_counter.macro"
+nets = { en = "cmp_outp", "q[0]" = "q0", "q[1]" = "q1", VDD = "vdd", VSS = "vss" }
+
+# The OTA's inputs and bias on the west side, its output on the east.
+[[pads]]
+net = "ota_inp"
+side = "west"
+kind = "analog"
+resistor = true
+
+[[pads]]
+net = "ota_inm"
+side = "west"
+kind = "analog"
+resistor = true
+
+[[pads]]
+net = "ota_bias"
+side = "west"
+kind = "analog"
+
+[[pads]]
+net = "ota_out"
+side = "east"
+kind = "analog"
+
+# The comparator: its inputs and clock on the south side, both outputs on the east.
+[[pads]]
+net = "cmp_outp"
+side = "east"
+kind = "output"
+
+[[pads]]
+net = "cmp_outn"
+side = "east"
+kind = "output"
+
+[[pads]]
+net = "cmp_inp"
+side = "south"
+kind = "analog"
+resistor = true
+
+[[pads]]
+net = "cmp_inm"
+side = "south"
+kind = "analog"
+resistor = true
+
+[[pads]]
+net = "clk"
+side = "south"
+kind = "input"
+
+# The counter's reset and its two outputs.
+[[pads]]
+net = "rst_n"
+side = "south"
+kind = "input"
+
+[[pads]]
+net = "q0"
+side = "east"
+kind = "output"
+
+[[pads]]
+net = "q1"
+side = "west"
+kind = "output"
+
+# Core and IO supplies.
+[[pads]]
+net = "vdd"
+side = "north"
+kind = "vdd"
+
+[[pads]]
+net = "vss"
+side = "north"
+kind = "vss"
+
+[[pads]]
+net = "iovdd"
+side = "north"
+kind = "iovdd"
+
+[[pads]]
+net = "iovss"
+side = "north"
+kind = "iovss"
