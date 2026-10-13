@@ -5,9 +5,14 @@
 //! arithmetic (IHP's `ptap1`: `R=[ev {1.0 / (...)}]`), for a choice
 //! (xschem's `vsource`: `[expr {@savecurrent ? "..." : "..."}]`), for the
 //! simulator in use (`[if {[sim_is_ngspice]} {return {...}}]`) and for model
-//! paths (`$::MODELS_NGSPICE`). This module evaluates exactly that: backslash
-//! sequences, variables from a fixed table, braces and quotes, and the
-//! commands `expr`, `ev`, `if`, `return` and `sim_is_<simulator>`. Any other
+//! paths (`$::MODELS_NGSPICE`). From 3.4.5 on, xschem's `simulator_commands`
+//! symbols ask with `catch` whether the simulator has a `sim_is_` command:
+//! `[if {[catch {sim_is_ngspice} retval]} {...} elseif {$retval} {...}]`.
+//! This module evaluates exactly that: backslash sequences, variables from a
+//! fixed table, braces and quotes, and the commands `expr`, `ev`, `if`,
+//! `return`, `catch` and `sim_is_<simulator>`. `catch` runs only a body this
+//! subset evaluates without an error, so it never hides a command aispice
+//! does not know, and what it sets lasts for that evaluation only. Any other
 //! command is an error, never a guess, so a file cannot make aispice do
 //! anything but compute a string.
 //!
@@ -24,13 +29,16 @@ use std::collections::BTreeMap;
 /// Nesting of command substitutions, script bodies, expressions,
 /// parentheses and unary or `**` chains, together.
 const MAX_DEPTH: usize = 32;
-/// Bytes of input, of output, and of any intermediate string.
+/// Bytes of input, of output, and of any intermediate string; also of all
+/// the variables `catch` sets in one evaluation together.
 pub const MAX_OUTPUT: usize = 256 * 1024;
+/// Variables `catch` may set in one evaluation.
+const MAX_LOCALS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TclError {
     #[error(
-        "Tcl command `{0}` is not one aispice evaluates (it evaluates only expr, ev, if, return and sim_is_*)"
+        "Tcl command `{0}` is not one aispice evaluates (it evaluates only expr, ev, if, return, catch and sim_is_*)"
     )]
     Unsupported(String),
     #[error("Tcl variable `{0}` is not one aispice knows")]
@@ -88,7 +96,7 @@ pub fn subst(text: &str, env: &Env) -> Result<String, TclError> {
     if text.len() > MAX_OUTPUT {
         return Err(TclError::Limit);
     }
-    let mut i = Interp { env, depth: 0 };
+    let mut i = Interp::new(env);
     let chars: Vec<char> = text.chars().collect();
     let mut pos = 0;
     let mut out = String::new();
@@ -243,9 +251,19 @@ impl Flow {
 struct Interp<'a> {
     env: &'a Env,
     depth: usize,
+    /// Variables `catch` set during this evaluation, read before `env`.
+    locals: BTreeMap<String, String>,
 }
 
-impl Interp<'_> {
+impl<'a> Interp<'a> {
+    fn new(env: &'a Env) -> Self {
+        Self {
+            env,
+            depth: 0,
+            locals: BTreeMap::new(),
+        }
+    }
+
     fn enter(&mut self) -> Result<(), TclError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
@@ -285,8 +303,14 @@ impl Interp<'_> {
                 return Err(TclError::UnknownVariable(format!("{name}(...)")));
             }
         }
+        // xschem evaluates at the global level, where `$retval` and
+        // `$::retval` are the same variable.
         let key = name.trim_start_matches("::");
-        match self.env.vars.get(key) {
+        let value = match self.locals.get(key) {
+            Some(v) => Some(v),
+            None => self.env.vars.get(key),
+        };
+        match value {
             Some(v) => Ok((v.clone(), k - pos)),
             None => Err(TclError::UnknownVariable(name)),
         }
@@ -457,8 +481,58 @@ impl Interp<'_> {
                 _ => Err(TclError::Unsupported("return with options".into())),
             },
             "if" => self.if_command(args),
+            "catch" => self.catch_command(args),
             other => Err(TclError::Unsupported(other.to_string())),
         }
+    }
+
+    /// `catch body ?var?`: 0 when the body ends normally, 2 when it ends in
+    /// `return`, with its result in `var`. A body that fails here is an
+    /// error, not a 1: the failure may be a command this subset does not
+    /// know, whose effect in Tcl it cannot tell. The variable is a plain
+    /// name that `env` does not hold, since xschem would keep it set for
+    /// everything it evaluates afterwards.
+    fn catch_command(&mut self, args: &[String]) -> Result<Flow, TclError> {
+        let (body, var) = match args {
+            [body] => (body, None),
+            [body, var] => (body, Some(var)),
+            [] => return Err(TclError::Syntax("catch without a body".into())),
+            _ => {
+                return Err(TclError::Unsupported(
+                    "catch with an options variable".into(),
+                ));
+            }
+        };
+        if let Some(var) = var {
+            let plain = var
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && var.chars().all(is_name_char);
+            if !plain {
+                return Err(TclError::Unsupported(format!("catch into `{var}`")));
+            }
+            if self.env.vars.contains_key(var.as_str()) {
+                return Err(TclError::Unsupported(format!(
+                    "catch into `{var}`, which xschem would keep changed"
+                )));
+            }
+        }
+        self.enter()?;
+        let flow = self.script(body);
+        self.depth -= 1;
+        let (code, result) = match flow? {
+            Flow::Normal(v) => ("0", v),
+            Flow::Return(v) => ("2", v),
+        };
+        if let Some(var) = var {
+            self.locals.insert(var.clone(), result);
+            let held: usize = self.locals.iter().map(|(k, v)| k.len() + v.len()).sum();
+            if self.locals.len() > MAX_LOCALS || held > MAX_OUTPUT {
+                return Err(TclError::Limit);
+            }
+        }
+        Ok(Flow::Normal(code.into()))
     }
 
     /// `if cond ?then? body ?elseif cond ?then? body ...? ?else? ?body?`
@@ -1160,13 +1234,97 @@ mod tests {
         assert_eq!(tcleval(text, &env()).unwrap(), "\n\n\n");
     }
 
+    /// xschem 3.4.5 and later: the `simulator_commands` format asks with
+    /// `catch` whether there is a `sim_is_` command for the simulator.
+    #[test]
+    fn simulator_commands_with_catch() {
+        let text = |sim: &str| {
+            format!(
+                "tcleval(\n[if {{[catch {{sim_is_{sim} }} retval] }} {{\n  return {{}} }} elseif {{$retval}} {{ return {{\n.op\n}}\n}} else {{ return {{}} }}\n])\n"
+            )
+        };
+        assert_eq!(tcleval(&text("ngspice"), &env()).unwrap(), "\n\n.op\n\n");
+        assert_eq!(tcleval(&text("xyce"), &env()).unwrap(), "\n\n");
+    }
+
+    /// `catch` gives 0 or, after `return`, 2, and sets its variable for the
+    /// rest of the evaluation only.
+    #[test]
+    fn catch_reports_how_the_body_ended() {
+        assert_eq!(subst("[catch {expr {1 + 1}} r]$r", &env()).unwrap(), "02");
+        assert_eq!(subst("[catch {return x} r] $::r", &env()).unwrap(), "2 x");
+        assert_eq!(subst("[catch {expr 1}]", &env()).unwrap(), "0");
+        assert_eq!(
+            subst("[catch {sim_is_xyce} r][catch {return $r} r]$r", &env()).unwrap(),
+            "020"
+        );
+        assert_eq!(
+            subst("$r", &env()),
+            Err(TclError::UnknownVariable("r".into()))
+        );
+    }
+
+    /// `catch` hides nothing: a body this subset cannot evaluate, or one
+    /// Tcl itself would fail on, is an error, not a 1. Its variable is a
+    /// plain name aispice's own variables do not use.
+    #[test]
+    fn catch_never_swallows_a_refusal() {
+        for bad in [
+            "[catch {exec rm -rf /tmp/x} r]",
+            "[catch {open /etc/passwd} r]",
+            "[catch {set x 1}]",
+            "[catch {source evil.tcl} r]",
+            "[catch {expr {1 / 0}} r]",
+            "[catch {expr {system(1)}} r]",
+            "[catch {return $env(HOME)} r]",
+            "[if {[catch {exec ls} r]} {return a} else {return b}]",
+            "[catch {expr 1} MODELS_NGSPICE]",
+            "[catch {expr 1} ::r]",
+            "[catch {expr 1} a(b)]",
+            "[catch {expr 1} 1r]",
+            "[catch {expr 1} {}]",
+            "[catch {expr 1} r opts]",
+            "[catch]",
+        ] {
+            assert!(subst(bad, &env()).is_err(), "{bad}");
+        }
+        assert!(matches!(
+            subst("[catch {exec ls} r]", &env()),
+            Err(TclError::Unsupported(c)) if c == "exec"
+        ));
+        assert_eq!(subst("$::MODELS_NGSPICE", &env()).unwrap(), "/pdk/models");
+    }
+
+    /// What `catch` keeps is bounded, by count and by size together.
+    #[test]
+    fn catch_variables_are_bounded() {
+        let many: String = (0..=MAX_LOCALS)
+            .map(|i| format!("[catch {{expr 1}} v{i}]"))
+            .collect();
+        assert_eq!(subst(&many, &env()), Err(TclError::Limit));
+        let few: String = (0..MAX_LOCALS)
+            .map(|i| format!("[catch {{expr 1}} v{i}]"))
+            .collect();
+        assert_eq!(subst(&few, &env()).unwrap(), "0".repeat(MAX_LOCALS));
+        // Each value fits, together they do not.
+        let big = format!(
+            "[catch {{return {{{}}}}} a][catch {{return $a$a}} b][catch {{return $b$b}} c]",
+            "x".repeat(50_000)
+        );
+        assert_eq!(subst(&big, &env()), Err(TclError::Limit));
+        // Setting the same variable again replaces its value.
+        let again = format!(
+            "{}$a",
+            format!("[catch {{return {{{}}}}} a]", "x".repeat(50_000)).repeat(4)
+        );
+        assert_eq!(subst(&again, &env()).unwrap().len(), 4 + 50_000);
+    }
+
     #[test]
     fn expressions() {
         let e = |s: &str| {
-            let mut i = Interp {
-                env: &env(),
-                depth: 0,
-            };
+            let env = env();
+            let mut i = Interp::new(&env);
             i.expr(s).map(|v| v.to_tcl())
         };
         assert_eq!(e("1 + 2 * 3").unwrap(), "7");
@@ -1222,6 +1380,7 @@ mod tests {
             "$env(HOME)",
             "$::unknown",
             "[expr {system(1)}]",
+            "[catch {exec ls} r]",
         ] {
             assert!(subst(bad, &env()).is_err(), "{bad}");
         }
@@ -1258,6 +1417,7 @@ mod tests {
             format!("{}1{}", "[".repeat(N), "]".repeat(N)),
             format!("{}{}", "[if 1 {".repeat(N / 4), "}]".repeat(N / 4)),
             format!("{}{}", "[ev {".repeat(N / 4), "}]".repeat(N / 4)),
+            format!("{}{}", "[catch {".repeat(N / 4), "}]".repeat(N / 4)),
         ];
         for case in &cases {
             assert!(case.len() <= MAX_OUTPUT, "{}", &case[..40]);
@@ -1333,6 +1493,7 @@ mod tests {
             "tcleval(\n[if {[ sim_is_ngspice ]} { return {\n.op\n}} elseif {1} then {return x} else {return y}]\n)",
             "[expr {max(1, 2.5, 0x1f) + abs(-3) * 2 ** 3 % 5 - int(2.7) / 1.5e3 eq \"a\" ne {b}}]",
             "\\x41\\u00e9\\101\\\n  ${MODELS_NGSPICE} $a(b) \\[ ]",
+            "tcleval(\n[if {[catch {sim_is_ngspice } retval] } {\n  return {} } elseif {$retval} { return {\n.op\n}\n} else { return {} }\n])",
         ];
         let mut rng = crate::xschem::test_rng(0x7c1e_5eed);
         let alphabet: Vec<char> = "[]{}()\"\\$:;# \n\tx01e.-+*/%!?<>=&|,ab\u{e9}\u{1f600}"
