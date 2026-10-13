@@ -312,8 +312,8 @@ pub async fn check_export(
     if let Some(reason) = skip_reason(&exported.xschem.builtin_symbols(), &verdict) {
         return not_verified(reason);
     }
-    // bubblewrap if it can start here, else Landlock at ABI 6 with seccomp,
-    // else no run.
+    // bubblewrap if it can start here, else Landlock (ABI 4 or later) with
+    // seccomp, else no run.
     let sandbox = match Sandbox::select(cancel).await {
         Ok(s) => s,
         Err(e) => return not_verified(e),
