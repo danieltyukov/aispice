@@ -193,9 +193,23 @@ const MAX_FILE: u64 = 8 << 30;
 /// Processes and threads a layout program may add to what the user runs
 /// (`RLIMIT_NPROC`, relative): KLayout's DRC runs threads.
 const NPROC_HEADROOM: u64 = 512;
-/// Variables a sandboxed run keeps from aispice's environment, besides the
-/// ones each run sets: where programs and libraries are, and the locale.
-const PASSED_ENV: &[&str] = &["PATH", "LD_LIBRARY_PATH", "LANG", "LC_ALL", "LC_CTYPE"];
+/// Variables a run keeps from aispice's environment, besides the ones each
+/// run sets: where programs and libraries are, the locale, and what a
+/// Windows program needs to start. Nothing else of aispice's reaches it, so
+/// neither `KLAYOUT_PATH` nor `PYTHONPATH` (macros and modules a user or a
+/// project set up) does.
+const PASSED_ENV: &[&str] = &[
+    "PATH",
+    "LD_LIBRARY_PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "PATHEXT",
+    "COMSPEC",
+];
 /// System folders a layout program reads besides those every sandboxed
 /// program may: fonts and their configuration, for Qt's offscreen platform.
 const LAYOUT_SYSTEM: &[&str] = &["/etc/fonts"];
@@ -290,30 +304,36 @@ struct Run<'a> {
     timeout: Duration,
 }
 
-/// Run `run` in the sandbox when this machine has one, else as before:
-/// unconfined, in its private folder, with its variables set over aispice's
-/// environment.
+/// Run `run` in the sandbox when this machine has one. Without one it runs
+/// unconfined, but with the same private folder as its working folder and
+/// home and the same cleared environment.
 async fn run(run: Run<'_>, cancel: &CancellationToken) -> Result<ProcessOutput, LayoutError> {
     let failed = |message: String| LayoutError::Failed {
         program: run.name.into(),
         message,
     };
+    let plan = plan(&run);
     let spec = match sandbox().await {
-        Ok(sandbox) => sandbox
-            .command(&plan(&run))
-            .map_err(|e| failed(e.to_string()))?,
+        Ok(sandbox) => sandbox.command(&plan).map_err(|e| failed(e.to_string()))?,
         Err(why) => {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| tracing::warn!("KLayout and Magic run without a sandbox: {why}"));
-            let mut spec = ProcessSpec::new(&run.program, run.dir);
-            spec.args = run.args.clone();
-            spec.env = run.env.clone();
-            spec
+            unconfined(&plan)
         }
     };
     process::run(&spec, run.timeout, cancel)
         .await
         .map_err(|e| failed(e.to_string()))
+}
+
+/// The command for `plan` where there is no sandbox: its program and
+/// arguments in its working folder, with exactly its environment.
+fn unconfined(plan: &Plan) -> ProcessSpec {
+    let mut spec = ProcessSpec::new(&plan.program, &plan.cwd);
+    spec.args = plan.args.clone();
+    spec.env = plan.env.clone();
+    spec.clear_env = true;
+    spec
 }
 
 /// The sandbox plan of a run: the `Denylist` profile, the program's
@@ -357,26 +377,34 @@ fn plan(run: &Run<'_>) -> Plan {
 }
 
 /// The folders of a program installed outside `/usr` (which every
-/// sandboxed program reads): its own folder, and the `lib`, `lib64` and
-/// `share` folders beside it, unless that is `/` or holds `home`.
+/// sandboxed program reads): its own folder, and beside it the `lib`,
+/// `lib64` and `share` folders of its install. Never `/`, the home folder
+/// or a folder above it; and where the install is the home or its
+/// `.local`, which other programs share, only the `lib/<name>` and
+/// `share/<name>` folders of the program itself.
 fn install_folders(program: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let real = real(program);
     if real.starts_with("/usr") {
         return Vec::new();
     }
-    let Some(bin) = real.parent() else {
+    let holds_home = |p: &Path| p.parent().is_none() || home.is_some_and(|h| h.starts_with(p));
+    let Some(bin) = real.parent().filter(|b| !holds_home(b)) else {
         return Vec::new();
     };
     let mut v = vec![bin.to_path_buf()];
-    if let Some(prefix) = bin.parent()
-        && prefix.parent().is_some()
-        && !home.is_some_and(|h| h.starts_with(prefix))
-    {
-        for sub in ["lib", "lib64", "share"] {
-            let p = prefix.join(sub);
-            if p.is_dir() {
-                v.push(p);
-            }
+    let Some(prefix) = bin.parent().filter(|p| !holds_home(p)) else {
+        return v;
+    };
+    let shared = home.is_some_and(|h| prefix == h.join(".local"));
+    let name = real.file_name().unwrap_or_default();
+    for sub in ["lib", "lib64", "share"] {
+        let p = if shared {
+            prefix.join(sub).join(name)
+        } else {
+            prefix.join(sub)
+        };
+        if p.is_dir() {
+            v.push(p);
         }
     }
     v
@@ -668,11 +696,13 @@ mod tests {
     }
 
     /// A program outside /usr brings its own folder and the lib, lib64 and
-    /// share folders beside it, but never a folder holding the home.
+    /// share folders beside it; never a folder holding the home, and from
+    /// the home's shared `.local` only the program's own subfolders.
     #[test]
     fn install_folders_stop_short_of_home() {
         let tmp = tempfile::tempdir().unwrap();
-        let prefix = tmp.path().canonicalize().unwrap().join("opt");
+        let root = tmp.path().canonicalize().unwrap();
+        let prefix = root.join("opt");
         for d in ["bin", "lib", "share"] {
             std::fs::create_dir_all(prefix.join(d)).unwrap();
         }
@@ -682,11 +712,61 @@ mod tests {
             install_folders(&program, None),
             [prefix.join("bin"), prefix.join("lib"), prefix.join("share")]
         );
+        // The install is the home: only the program's folder.
         assert_eq!(
-            install_folders(&program, Some(&prefix.join("home"))),
+            install_folders(&program, Some(&prefix)),
             [prefix.join("bin")]
         );
+        // The program sits in the home itself, or the home is below it.
+        assert!(install_folders(&program, Some(&prefix.join("bin"))).is_empty());
+        assert!(install_folders(&program, Some(&prefix.join("bin/x"))).is_empty());
+        // ~/.local: its own lib and share folders only.
+        let home = root.join("home");
+        let local = home.join(".local");
+        for d in ["bin", "lib/klayout", "share/klayout", "share/keyrings"] {
+            std::fs::create_dir_all(local.join(d)).unwrap();
+        }
+        let program = local.join("bin/klayout");
+        std::fs::write(&program, "").unwrap();
+        assert_eq!(
+            install_folders(&program, Some(&home)),
+            [
+                local.join("bin"),
+                local.join("lib/klayout"),
+                local.join("share/klayout")
+            ]
+        );
         assert!(install_folders(Path::new("/usr/bin/klayout"), None).is_empty());
+    }
+
+    /// Without a sandbox a run keeps its private working folder and exactly
+    /// its environment, none of aispice's.
+    #[test]
+    fn an_unconfined_run_keeps_its_folder_and_environment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let access = Access::new();
+        let run = Run {
+            name: "KLayout",
+            program: PathBuf::from("/usr/bin/klayout"),
+            args: vec!["-b".into()],
+            env: vec![("HOME".into(), dir.clone().into())],
+            dir: &dir,
+            access: &access,
+            exec: Vec::new(),
+            timeout: TIMEOUT,
+        };
+        let p = plan(&run);
+        let spec = unconfined(&p);
+        assert!(spec.clear_env);
+        assert_eq!(spec.cwd, dir);
+        assert_eq!(spec.env, p.env);
+        assert!(spec.confine.is_none());
+        assert!(
+            spec.env
+                .iter()
+                .any(|(k, v)| k == "HOME" && Path::new(v) == dir)
+        );
     }
 
     #[test]
