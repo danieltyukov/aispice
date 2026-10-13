@@ -720,8 +720,39 @@ impl Runner {
         } else {
             (Vec::new(), None)
         };
+        // Control commands, which the policy let through only because the
+        // user enabled control blocks, run only in a sandboxed ngspice,
+        // whatever they are; without a sandbox they are not run at all.
+        let sandbox = if deck_reads.control {
+            if id != SimId::Ngspice {
+                return Err(RunError::Netlist(format!(
+                    "the deck has control commands, which run on ngspice only (in a sandbox), not on {}",
+                    id.name()
+                )));
+            }
+            let sandbox = match sandbox {
+                Some(s) => s,
+                None => aispice_sim::backend::native_code::ready_for(
+                    aispice_sim::backend::native_code::Purpose::ControlCommands,
+                    cancel,
+                )
+                .await
+                .map_err(RunError::Netlist)?,
+            };
+            aispice_sim::backend::native_code::check_links(
+                &sandbox,
+                &deck_reads.linked,
+                &pdk_roots,
+            )
+            .map_err(RunError::Netlist)?;
+            notes.push("ran the deck's control commands in a sandboxed ngspice".into());
+            Some(sandbox)
+        } else {
+            sandbox
+        };
         let mut job = SimJob::new(deck.clone(), run_dir);
         job.deck_name = stem;
+        job.control = deck_reads.control;
         job.sandbox = sandbox;
         // What a sandboxed run may read of the user's: the files the deck
         // reads, as the policy resolved them, and the project's PDK. Not the
@@ -1474,6 +1505,66 @@ mod tests {
         }
         // Nothing ran: no run was kept.
         assert!(runner.latest("deck.cir").is_none());
+    }
+
+    /// With control blocks enabled, a control script on the allowlist runs,
+    /// and runs in a sandboxed ngspice; one off the list is refused before
+    /// anything runs. Gated on ngspice and a sandbox.
+    #[tokio::test]
+    async fn an_allowed_control_script_runs_sandboxed_and_others_are_refused() {
+        if aispice_sim::backend::which("ngspice").is_none() {
+            eprintln!("skipped: ngspice is not installed");
+            return;
+        }
+        let cancel = CancellationToken::new();
+        if let Err(e) = aispice_sim::backend::native_code::ready_for(
+            aispice_sim::backend::native_code::Purpose::ControlCommands,
+            &cancel,
+        )
+        .await
+        {
+            assert!(
+                std::env::var_os("AISPICE_REQUIRE_SANDBOXES").is_none(),
+                "a sandbox is required here: {e}"
+            );
+            eprintln!("skipped: {e}");
+            return;
+        }
+        let (_d, runner, project, _) = pdk_setup(None);
+        let mut cfg = runner.config();
+        cfg.allow_control_blocks = true;
+        runner.set_config(cfg);
+        let script = netlist::parse(
+            "t\nV1 a 0 1\nR1 a 0 1k\n.op\n.control\nrun\nlet x = v(a)\nif x gt 0.5\necho CONTROL-HIGH\nelse\necho CONTROL-LOW\nend\n.endc\n.end\n",
+        );
+        let run = runner
+            .run_netlist(&project, "deck.cir", &script, &[], Some("ngspice"), &cancel)
+            .await
+            .unwrap();
+        assert!(
+            run.notes.iter().any(|n| n.contains("sandboxed ngspice")),
+            "{:?}",
+            run.notes
+        );
+        assert!(
+            run.output.log.contains("CONTROL-HIGH"),
+            "{}",
+            run.output.log
+        );
+        // A command off the list is refused, the run never starts.
+        let refused = netlist::parse("t\nV1 a 0 1\n.op\n.control\nshell id\n.endc\n.end\n");
+        let err = runner
+            .run_netlist(
+                &project,
+                "deck.cir",
+                &refused,
+                &[],
+                Some("ngspice"),
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunError::Policy(_)), "{err:?}");
     }
 
     #[tokio::test]

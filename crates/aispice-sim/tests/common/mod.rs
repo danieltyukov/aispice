@@ -113,6 +113,7 @@ pub fn job(text: &str, run_dir: &Path, name: &str) -> SimJob {
         libraries: Vec::new(),
         reads: Vec::new(),
         sandbox: None,
+        control: false,
     }
 }
 

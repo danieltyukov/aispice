@@ -503,6 +503,64 @@ async fn an_include_through_a_link_runs_under_landlock_and_is_refused_under_bubb
     }
 }
 
+/// With control blocks enabled, the deck's control commands run in the
+/// sandbox: a write the netlist policy would refuse (to a path outside the
+/// run folder) still cannot land outside it there. Unconfined, it does.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_commands_in_a_sandboxed_ngspice_cannot_write_outside_the_run() {
+    let Some((exe, _, sandboxes)) = setup().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let outside = dir.path().join("outside.txt");
+    let deck = format!(
+        "* control\nV1 a 0 1\nR1 a 0 1k\n.op\n.control\nrun\nwrdata {} v(a)\necho CONTROL-RAN\n.endc\n.end\n",
+        outside.display()
+    );
+
+    // Unconfined, the control block writes outside.
+    let plain = dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(plain.join("d.cir"), &deck).unwrap();
+    let out = Command::new(&exe)
+        .args(["-b", "-r", "d.raw", "d.cir"])
+        .current_dir(&plain)
+        .env("HOME", &plain)
+        .output()
+        .unwrap();
+    assert!(
+        outside.exists(),
+        "the unconfined control block did not write outside, so this test shows nothing:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_file(&outside).unwrap();
+
+    // In every sandbox here, it cannot.
+    for (n, sandbox) in sandboxes.iter().enumerate() {
+        let what = sandbox.describe();
+        let mut job = SimJob::new(deck.clone(), dir.path().join(format!("runs-{n}")));
+        job.control = true;
+        job.sandbox = Some(sandbox.clone());
+        let log = match Ngspice::default()
+            .run(&job, &CancellationToken::new())
+            .await
+        {
+            Ok(o) => o.log,
+            Err(SimError::Failed { log, .. }) => log,
+            Err(e) => panic!("{what}: {e}"),
+        };
+        assert!(
+            log.contains("CONTROL-RAN"),
+            "{what}: the control block did not run, so this shows nothing:\n{log}"
+        );
+        assert!(
+            !outside.exists(),
+            "{what}: a control command wrote outside the run folder:\n{log}"
+        );
+    }
+}
+
 /// A ruleset below ABI 4 is never written: the run is refused before
 /// ngspice starts.
 #[tokio::test(flavor = "multi_thread")]

@@ -144,6 +144,20 @@ fn seccomp_here() -> bool {
 /// The sandbox a run that loads compiled models will use, or what this
 /// machine lacks for one and how to simulate without them.
 pub async fn ready(cancel: &CancellationToken) -> Result<Sandbox, String> {
+    ready_for(Purpose::CompiledModels, cancel).await
+}
+
+/// Why a run needs the sandboxed ngspice: it loads the project's compiled
+/// models, or it has control commands (allowed by the user's setting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    CompiledModels,
+    ControlCommands,
+}
+
+/// [`ready`] for `purpose`, whose refusal says what was not run and how to
+/// run without it.
+pub async fn ready_for(purpose: Purpose, cancel: &CancellationToken) -> Result<Sandbox, String> {
     let sandbox = if !cfg!(target_os = "linux") {
         Err("this system is not Linux".to_string())
     } else if !seccomp_here() {
@@ -154,8 +168,8 @@ pub async fn ready(cancel: &CancellationToken) -> Result<Sandbox, String> {
     let no_compiler = compiler().is_none();
     match sandbox {
         Ok(s) if !no_compiler => Ok(s),
-        Ok(_) => Err(refusal(None, true)),
-        Err(why) => Err(refusal(Some(&why), no_compiler)),
+        Ok(_) => Err(refusal_for(purpose, None, true)),
+        Err(why) => Err(refusal_for(purpose, Some(&why), no_compiler)),
     }
 }
 
@@ -204,6 +218,30 @@ fn first_link(p: &Path) -> Option<PathBuf> {
 /// The message for a run whose compiled models are not loaded: what is
 /// missing (the sandbox and why, the C compiler) and what to do instead.
 fn refusal(no_sandbox: Option<&str>, no_compiler: bool) -> String {
+    refusal_for(Purpose::CompiledModels, no_sandbox, no_compiler)
+}
+
+/// [`refusal`] for `purpose`.
+fn refusal_for(purpose: Purpose, no_sandbox: Option<&str>, no_compiler: bool) -> String {
+    if purpose == Purpose::ControlCommands {
+        let mut missing = Vec::new();
+        if let Some(why) = no_sandbox {
+            missing.push(format!(
+                "{why}, and with control blocks enabled aispice runs ngspice only in a sandbox, which needs Linux with seccomp and either bubblewrap 0.8 or later or Landlock ABI 4 (Linux 6.7) or later (see docs/SANDBOX.md)"
+            ));
+        }
+        if no_compiler {
+            missing.push(format!(
+                "there is no C compiler ({} in {}), which the sandboxed ngspice needs",
+                COMPILERS.join(", "),
+                TOOL_PATH.join(", ")
+            ));
+        }
+        return format!(
+            "the deck's control commands were not run: {}. To simulate here, remove the deck's `.control` block and `*#` lines and use aispice's measurements instead.",
+            missing.join("; and ")
+        );
+    }
     let mut missing = Vec::new();
     if let Some(why) = no_sandbox {
         missing.push(format!(

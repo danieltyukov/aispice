@@ -567,6 +567,7 @@ mod tests {
     /// project), executes only the toolchain and the compiler, runs under
     /// the seccomp denylist, and starts from a fixed environment with
     /// nothing of aispice's own and the trusted path.
+    #[cfg(unix)]
     #[test]
     fn a_build_step_is_confined_to_the_build_folder_and_the_toolchain() {
         let dir = Path::new("/tmp/aispice-build-xyz");

@@ -297,15 +297,24 @@ impl Simulator for Ngspice {
             ".spiceinit",
             self.spiceinit_with(job.pdk.as_ref(), &osdi).as_bytes(),
         )?;
-        // Code the project compiled runs only in the sandbox, with the
-        // preloaded library that keeps ngspice's temporary file in the run
-        // folder.
-        let sandboxed = if job.libraries.is_empty() {
+        // Code the project compiled, and control commands the user allowed,
+        // run only in the sandbox, with the preloaded library that keeps
+        // ngspice's temporary file in the run folder. Compiled code gets
+        // the native-code allowlist; control commands alone get the
+        // denylist.
+        let sandboxed = if job.libraries.is_empty() && !job.control {
             None
         } else {
+            let purpose = if job.libraries.is_empty() {
+                native_code::Purpose::ControlCommands
+            } else {
+                native_code::Purpose::CompiledModels
+            };
             let sandbox = match &job.sandbox {
                 Some(s) => s.clone(),
-                None => native_code::ready(cancel).await.map_err(SimError::Config)?,
+                None => native_code::ready_for(purpose, cancel)
+                    .await
+                    .map_err(SimError::Config)?,
             };
             let preload = native_code::preload(cancel).await?;
             native_code::place_preload(ws.path(), &preload)?;
@@ -313,7 +322,10 @@ impl Simulator for Ngspice {
             if let Some(pdk) = &job.pdk {
                 reads.extend(pdk.osdi.iter().cloned());
             }
-            let plan = native_code::plan(&exe, ws.path(), &reads, Vec::new())?;
+            let mut plan = native_code::plan(&exe, ws.path(), &reads, Vec::new())?;
+            if job.libraries.is_empty() {
+                plan.profile = crate::sandbox::Profile::Denylist;
+            }
             Some((sandbox, plan))
         };
         let command = |args: Vec<String>| match &sandboxed {

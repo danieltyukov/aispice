@@ -120,9 +120,14 @@ pub struct SimJob {
     /// PDK. A run that loads `libraries` may read these and nothing else of
     /// the user's.
     pub reads: Vec<PathBuf>,
-    /// The sandbox a run that loads `libraries` runs in; `None` finds one
-    /// with [`native_code::ready`] when the run starts.
+    /// The sandbox a run that loads `libraries` or has control commands
+    /// runs in; `None` finds one with [`native_code::ready_for`] when the
+    /// run starts.
     pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// The deck has control commands (a `.control` block or a `*#` line),
+    /// which the netlist policy allowed because the user enabled control
+    /// blocks: ngspice then runs only in the sandbox, as for `libraries`.
+    pub control: bool,
 }
 
 impl SimJob {
@@ -136,6 +141,7 @@ impl SimJob {
             libraries: Vec::new(),
             reads: Vec::new(),
             sandbox: None,
+            control: false,
         }
     }
 
