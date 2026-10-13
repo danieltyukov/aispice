@@ -572,6 +572,45 @@ async fn ngspice_runs_under_the_native_code_profile() {
     }
 }
 
+/// A bubblewrap is used only when it is not setuid and starts both
+/// profiles: a stand-in that runs Denylist but not native code (one more
+/// seccomp program) is refused, and a setuid one is refused before it runs.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let ran = dir.join("ran");
+    let fake = dir.join("bwrap");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ntouch '{}'\n\
+             if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi\n\
+             n=0\nfor a in \"$@\"; do [ \"$a\" = --add-seccomp-fd ] && n=$((n+1)); done\n\
+             if [ $n -gt {} ]; then echo 'bwrap: no room' >&2; exit 1; fi\n",
+            ran.display(),
+            policy::PROFILE_PROGRAMS
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cancel = CancellationToken::new();
+    let err = Sandbox::bwrap_at(fake.clone(), &cancel).await.unwrap_err();
+    assert!(err.contains("NativeCode"), "{err}");
+    assert!(ran.exists());
+    std::fs::remove_file(&ran).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    if std::fs::metadata(&fake).unwrap().permissions().mode() & 0o4000 == 0 {
+        eprintln!("skipped: this filesystem does not keep the setuid bit");
+        return;
+    }
+    let err = Sandbox::bwrap_at(fake, &cancel).await.unwrap_err();
+    assert!(err.contains("setuid"), "{err}");
+    assert!(!ran.exists(), "a setuid bwrap was run");
+}
+
 /// `select` picks a sandbox here when one is available, and it starts.
 #[tokio::test]
 async fn select_picks_one_that_starts() {

@@ -138,6 +138,21 @@ impl Sandbox {
 
     async fn bwrap(cancel: &CancellationToken) -> Result<Self, String> {
         let program = which("bwrap").ok_or("bubblewrap (bwrap) is not installed")?;
+        Self::bwrap_at(program, cancel).await
+    }
+
+    /// bubblewrap at `program`, when it is not setuid, is recent enough and
+    /// starts both profiles here.
+    async fn bwrap_at(program: PathBuf, cancel: &CancellationToken) -> Result<Self, String> {
+        // A setuid bwrap forks a helper that takes pid 2 in the namespace, so
+        // the program would not have the pid the signal program is written
+        // with (and runs with privileges aispice does not want near it).
+        if is_setuid(&program) {
+            return Err(format!(
+                "bubblewrap at {} is setuid; aispice uses only an unprivileged bwrap",
+                program.display()
+            ));
+        }
         let version = bwrap_version(&program, cancel)
             .await
             .ok_or("bubblewrap did not report its version")?;
@@ -165,31 +180,47 @@ impl Sandbox {
         })
     }
 
-    /// Run `true` in this sandbox: whether it starts here.
+    /// Whether this sandbox starts here with each profile: `true` under
+    /// [`Profile::Denylist`], and under [`Profile::NativeCode`] a shell
+    /// that signals itself, which needs the signal program written with the
+    /// program's real pid.
     async fn probe(&self, cancel: &CancellationToken) -> Result<(), String> {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         let dir = tmp.path().canonicalize().map_err(|e| e.to_string())?;
         let truth = which("true").unwrap_or_else(|| PathBuf::from("/usr/bin/true"));
-        let plan = Plan {
-            program: truth,
-            args: Vec::new(),
-            env: Vec::new(),
-            cwd: dir.clone(),
-            read: Vec::new(),
-            exec: Vec::new(),
-            write: vec![dir],
-            profile: Profile::Denylist,
-            limits: Limits::default(),
-        };
-        let spec = self.command(&plan).map_err(|e| e.to_string())?;
-        let out = process::run(&spec, Duration::from_secs(10), cancel)
-            .await
-            .map_err(|e| e.to_string())?;
-        if out.success() {
-            Ok(())
-        } else {
-            Err(first_line(&out.combined()).unwrap_or_else(|| "it failed".into()))
+        let sh = which("sh").unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let runs = [
+            (truth, Vec::new(), Profile::Denylist),
+            (
+                sh,
+                vec![OsString::from("-c"), OsString::from("kill -0 $$")],
+                Profile::NativeCode,
+            ),
+        ];
+        for (program, args, profile) in runs {
+            let plan = Plan {
+                program,
+                args,
+                env: Vec::new(),
+                cwd: dir.clone(),
+                read: Vec::new(),
+                exec: Vec::new(),
+                write: vec![dir.clone()],
+                profile,
+                limits: Limits::default(),
+            };
+            let spec = self.command(&plan).map_err(|e| e.to_string())?;
+            let out = process::run(&spec, Duration::from_secs(10), cancel)
+                .await
+                .map_err(|e| e.to_string())?;
+            if !out.success() {
+                return Err(format!(
+                    "{profile:?}: {}",
+                    first_line(&out.combined()).unwrap_or_else(|| "it failed".into())
+                ));
+            }
         }
+        Ok(())
     }
 
     /// For messages: which sandbox, and what holds signals.
@@ -316,6 +347,18 @@ impl Sandbox {
         spec.clear_env = true;
         Ok(spec)
     }
+}
+
+/// Whether `p` (followed through links) has the setuid bit.
+#[cfg(unix)]
+fn is_setuid(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.permissions().mode() & 0o4000 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_setuid(_: &Path) -> bool {
+    false
 }
 
 /// `p` with symlinks resolved, so a rule or bind names the file itself.
