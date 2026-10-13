@@ -71,8 +71,11 @@ async fn gate(found: bool, what: &str) -> bool {
 }
 
 /// The result the script wrote, after checking that no mark was left and
-/// the input's mode is unchanged.
-fn result(s: &Setup, log: &str) -> String {
+/// the input's mode is unchanged. bubblewrap gives the program a /tmp of
+/// its own, so a write there works inside and leaves nothing outside; that
+/// line is dropped.
+async fn result(s: &Setup, log: &str) -> String {
+    let private_tmp = tools::sandbox_description().await.starts_with("bubblewrap");
     let left: Vec<&PathBuf> = s.marks.iter().filter(|m| m.exists()).collect();
     for m in &left {
         let _ = std::fs::remove_file(m);
@@ -80,7 +83,13 @@ fn result(s: &Setup, log: &str) -> String {
     assert!(left.is_empty(), "wrote outside its folders: {left:?}");
     let mode = std::fs::metadata(&s.victim).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o640, "changed the input's mode");
-    std::fs::read_to_string(s.out.join("result")).unwrap_or_else(|_| panic!("no result: {log}"))
+    let text = std::fs::read_to_string(s.out.join("result"))
+        .unwrap_or_else(|_| panic!("no result: {log}"));
+    let tmp_mark = format!("wrote {}", s.marks[2].display());
+    text.lines()
+        .filter(|l| !(private_tmp && *l == tmp_mark))
+        .map(|l| format!("{l}\n"))
+        .collect()
 }
 
 /// The same script run without the sandbox, with marks only beside the
@@ -171,7 +180,7 @@ async fn klayout_runs_confined() {
     )
     .await
     .unwrap();
-    assert_eq!(result(&s, &out.combined()), "ok\n");
+    assert_eq!(result(&s, &out.combined()).await, "ok\n");
 
     let c = control_setup("klayout-control");
     let mut cmd = std::process::Command::new(programs.klayout().unwrap());
@@ -231,7 +240,7 @@ async fn magic_runs_confined() {
     )
     .await
     .unwrap();
-    assert_eq!(result(&s, &out.combined()), "ok\n");
+    assert_eq!(result(&s, &out.combined()).await, "ok\n");
 
     let c = control_setup("magic-control");
     let mut cmd = std::process::Command::new(programs.magic().unwrap());
