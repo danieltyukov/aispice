@@ -17,7 +17,9 @@ use crate::workspace::{FileWrite, Workspace};
 use aispice_agent::tool::parse_input;
 use aispice_agent::{Tool, ToolContext, ToolOutput, ToolSpec};
 use aispice_core::macropkg::lef::parse_lef;
-use aispice_core::macropkg::{CheckOptions, Evidence, Manifest, Pdk, Status, check_package};
+use aispice_core::macropkg::{
+    CheckOptions, Evidence, Manifest, Pdk, PdkLibs, Status, check_package,
+};
 use aispice_layout::chip::assemble::{self, Assembled, Block, ChipPlan};
 use aispice_layout::chip::floorplan::{MAX_DIE, MacroGeom};
 use aispice_layout::chip::geom::LayerRect;
@@ -203,14 +205,15 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
     // Names compare without case, as SPICE compares them.
-    let pdk_cells = mx::pdk_cell_names(&env.files.root)?;
+    let pdk_libs = PdkLibs::load(&env.files.root)?;
+    let pdk_cells = pdk_libs.names.clone();
     if let Some(why) = mx::pdk_name_clash(&spec.name, &pdk_cells) {
         return Err(format!("the chip's name: {why}"));
     }
     let mut cells: BTreeMap<String, String> = BTreeMap::new();
     let opts = CheckOptions {
         pdk: Some(format!("{}@{commit}", pdk.name)),
-        pdk_cells,
+        pdk_libs: Some(pdk_libs),
         ..Default::default()
     };
     for m in &spec.macros {
@@ -234,7 +237,7 @@ async fn load(ws: &Workspace, input: &ChipInput) -> Result<Loaded, String> {
                 m.package
             ));
         }
-        if let Some(why) = mx::pdk_name_clash(&name, &opts.pdk_cells) {
+        if let Some(why) = mx::pdk_name_clash(&name, &pdk_cells) {
             return Err(format!("{}: {why}", m.package));
         }
         if let Some(other) = cells.insert(name.to_ascii_lowercase(), m.package.clone())
