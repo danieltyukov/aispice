@@ -87,8 +87,9 @@ async fn gate(found: bool, what: &str) -> bool {
 
 /// The result the script wrote, after checking that no mark was left and
 /// the input's mode is unchanged. bubblewrap gives the program a /tmp of
-/// its own, so a write there works inside and leaves nothing outside; that
-/// line is dropped.
+/// its own, so a write anywhere under /tmp (the real /tmp, or a project
+/// that sits there, as the test's does) works inside and leaves nothing
+/// outside, which the check of the marks shows; those lines are dropped.
 async fn result(s: &Setup, log: &str) -> String {
     let private_tmp = tools::sandbox_description().await.starts_with("bubblewrap");
     let left: Vec<&PathBuf> = s.marks.iter().filter(|m| m.exists()).collect();
@@ -100,9 +101,8 @@ async fn result(s: &Setup, log: &str) -> String {
     assert_eq!(mode & 0o777, 0o640, "changed the input's mode");
     let text = std::fs::read_to_string(s.out.join("result"))
         .unwrap_or_else(|_| panic!("no result: {log}"));
-    let tmp_mark = format!("wrote {}", s.marks[2].display());
     text.lines()
-        .filter(|l| !(private_tmp && *l == tmp_mark))
+        .filter(|l| !(private_tmp && l.starts_with("wrote /tmp/")))
         .map(|l| format!("{l}\n"))
         .collect()
 }
