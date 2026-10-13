@@ -64,11 +64,15 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 
 /// A file's SHA-256, after its size says it is within `limit`.
 pub fn sha256_capped(path: &Path, limit: u64) -> Result<String, ReadError> {
-    let size = std::fs::metadata(path)?.len();
+    sha256_file_capped(std::fs::File::open(path)?, limit)
+}
+
+/// An open file's SHA-256, after its size says it is within `limit`.
+pub fn sha256_file_capped(mut file: std::fs::File, limit: u64) -> Result<String, ReadError> {
+    let size = file.metadata()?.len();
     if size > limit {
         return Err(ReadError::TooLarge(too_large(size, limit)));
     }
-    let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut read = 0u64;

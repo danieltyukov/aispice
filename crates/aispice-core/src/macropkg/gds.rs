@@ -81,6 +81,11 @@ impl GdsLibrary {
         self.cells.contains_key(name)
     }
 
+    /// Every cell, in file order.
+    pub fn cells(&self) -> &[String] {
+        &self.order
+    }
+
     /// Cells no other cell references, in file order.
     pub fn top_cells(&self) -> Vec<String> {
         let used: HashSet<&str> = self

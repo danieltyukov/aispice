@@ -846,6 +846,7 @@ async fn build(
         &pkg,
         &CheckOptions {
             pdk: Some(format!("{}@{commit}", pdk.name)),
+            pdk_cells,
             ..Default::default()
         },
     )
