@@ -591,6 +591,17 @@ code {
   width: 56%;
 }
 
+/* The edit and spec cards overhang the column by a few percent, which only fits
+   while the margin beside the column is wider than the overhang. */
+@media (max-width: 1240px) {
+  .stack-edit .card-float {
+    right: 0;
+  }
+  .stack-verify .card-float {
+    left: 0;
+  }
+}
+
 /* Optimizer card, then the Monte Carlo card overlapping its lower right. */
 .stack-size {
   padding-bottom: 27%;
@@ -604,6 +615,173 @@ code {
   right: 0;
   bottom: 0;
   width: 64%;
+}
+
+/* IC design, layout and chips
+   ------------------------------------------------------------------------- */
+
+.ic {
+  border-top: 1px solid var(--line);
+}
+
+.stack-ic {
+  display: grid;
+  gap: 16px;
+}
+
+.ms {
+  border-top: 1px solid var(--line);
+}
+
+.ms-plot {
+  margin: 0;
+  padding: 12px;
+}
+
+.card-pad {
+  padding: 18px 20px;
+}
+
+/* aispice's schematic renders are drawn on white; they keep it in the dark theme. */
+.card-light {
+  background: #ffffff;
+}
+
+.card-label {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.result {
+  margin: 8px 0 0;
+  overflow-x: auto;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.layout-band,
+.chips {
+  padding: 112px 0;
+  border-top: 1px solid var(--line);
+}
+
+.layout-band {
+  background: var(--surface);
+}
+
+.layout-grid,
+.chips-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  align-items: center;
+  gap: 72px;
+}
+
+.chips-grid {
+  grid-template-columns: minmax(0, 6fr) minmax(0, 6fr);
+}
+
+.layout-art,
+.chips-art {
+  margin: 0;
+}
+
+/* aispice draws layouts on white, like its schematics; they keep it in the dark theme. */
+.layout-art img,
+.chips-art img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: #ffffff;
+}
+
+.layout-art img {
+  width: auto;
+  max-width: 100%;
+  max-height: 720px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.layout-art figcaption,
+.chips-art figcaption {
+  margin-top: 10px;
+  color: var(--faint);
+  font-size: 13.5px;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+  margin: 28px 0 0;
+}
+
+.facts dt {
+  color: var(--ink-2);
+  font-size: 13.5px;
+}
+
+.facts dd {
+  margin: 2px 0 0;
+  font-size: 22px;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.facts dd small {
+  margin-left: 4px;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.facts-note {
+  margin-top: 20px;
+  color: var(--ink-2);
+  font-size: 15px;
+}
+
+.chips-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+@media (max-width: 960px) {
+  .layout-grid,
+  .chips-grid {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+  .chips-art {
+    order: 2;
+  }
+  .layout-band,
+  .chips {
+    padding: 80px 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .result {
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .facts dd {
+    font-size: 19px;
+  }
 }
 
 /* Render band
@@ -862,6 +1040,13 @@ code {
   width: min(100%, 640px);
   margin-top: 28px;
   text-align: left;
+}
+
+@media (max-width: 720px) {
+  .code-wide pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* Footer
