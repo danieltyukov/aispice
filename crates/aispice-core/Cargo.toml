@@ -23,6 +23,11 @@ regex = "1"
 sha2 = "0.10"
 toml = "1"
 
+# Package files are opened one directory at a time without following a link
+# (macropkg::files), which std cannot do.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
 [features]
 default = ["raster"]
 # PNG output for multimodal models, through resvg. Off for builds that only

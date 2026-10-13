@@ -219,7 +219,11 @@ async fn the_ota_and_the_comparator_export_as_packages_both_tools_accept() {
 
     // A macro named like a cell of the PDK would clash with it in a chip
     // and in SPICE, which ignores case.
-    let mut names = vec![("SG13G2_INV_1", "sg13g2_"), ("sg13g2_mine", "sg13g2_")];
+    let mut names = vec![
+        ("SG13G2_INV_1", "begins with sg13g2,"),
+        ("sg13g2_mine", "begins with sg13g2,"),
+        ("rm_ihpsg13_mine", "begins with rm_ihpsg13,"),
+    ];
     let sram = std::env::var_os("AISPICE_PDK_IHP")
         .map(PathBuf::from)
         .unwrap()

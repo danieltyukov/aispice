@@ -267,10 +267,91 @@ async fn landlock_narrows_exec_and_signals() {
     }
 }
 
+/// In every sandbox here, under either profile, a program changes no mode
+/// or time of a file outside its folders (Landlock up to ABI 6 does not
+/// mediate those; seccomp refuses them) and reads or sets no limit of
+/// another process. The test changes the same file first, so the call
+/// would reach it unconfined.
+#[cfg(unix)]
+#[tokio::test]
+async fn no_metadata_change_outside_and_no_limits_of_others() {
+    use std::os::unix::fs::PermissionsExt;
+    let (Some(chmod), Some(touch), Some(prlimit)) =
+        (which("chmod"), which("touch"), which("prlimit"))
+    else {
+        eprintln!("skipped: no chmod, touch or prlimit");
+        return;
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().canonicalize().unwrap();
+            let victim = dir.join("victim");
+            std::fs::write(&victim, "x").unwrap();
+            std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o640)).unwrap();
+            let before = std::fs::metadata(&victim).unwrap().modified().unwrap();
+            let program = dir.join("stand-in");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\nprintf 'ok\\n' > result\n\
+                     chmod 600 '{v}' 2>/dev/null && printf 'chmod\\n' >> result\n\
+                     touch -d 2001-01-01 '{v}' 2>/dev/null && printf 'touch\\n' >> result\n\
+                     prlimit --pid $PPID --nofile >/dev/null 2>&1 && printf 'parent\\n' >> result\n\
+                     prlimit --nofile >/dev/null 2>&1 && printf 'own\\n' >> result\n",
+                    v = victim.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let out = dir.join("out");
+            std::fs::create_dir_all(&out).unwrap();
+            let mut plan = plan_in(&out, &program, profile);
+            plan.exec = vec![
+                PathBuf::from("/bin/sh"),
+                chmod.clone(),
+                touch.clone(),
+                prlimit.clone(),
+            ];
+            let spec = sandbox.command(&plan).unwrap();
+            let run = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                .await
+                .unwrap();
+            let text = std::fs::read_to_string(out.join("result")).unwrap_or_else(|_| {
+                panic!("{}: no result: {}", sandbox.describe(), run.combined())
+            });
+            let what = format!("{} {profile:?}: {text}", sandbox.describe());
+            assert_eq!(text, "ok\nown\n", "{what}");
+            let meta = std::fs::metadata(&victim).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o640, "{what}");
+            assert_eq!(meta.modified().unwrap(), before, "{what}");
+        }
+    }
+    // Unconfined, the same changes reach the file.
+    let tmp = tempfile::tempdir().unwrap();
+    let victim = tmp.path().join("victim");
+    std::fs::write(&victim, "x").unwrap();
+    for (cmd, args) in [(&chmod, vec!["600"]), (&touch, vec!["-d", "2001-01-01"])] {
+        let ok = std::process::Command::new(cmd)
+            .args(args)
+            .arg(&victim)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{}", cmd.display());
+    }
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 /// Native code may signal itself and its group but not every process, in
 /// every sandbox here: `kill(-1, 0)` fails with an errno at Landlock ABI 6
 /// too, where the signal scope alone would let it report success, and under
 /// bubblewrap, whose namespace pid the signal program is written with.
+/// Under Landlock the program leads its own group, so it also reaches the
+/// group by minus its pid; under bubblewrap it does not lead one.
 #[cfg(unix)]
 #[tokio::test]
 async fn native_code_cannot_signal_everyone() {
@@ -280,11 +361,17 @@ async fn native_code_cannot_signal_everyone() {
         let script = "#!/bin/sh\nprintf 'ok\\n' > result\n\
             kill -0 $$ && printf 'self\\n' >> result\n\
             kill -0 0 && printf 'group\\n' >> result\n\
-            kill -0 -$$ && printf 'own group\\n' >> result\n\
-            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n";
+            kill -0 -1 2>> result && printf 'everyone\\n' >> result\n\
+            kill -0 -$$ 2>/dev/null && printf 'own group\\n' >> result\n";
         let text = run_script(&sandbox, &dir, script, Profile::NativeCode).await;
         assert!(
-            text.starts_with("ok\nself\ngroup\nown group\n"),
+            text.starts_with("ok\nself\ngroup\n"),
+            "{}: {text}",
+            sandbox.describe()
+        );
+        assert_eq!(
+            text.ends_with("own group\n"),
+            !sandbox.is_bwrap(),
             "{}: {text}",
             sandbox.describe()
         );
@@ -483,6 +570,45 @@ async fn ngspice_runs_under_the_native_code_profile() {
             );
         }
     }
+}
+
+/// A bubblewrap is used only when it is not setuid and starts both
+/// profiles: a stand-in that runs Denylist but not native code (one more
+/// seccomp program) is refused, and a setuid one is refused before it runs.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let ran = dir.join("ran");
+    let fake = dir.join("bwrap");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\ntouch '{}'\n\
+             if [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi\n\
+             n=0\nfor a in \"$@\"; do [ \"$a\" = --add-seccomp-fd ] && n=$((n+1)); done\n\
+             if [ $n -gt {} ]; then echo 'bwrap: no room' >&2; exit 1; fi\n",
+            ran.display(),
+            policy::PROFILE_PROGRAMS
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cancel = CancellationToken::new();
+    let err = Sandbox::bwrap_at(fake.clone(), &cancel).await.unwrap_err();
+    assert!(err.contains("NativeCode"), "{err}");
+    assert!(ran.exists());
+    std::fs::remove_file(&ran).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    if std::fs::metadata(&fake).unwrap().permissions().mode() & 0o4000 == 0 {
+        eprintln!("skipped: this filesystem does not keep the setuid bit");
+        return;
+    }
+    let err = Sandbox::bwrap_at(fake, &cancel).await.unwrap_err();
+    assert!(err.contains("setuid"), "{err}");
+    assert!(!ran.exists(), "a setuid bwrap was run");
 }
 
 /// `select` picks a sandbox here when one is available, and it starts.

@@ -462,10 +462,12 @@ measured = {{ tt = 20.1e-6, ss = 18.7e-6, ff = 22.4e-6 }}
 # The digital macro: a 2-bit counter with enable and active-low reset, 20 x 10 um.
 
 
-def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
+def counter_gds(
+    top: str = "tiny_counter", hierarchy: str = "", tap_name: str = "tiny_counter_tap"
+) -> bytes:
     """The counter's layout; ``hierarchy`` adds references the validators must refuse
     or measure without visiting every instance."""
-    tap = Cell("tiny_counter_tap")
+    tap = Cell(tap_name)
     tap.rect(ACTIV, 0, 0, 300, 300)
     cell = Cell(top)
     cell.rect(PR_BOUNDARY, 0, 0, 20000, 10000)
@@ -474,7 +476,7 @@ def counter_gds(top: str = "tiny_counter", hierarchy: str = "") -> bytes:
     cell.text(METAL1_TEXT, 10000, 9700, "VDD").text(METAL1_TEXT, 10000, 300, "VSS")
     # A routed net with flush ends that stop on the boundary.
     cell.path(METAL1, 200, 0, 0, 5000, 4000, 5000, 4000, 8000)
-    cell.aref("tiny_counter_tap", 4, 2, 6000, 1000, 2000, 1000)
+    cell.aref(tap_name, 4, 2, 6000, 1000, 2000, 1000)
     for name, x0, y0 in (
         ("clk", 0, 2000),
         ("rst_n", 0, 3500),
@@ -940,6 +942,45 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
         lambda f: {**f, "tiny_counter.v": counter_v(en_dir="output").encode()},
     ),
     (
+        # Both sides of an ifdef declare en: Yosys defines SYNTHESIS and reads an output.
+        "verilog-ifdef-port",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.v",
+            "    input en,\n",
+            "`ifdef SYNTHESIS\n    output en,\n`else\n    input en,\n`endif\n",
+        ),
+    ),
+    (
+        # A second cell of the macro's name: OpenSTA keeps the last one, where en is an
+        # output.
+        "liberty-duplicate-cell",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lib",
+            "\n}\n",
+            "\n  cell (tiny_counter) {\n    pin (en) {\n      direction : output ;\n    }\n  }\n}\n",
+        ),
+    ),
+    (
+        # A macro written in lower case before the real one: OpenROAD reads LEF keywords
+        # in any case and keeps the first macro of a name.
+        "lef-duplicate-macro",
+        counter,
+        "tiny_counter.macro",
+        lambda f: _replace(
+            f,
+            "tiny_counter.lef",
+            "MACRO tiny_counter\n",
+            "macro tiny_counter\n  class BLOCK ;\n  size 30 by 10 ;\nend tiny_counter\n"
+            "MACRO tiny_counter\n",
+        ),
+    ),
+    (
         "bus-width",
         counter,
         "tiny_counter.macro",
@@ -972,6 +1013,23 @@ VARIANTS: list[tuple[str, Callable[[], Files], str, Callable[[Files], Files]]] =
                 f, "lvs", ["tiny_counter.gds", "tiny_counter.spice"], status="fail"
             ),
         },
+    ),
+    (
+        # Cells named in IHP SG13G2's own name spaces: a tap cell called like a standard
+        # cell, and a subcircuit whose name only differs in case.
+        "pdk-cell-name",
+        counter,
+        "tiny_counter.macro",
+        lambda f: with_evidence(
+            {
+                **f,
+                "tiny_counter.gds": counter_gds(tap_name="sg13g2_tap"),
+                "tiny_counter.spice": (
+                    COUNTER_SPICE + ".SUBCKT Sg13g2_Dly a y\n.ENDS Sg13g2_Dly\n"
+                ).encode(),
+            },
+            "tiny_counter",
+        ),
     ),
     (
         "power-pin-as-signal",

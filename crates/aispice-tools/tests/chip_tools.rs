@@ -249,7 +249,7 @@ async fn a_block_gds_with_klayout_context_information_is_refused() {
 
 /// SPICE ignores case, so `TINY_COUNTER` and `tiny_counter` are one
 /// subcircuit; a block or chip named like a cell of the PDK is refused
-/// whatever its case.
+/// whatever its case, the block by macro/v1's `pdk.cell_name` itself.
 #[tokio::test]
 async fn block_and_chip_names_of_pdk_cells_are_refused_in_any_case() {
     let s = setup();
@@ -266,14 +266,18 @@ async fn block_and_chip_names_of_pdk_cells_are_refused_in_any_case() {
     std::fs::write(s.project.path().join("t.chip.toml"), &text).unwrap();
     let out = call(&s.ws, json!({"action": "plan", "spec": "t.chip.toml"})).await;
     assert!(
-        out.is_error && out.text_content().contains("cell of the PDK's libraries"),
+        out.is_error
+            && out
+                .text_content()
+                .contains(r#"pdk.cell_name macro.toml: name "tiny_counter" is a cell of PDK"#),
         "{}",
         out.text_content()
     );
     std::fs::remove_file(&lef).unwrap();
     for (name, why) in [
-        ("SG13G2_top", "sg13g2_"),
-        ("sg13g2_inv_1", "sg13g2_"),
+        ("SG13G2_top", "begins with sg13g2,"),
+        ("sg13g2_inv_1", "begins with sg13g2,"),
+        ("rm_ihpsg13_top", "begins with rm_ihpsg13,"),
         ("TINY_COUNTER", "is the chip's"),
     ] {
         std::fs::write(
