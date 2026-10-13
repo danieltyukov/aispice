@@ -86,6 +86,16 @@ const DENY: u32 = libc::SECCOMP_RET_ERRNO | libc::EPERM as u32;
 const F_SETSIG: u32 = 10;
 const F_SETOWN_EX: u32 = 15;
 
+/// System calls newer than some C libraries name. Calls from 5.1 on have one
+/// number on every architecture.
+const SYS_FCHMODAT2: libc::c_long = 452;
+const SYS_SETXATTRAT: libc::c_long = 463;
+const SYS_REMOVEXATTRAT: libc::c_long = 466;
+
+/// `which` values of `setpriority` and `ioprio_set` that name one process.
+const PRIO_PROCESS: u64 = 0;
+const IOPRIO_WHO_PROCESS: u64 = 1;
+
 /// The pid of the program bubblewrap runs, in its PID namespace.
 const BWRAP_PROGRAM_PID: libc::pid_t = 2;
 
@@ -303,7 +313,8 @@ fn build_landlock(ll: &LandlockPolicy) -> io::Result<OwnedFd> {
 /// mounts, and leaving the process group, which is how aispice finds every
 /// process the run started.
 fn denied_syscalls() -> Vec<libc::c_long> {
-    vec![
+    #[allow(unused_mut)]
+    let mut v = vec![
         libc::SYS_socket,
         libc::SYS_connect,
         libc::SYS_bind,
@@ -362,7 +373,39 @@ fn denied_syscalls() -> Vec<libc::c_long> {
         libc::SYS_fspick,
         libc::SYS_mount_setattr,
         libc::SYS_open_by_handle_at,
-    ]
+        // Metadata of files, which Landlock up to ABI 6 does not mediate:
+        // modes, owners, extended attributes and times of any file the user
+        // owns, wherever it is.
+        libc::SYS_fchmod,
+        libc::SYS_fchmodat,
+        SYS_FCHMODAT2,
+        libc::SYS_fchown,
+        libc::SYS_fchownat,
+        libc::SYS_setxattr,
+        libc::SYS_lsetxattr,
+        libc::SYS_fsetxattr,
+        SYS_SETXATTRAT,
+        libc::SYS_removexattr,
+        libc::SYS_lremovexattr,
+        libc::SYS_fremovexattr,
+        SYS_REMOVEXATTRAT,
+        libc::SYS_utimensat,
+        // Watching files: their events carry names from outside the folders
+        // a program may read.
+        libc::SYS_inotify_add_watch,
+        libc::SYS_fanotify_mark,
+    ];
+    // The older forms x86_64 still has.
+    #[cfg(target_arch = "x86_64")]
+    v.extend([
+        libc::SYS_chmod,
+        libc::SYS_chown,
+        libc::SYS_lchown,
+        libc::SYS_utime,
+        libc::SYS_utimes,
+        libc::SYS_futimesat,
+    ]);
+    v
 }
 
 /// The syscalls [`Profile::NativeCode`] allows without looking at their
@@ -601,6 +644,36 @@ fn denylist_program() -> io::Result<BpfProgram> {
     }
     #[allow(clippy::useless_conversion)]
     rules.insert(i64::from(libc::SYS_clone), clone);
+    // Limits, scheduling and priority only of the process itself: on
+    // another process of the user they could slow it, kill it (a CPU limit
+    // sends SIGXCPU, then SIGKILL) or show which pids exist. Each rule
+    // refuses the call when its argument is anything else.
+    let other = |arg: u8, own: u64| -> io::Result<SeccompRule> {
+        let c = SeccompCondition::new(arg, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, own)
+            .map_err(to_io)?;
+        SeccompRule::new(vec![c]).map_err(to_io)
+    };
+    for nr in [
+        libc::SYS_prlimit64,
+        libc::SYS_sched_setaffinity,
+        libc::SYS_sched_setparam,
+        libc::SYS_sched_setscheduler,
+        libc::SYS_sched_setattr,
+    ] {
+        #[allow(clippy::useless_conversion)]
+        rules.insert(i64::from(nr), vec![other(0, 0)?]);
+    }
+    #[allow(clippy::useless_conversion)]
+    {
+        rules.insert(
+            i64::from(libc::SYS_setpriority),
+            vec![other(0, PRIO_PROCESS)?, other(1, 0)?],
+        );
+        rules.insert(
+            i64::from(libc::SYS_ioprio_set),
+            vec![other(0, IOPRIO_WHO_PROCESS)?, other(1, 0)?],
+        );
+    }
     compile(
         rules,
         SeccompAction::Allow,
@@ -1205,6 +1278,120 @@ mod tests {
         // 8 clone3, 9 x32, 10 shm, 11 msg, 12 sem, 13 mq, 14 setsid,
         // 15 setpgid, 16 socketpair, 17 fork.
         assert_eq!(code, Some(0), "denylist check {code:?} did not hold");
+    }
+
+    /// The denylist refuses changing any file's mode, owner, extended
+    /// attributes or times and watching files, and lets limits, scheduling
+    /// and priority change only for the process itself. Each change works
+    /// on the same file without the program, so the refusal is the program's.
+    #[test]
+    fn the_denylist_refuses_metadata_watches_and_others_scheduling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("victim");
+        std::fs::write(&path, "x").unwrap();
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let at = libc::AT_FDCWD;
+        // Unconfined, each of these reaches the file.
+        assert_eq!(unsafe { libc::fchmodat(at, c.as_ptr(), 0o640, 0) }, 0);
+        assert_eq!(
+            unsafe { libc::utimensat(at, c.as_ptr(), std::ptr::null(), 0) },
+            0
+        );
+        let file = std::fs::File::open(&path).unwrap();
+        let fd = file.as_raw_fd();
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        let programs = profile_programs(Profile::Denylist).unwrap();
+        let code = in_child(|| {
+            let applied = apply_all(&programs);
+            let refused = |r: libc::c_long| fails_with(r, libc::EACCES);
+            let chmod = refused(unsafe { libc::fchmodat(at, c.as_ptr(), 0o600, 0) } as _);
+            let chmod2 = refused(unsafe { libc::syscall(SYS_FCHMODAT2, at, c.as_ptr(), 0o600, 0) });
+            let fchmod = refused(unsafe { libc::fchmod(fd, 0o600) } as _);
+            let chown = refused(unsafe { libc::fchownat(at, c.as_ptr(), uid, gid, 0) } as _);
+            let fchown = refused(unsafe { libc::fchown(fd, uid, gid) } as _);
+            let times =
+                refused(unsafe { libc::utimensat(at, c.as_ptr(), std::ptr::null(), 0) } as _);
+            let xattr = refused(unsafe {
+                libc::setxattr(
+                    c.as_ptr(),
+                    c"user.aispice".as_ptr(),
+                    c"1".as_ptr().cast(),
+                    1,
+                    0,
+                )
+            } as _);
+            let unxattr =
+                refused(unsafe { libc::removexattr(c.as_ptr(), c"user.aispice".as_ptr()) } as _);
+            let inotify = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+            let watch = inotify >= 0
+                && refused(unsafe {
+                    libc::inotify_add_watch(inotify, c.as_ptr(), libc::IN_ALL_EVENTS)
+                } as _);
+            let parent = unsafe { libc::getppid() };
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            let mut prlimit = |pid: libc::pid_t| unsafe {
+                libc::syscall(
+                    libc::SYS_prlimit64,
+                    pid,
+                    libc::RLIMIT_NOFILE,
+                    std::ptr::null::<libc::rlimit>(),
+                    &mut lim as *mut libc::rlimit,
+                )
+            };
+            let other_limits = refused(prlimit(parent));
+            let own_limits = prlimit(0) == 0;
+            let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<libc::cpu_set_t>();
+            let got = unsafe { libc::sched_getaffinity(0, size, &mut set) } == 0;
+            let other_affinity =
+                refused(unsafe { libc::sched_setaffinity(parent, size, &set) } as _);
+            let own_affinity = got && unsafe { libc::sched_setaffinity(0, size, &set) } == 0;
+            let other_nice = refused(unsafe {
+                libc::syscall(libc::SYS_setpriority, libc::PRIO_PROCESS, parent, 0)
+            });
+            let user_nice =
+                refused(unsafe { libc::syscall(libc::SYS_setpriority, libc::PRIO_USER, 0, 19) });
+            let own_nice =
+                unsafe { libc::syscall(libc::SYS_setpriority, libc::PRIO_PROCESS, 0, 19) } == 0;
+            let other_io = refused(unsafe {
+                libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, parent, 0)
+            });
+            let own_io =
+                unsafe { libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, 0) } == 0;
+            first_failed(&[
+                applied,
+                chmod,
+                chmod2,
+                fchmod,
+                chown,
+                fchown,
+                times,
+                xattr,
+                unxattr,
+                watch,
+                other_limits,
+                own_limits,
+                other_affinity,
+                own_affinity,
+                other_nice,
+                user_nice,
+                own_nice,
+                other_io,
+                own_io,
+            ])
+        });
+        // 1 applied, 2 fchmodat, 3 fchmodat2, 4 fchmod, 5 fchownat, 6 fchown,
+        // 7 utimensat, 8 setxattr, 9 removexattr, 10 inotify_add_watch,
+        // 11 prlimit other, 12 prlimit own, 13 affinity other, 14 affinity
+        // own, 15 setpriority other, 16 setpriority user, 17 setpriority
+        // own, 18 ioprio other, 19 ioprio own.
+        assert_eq!(code, Some(0), "denylist check {code:?} did not hold");
+        let mode = std::fs::metadata(&path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(mode.mode() & 0o777, 0o640);
     }
 
     /// An x32 socket call is refused with `EACCES` (x86_64; elsewhere there
