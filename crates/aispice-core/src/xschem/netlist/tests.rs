@@ -284,6 +284,41 @@ C {devices/title.sym} 0 300 0 0 {name=l1}
     assert_ne!(r4[0], r4[1]);
 }
 
+/// A label symbol with `global=ground`, as xschem 3.4.8's `gnd.sym` has it,
+/// makes its net global as `global=true` does; only that spelling does.
+#[test]
+fn ground_labels_are_global() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    for (name, global) in [
+        ("g1.sym", "ground"),
+        ("g2.sym", "GROUND"),
+        ("g3.sym", "yes"),
+    ] {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                "K {{type=label\nglobal={global}\nformat=\"*.alias @lab\"\ntemplate=\"name=l1 lab=X\"}}\nB 5 -2.5 -2.5 2.5 2.5 {{name=p dir=inout}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let top = r#"v {xschem version=3.4.8RC file_version=1.2}
+C {devices/res.sym} 0 0 0 0 {name=R1 value=1k}
+C {g1.sym} 0 -30 0 0 {name=l1 lab=VSS}
+C {g2.sym} 0 30 0 0 {name=l2 lab=VNOT}
+C {devices/res.sym} 100 0 0 0 {name=R2 value=1k}
+C {g3.sym} 100 -30 0 0 {name=l3 lab=VYES}
+"#;
+    let f = file::parse(top).unwrap();
+    let r = Resolver::new(Vec::new(), vec![dir.clone()]);
+    let n = netlist(&dir.join("top.sch"), &f, &r, &Options::default()).unwrap();
+    let l = lines(&n);
+    assert!(l.iter().any(|x| x == ".GLOBAL VSS"), "{}", n.text);
+    assert!(l.iter().any(|x| x == ".GLOBAL VYES"), "{}", n.text);
+    assert!(!n.text.contains(".GLOBAL VNOT"), "{}", n.text);
+}
+
 #[test]
 fn hierarchy_becomes_subcircuits() {
     let tmp = tempfile::tempdir().unwrap();
