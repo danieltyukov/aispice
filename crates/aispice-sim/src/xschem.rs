@@ -437,10 +437,15 @@ pub async fn netlist(
         ))
     };
     // xschem's exit code counts problems in the drawing, so it is not
-    // checked. One that dies of a signal (128 and up through bubblewrap),
-    // such as the abort when it cannot start a helper because its process
-    // limit is reached, leaves an empty or partial netlist behind.
-    if result.code.is_none_or(|c| c >= 128) {
+    // checked. One that dies of a signal, such as the abort when it cannot
+    // start a helper because its process limit is reached, leaves an empty
+    // or partial netlist behind. Run directly, a signal shows as no exit
+    // code; bubblewrap reports it as 128 and up.
+    let signalled = match result.code {
+        None => true,
+        Some(c) => sandbox.is_bwrap() && c >= 128,
+    };
+    if signalled {
         return Err(unfinished("it was ended by a signal"));
     }
     let text = read_netlist(&dirs.out.join("netlist.spice"), &log)?;
@@ -744,6 +749,18 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(text, "R1 a b 1k\n.END\n\n", "{}", sandbox.describe());
+            // Run directly, a high exit code is still an exit code, not a
+            // signal; only bubblewrap reports a signal that way.
+            if !sandbox.is_bwrap() {
+                let text = run_stand_in(
+                    &sandbox,
+                    &dir,
+                    "#!/bin/sh\nprintf '.end\\n' > netlist.spice\nexit 200\n",
+                )
+                .await
+                .unwrap();
+                assert_eq!(text, ".end\n", "{}", sandbox.describe());
+            }
         }
     }
 
