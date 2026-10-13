@@ -2,10 +2,14 @@
 //! program; skipped where this machine has no sandbox, unless
 //! `AISPICE_REQUIRE_SANDBOXES` says one is there (CI sets it).
 //!
-//! A script of the test's own tries, from inside the program, to write
-//! beside its input, in the user's home and in the real /tmp, to read a
-//! file it was not given, to change the mode of the input and to open a
-//! socket. The result file it may write stays `ok` only when every attempt
+//! The test lays out a project as the tools do: an input layout, the
+//! project's `.aispice` state folder, and a fresh run folder under
+//! `.aispice/layout` for the results. A script of the test's own tries, from
+//! inside the program, to write beside its input, in `.aispice` outside the
+//! run folder, in the user's home and in the real /tmp, to read a file of
+//! the project or of `.aispice` it was not given, to change the mode of the
+//! input and to open a socket. The run may read its input file and write
+//! its run folder only; the result stays `ok` only when every attempt
 //! failed.
 
 #![cfg(unix)]
@@ -15,43 +19,54 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
-/// Folders and files for one confined run, and the marks it must not leave.
+/// A project for one confined run, and the marks the run must not leave.
 struct Setup {
     _tmp: tempfile::TempDir,
-    input: PathBuf,
+    /// The run's input layout, the one file of the project it may read.
     victim: PathBuf,
-    decoy: PathBuf,
+    /// Files of the project and of its `.aispice` it may not read.
+    decoys: Vec<PathBuf>,
+    /// The run folder under `.aispice/layout`, the one it may write.
     out: PathBuf,
     marks: Vec<PathBuf>,
 }
 
 fn setup(tag: &str) -> Setup {
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().canonicalize().unwrap();
-    let input = dir.join("in");
-    let out = dir.join("out");
-    std::fs::create_dir_all(&input).unwrap();
+    let project = tmp.path().canonicalize().unwrap();
+    let state = project.join(".aispice");
+    let out = state.join("layout/run-1");
     std::fs::create_dir_all(&out).unwrap();
-    let victim = input.join("victim.gds");
+    let victim = project.join("victim.gds");
     std::fs::write(&victim, "x").unwrap();
     std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o640)).unwrap();
-    let decoy = dir.join("decoy");
-    std::fs::write(&decoy, "SECRET").unwrap();
+    let decoys = vec![project.join("notes.cir"), state.join("history.json")];
+    for d in &decoys {
+        std::fs::write(d, "SECRET").unwrap();
+    }
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()));
     let name = format!("aispice-{tag}-{}", std::process::id());
     let marks = vec![
-        input.join(&name),
+        project.join(&name),
         home.join(&name),
         Path::new("/tmp").join(&name),
+        state.join(&name),
     ];
     Setup {
         _tmp: tmp,
-        input,
         victim,
-        decoy,
+        decoys,
         out,
         marks,
     }
+}
+
+fn decoys(s: &Setup) -> String {
+    s.decoys
+        .iter()
+        .map(|d| d.display().to_string())
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 /// Whether to run: the program is installed and a sandbox is here (or must
@@ -113,12 +128,11 @@ fn unconfined_control(mut cmd: std::process::Command, s: &Setup) {
     }
 }
 
-/// A setup whose marks are beside the input and in its own folder only.
+/// A setup whose marks are in the test's own project only.
 fn control_setup(tag: &str) -> Setup {
     let mut s = setup(tag);
-    let spare = s.out.parent().unwrap().join("spare");
-    std::fs::create_dir_all(&spare).unwrap();
-    s.marks = vec![s.input.join("mark"), spare.join("mark")];
+    let project = s.victim.parent().unwrap().to_path_buf();
+    s.marks = vec![project.join("mark"), project.join(".aispice/mark")];
     s
 }
 
@@ -138,11 +152,12 @@ for m in marks.split('|'):
         res.append('wrote ' + m)
     except Exception:
         pass
-try:
-    open(decoy).read()
-    res.append('read the decoy')
-except Exception:
-    pass
+for d in decoys.split('|'):
+    try:
+        open(d).read()
+        res.append('read the decoy ' + d)
+    except Exception:
+        pass
 try:
     os.chmod(victim, 0o600)
     res.append('chmod')
@@ -171,11 +186,11 @@ async fn klayout_runs_confined() {
         &script,
         &[
             ("marks", marks(&s)),
-            ("decoy", s.decoy.display().to_string()),
+            ("decoys", decoys(&s)),
             ("victim", s.victim.display().to_string()),
             ("out", s.out.display().to_string()),
         ],
-        &Access::new().read(&s.input).write(&s.out),
+        &Access::new().read(&s.victim).write(&s.out),
         &CancellationToken::new(),
     )
     .await
@@ -193,7 +208,7 @@ async fn klayout_runs_confined() {
         .arg(&script);
     for (k, v) in [
         ("marks", marks(&c)),
-        ("decoy", c.decoy.display().to_string()),
+        ("decoys", decoys(&c)),
         ("victim", c.victim.display().to_string()),
         ("out", c.out.display().to_string()),
     ] {
@@ -206,7 +221,9 @@ const MAGIC_SCRIPT: &str = "set res {ok}\n\
 foreach m [split $env(AISPICE_MARKS) |] {\n\
     if {![catch {set f [open $m w]; puts $f x; close $f}]} { lappend res \"wrote $m\" }\n\
 }\n\
-if {![catch {set f [open $env(AISPICE_DECOY) r]; read $f; close $f}]} { lappend res {read the decoy} }\n\
+foreach d [split $env(AISPICE_DECOYS) |] {\n\
+    if {![catch {set f [open $d r]; read $f; close $f}]} { lappend res \"read the decoy $d\" }\n\
+}\n\
 if {![catch {file attributes $env(AISPICE_VICTIM) -permissions 0600}]} { lappend res chmod }\n\
 if {![catch {socket localhost 9}]} { lappend res socket }\n\
 set f [open $env(AISPICE_OUT)/result w]\n\
@@ -231,11 +248,11 @@ async fn magic_runs_confined() {
         &script,
         &[
             ("AISPICE_MARKS", marks(&s)),
-            ("AISPICE_DECOY", s.decoy.display().to_string()),
+            ("AISPICE_DECOYS", decoys(&s)),
             ("AISPICE_VICTIM", s.victim.display().to_string()),
             ("AISPICE_OUT", s.out.display().to_string()),
         ],
-        &Access::new().read(&s.input).write(&s.out),
+        &Access::new().read(&s.victim).write(&s.out),
         &CancellationToken::new(),
     )
     .await
@@ -247,7 +264,7 @@ async fn magic_runs_confined() {
     cmd.current_dir(run.path())
         .env("HOME", run.path())
         .env("AISPICE_MARKS", marks(&c))
-        .env("AISPICE_DECOY", &c.decoy)
+        .env("AISPICE_DECOYS", decoys(&c))
         .env("AISPICE_VICTIM", &c.victim)
         .env("AISPICE_OUT", &c.out)
         .args(["-dnull", "-noconsole", "-rcfile"])
