@@ -66,6 +66,7 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 - Spectre runs of a circuit that includes a project file (a model file, a corner library section) failed with "Can not open input file", because the server has none of the project's files. aispice now copies the project files a deck includes into the deck it sends, read through the netlist policy within the same limits as section inlining, and lists them in the run's notes.
 - Spectre read `{expression}` values as unknown parameters (every release from 19.1 to 25.1); they are now written in single quotes, the form Spectre's SPICE reader takes.
 - Spectre's `.meas` results were never read: Spectre writes them to a `.measure` file, which aispice now fetches and reads. They work on Spectre 19.1, 23.1 and 25.1 alike.
+- xschem import with xschem 3.4.5 to 3.4.8's own symbols: the `simulator_commands` blocks, which ask with Tcl's `catch` whether the simulator has a `sim_is_` command, were left out; aispice's Tcl subset now evaluates `catch` around a body it can evaluate itself and never catches an error, so a command it does not know is still refused. 3.4.8's `gnd.sym` (`global=ground`) now makes its net global, as xschem lists it in `.GLOBAL`. The tests find xschem's library as aispice finds xschem (also in `/usr/local`), accept 3.4.4's and 3.4.8's forms of the symbols that changed and show both netlist alike, compare with 3.4.8, which drops a `m=1` that ends a line, and check that no imported source value carries text after it.
 
 ## [0.2.0]
 

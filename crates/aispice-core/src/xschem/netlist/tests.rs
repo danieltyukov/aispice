@@ -284,6 +284,62 @@ C {devices/title.sym} 0 300 0 0 {name=l1}
     assert_ne!(r4[0], r4[1]);
 }
 
+#[test]
+fn trailing_m1_is_dropped_as_xschem_3_4_8_does() {
+    assert_eq!(without_trailing_m1("R1 a b 1k m=1"), "R1 a b 1k");
+    assert_eq!(without_trailing_m1("R1 a b 1k M = 1  "), "R1 a b 1k");
+    assert_eq!(without_trailing_m1("R1 a b 1k  m=1"), "R1 a b 1k ");
+    for kept in [
+        "R1 a b 1k m=11",
+        "R1 a b 1k m=1.0",
+        "R1 a b 1k nm=1",
+        "m=1",
+        "R1 m=1 x=2",
+    ] {
+        assert_eq!(without_trailing_m1(kept), kept);
+    }
+}
+
+/// Everything xschem 3.4.5 to 3.4.8 changed in its symbols, netlisted with
+/// those symbols and with the built-in 3.4.4 ones: the same netlist, apart
+/// from the `m=1` that 3.4.8's `bsource` adds and its `spice.awk` drops.
+#[test]
+fn later_symbols_netlist_as_the_built_ins() {
+    let sch = r#"v {xschem version=3.4.8RC file_version=1.2}
+C {devices/vsource.sym} 0 0 0 0 {name=V1 value=0.75}
+C {devices/vsource.sym} 100 0 0 0 {name=V2 value="dc 1" savecurrent=true}
+C {devices/ammeter.sym} 200 0 0 0 {name=Vm}
+C {devices/ammeter.sym} 300 0 0 0 {name=Vn savecurrent=false}
+C {devices/cccs.sym} 400 0 0 0 {name=F1 vnam=Vm value=2}
+C {devices/ccvs.sym} 500 0 0 0 {name=H1 vnam=Vm value=3}
+C {devices/bsource.sym} 600 0 0 0 {name=B1 VAR=V FUNC="v(a)*2"}
+C {devices/capa-2.sym} 700 0 0 0 {name=C1 value=1p m=2}
+C {devices/gnd.sym} 0 30 0 0 {name=l1 lab=GND}
+C {devices/gnd.sym} 100 30 0 0 {name=l2 lab=GND}
+C {devices/simulator_commands.sym} 800 0 0 0 {name=s1 simulator=ngspice only_toplevel=false value=".op"}
+C {devices/simulator_commands_shown.sym} 900 0 0 0 {name=s2 simulator=xyce only_toplevel=false value=".tran 1n 1u"}
+C {devices/simulator_commands_shown.sym} 1000 0 0 0 {name=s3 simulator=ngspice only_toplevel=false value=".save all"}
+"#;
+    let f = file::parse(sch).unwrap();
+    let path = Path::new("/w/tb.sch");
+    let ours = netlist(path, &f, &builtins(), &Options::default()).unwrap();
+    let (_tmp, later) = crate::xschem::later_library();
+    let theirs = netlist(path, &f, &later, &Options::default()).unwrap();
+    for n in [&ours, &theirs] {
+        assert!(n.findings.is_empty(), "{:?}\n{}", n.findings, n.text);
+        let net = parse(&n.text);
+        assert_eq!(net.element("V1").unwrap().rest, "0.75", "{}", n.text);
+        let l = lines(n);
+        for want in [".op", ".save all", ".GLOBAL GND"] {
+            assert!(l.iter().any(|x| x == want), "{want}: {}", n.text);
+        }
+        assert!(!n.text.contains(".tran"), "{}", n.text);
+    }
+    let norm =
+        |n: &XNetlist| -> Vec<String> { lines(n).iter().map(|l| without_trailing_m1(l)).collect() };
+    assert_eq!(norm(&ours), norm(&theirs), "{}\n{}", ours.text, theirs.text);
+}
+
 /// A label symbol with `global=ground`, as xschem 3.4.8's `gnd.sym` has it,
 /// makes its net global as `global=true` does; only that spelling does.
 #[test]

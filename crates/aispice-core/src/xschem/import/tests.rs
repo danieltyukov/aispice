@@ -175,17 +175,19 @@ fn renames_keep_nets_directives_name() {
     assert!(text.contains("C1 net2 0 1p\n"), "{text}");
 }
 
-/// Gated on `AISPICE_PDK_IHP` and xschem's library: every IHP test bench
-/// imports, and the `.asc` netlists to the same circuit as the `.sch`.
+/// Gated on `AISPICE_PDK_IHP` and an installed xschem: every IHP test bench
+/// imports, the `.asc` netlists to the same circuit as the `.sch`, and no
+/// source value carries text after it.
 #[test]
 fn ihp_test_benches_import() {
     let Some(pdk) = std::env::var_os("AISPICE_PDK_IHP").map(PathBuf::from) else {
         return;
     };
-    let share = PathBuf::from("/usr/share/xschem/xschem_library");
-    if !share.is_dir() {
+    let Some(share) = crate::xschem::installed_library() else {
+        eprintln!("skipped: xschem is not installed");
         return;
-    }
+    };
+    let share = share.unwrap_or_else(|e| panic!("{e}"));
     let xschem = pdk.join("libs.tech/xschem");
     let r = Resolver::new(
         vec![share.join("devices"), share.clone(), xschem.clone()],
@@ -217,12 +219,142 @@ fn ihp_test_benches_import() {
         let text = crate::xschem::symbol::read_limited(&p).unwrap();
         let f = file::parse(&text).unwrap();
         match import(&p, &f, &r, &lib, &opts) {
-            Ok(i) if i.proof.equivalent => {}
-            Ok(i) => problems.push(format!("{}: {:?}", p.display(), i.proof.differences)),
+            Ok(i) => {
+                if !i.proof.equivalent {
+                    problems.push(format!("{}: {:?}", p.display(), i.proof.differences));
+                }
+                for bad in trailing_text(&i.asc_netlist) {
+                    problems.push(format!("{}: source value {bad}", p.display()));
+                }
+            }
             Err(e) => problems.push(format!("{}: {e}", p.display())),
         }
     }
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// Source lines (`V`, `I`, in subcircuits too) with a number that has text
+/// after its scale and unit, as `0.75false` had when a format's
+/// `@savecurrent` was read as the attribute's text. ngspice reads that one as
+/// 0.75 f, so it would have simulated a different circuit without a word.
+fn trailing_text(net: &crate::netlist::Netlist) -> Vec<String> {
+    use crate::netlist::Line;
+    fn walk(lines: &[Line], bad: &mut Vec<String>) {
+        for line in lines {
+            match line {
+                Line::Element(e) if matches!(e.letter(), 'V' | 'I') => {
+                    let words = e
+                        .rest
+                        .split(|c: char| c.is_whitespace() || "(),=".contains(c))
+                        .filter(|w| !w.is_empty());
+                    for w in words {
+                        let lower = w.to_ascii_lowercase();
+                        let numeric = lower
+                            .trim_start_matches(['+', '-'])
+                            .starts_with(|c: char| c.is_ascii_digit() || c == '.');
+                        if lower.ends_with("true")
+                            || lower.ends_with("false")
+                            || (numeric && !plain_number(&lower))
+                        {
+                            bad.push(format!("{} `{}`", e.name, e.rest));
+                            break;
+                        }
+                    }
+                }
+                Line::Subckt(s) => walk(&s.body, bad),
+                _ => {}
+            }
+        }
+    }
+    let mut bad = Vec::new();
+    walk(&net.items, &mut bad);
+    bad
+}
+
+/// A SPICE number with nothing after it but a scale and a unit: `0.75`,
+/// `-1.5e-3`, `10u`, `2meg`, `1.2v`, `5ma`, `100ns`.
+fn plain_number(w: &str) -> bool {
+    let w = w.trim_start_matches(['+', '-']);
+    let mantissa = w
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(w.len());
+    let mut rest = &w[mantissa..];
+    if let Some(exp) = rest.strip_prefix('e') {
+        let exp = exp.trim_start_matches(['+', '-']);
+        let digits = exp.find(|c: char| !c.is_ascii_digit()).unwrap_or(exp.len());
+        if digits == 0 {
+            return false;
+        }
+        rest = &exp[digits..];
+    }
+    for scale in ["meg", "mil", "t", "g", "k", "m", "u", "n", "p", "f", ""] {
+        if let Some(unit) = rest.strip_prefix(scale)
+            && ["", "v", "a", "s", "hz"].contains(&unit)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The check catches the old bug and passes what sources really hold.
+#[test]
+fn trailing_text_is_found() {
+    for good in [
+        "0.75", "-1.5e-3", "10u", "2Meg", "1.2V", "5mA", "100ns", "1e3", ".5",
+    ] {
+        assert!(plain_number(&good.to_ascii_lowercase()), "{good}");
+    }
+    for bad in ["0.75false", "1true", "1.2vv", "3x", "1e", "1kq"] {
+        assert!(!plain_number(bad), "{bad}");
+    }
+    let net = crate::netlist::parse(
+        "t\nV1 a 0 0.75false\nV2 b 0 dc 1 ac 1\nI1 c 0 SINE(0 1 1k)\nV3 d 0 pwl 0 0 1n 1.2\nV4 e 0 dc {vdd}\nV5 f 0 SINE(0 1 1k)true\n.end\n",
+    );
+    let found = trailing_text(&net);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[0].starts_with("V1 "), "{found:?}");
+    assert!(found[1].starts_with("V5 "), "{found:?}");
+}
+
+/// A source value never carries the `savecurrent` flag or any other text
+/// after it, with xschem 3.4.4's symbols (the built-ins, whose format reads
+/// the flag in Tcl) and 3.4.8's (whose format has the `@savecurrent`
+/// token).
+#[test]
+fn source_values_have_no_trailing_text() {
+    let sch = r#"v {xschem version=3.4.8RC file_version=1.2}
+C {devices/vsource.sym} 0 0 0 0 {name=V1 value=0.75}
+C {devices/vsource.sym} 100 0 0 0 {name=V2 value=1.5 savecurrent=true}
+C {devices/ammeter.sym} 200 0 0 0 {name=Vm}
+C {devices/res.sym} 300 0 0 0 {name=R1 value=1k}
+C {devices/gnd.sym} 0 30 0 0 {name=l1 lab=GND}
+C {devices/gnd.sym} 100 30 0 0 {name=l2 lab=GND}
+C {devices/lab_pin.sym} 300 -30 0 0 {name=p1 lab=b}
+C {devices/gnd.sym} 300 30 0 0 {name=l3 lab=GND}
+"#;
+    let f = file::parse(sch).unwrap();
+    let (_tmp, later) = crate::xschem::later_library();
+    for r in [builtins(), later] {
+        let i = import(
+            Path::new("/w/tb.sch"),
+            &f,
+            &r,
+            &SymbolLibrary::builtin_only(),
+            &ImportOptions::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            trailing_text(&i.asc_netlist).is_empty(),
+            "{:?}",
+            i.asc_netlist
+        );
+        assert!(trailing_text(&i.deck).is_empty(), "{:?}", i.deck);
+        let net = &i.asc_netlist;
+        assert_eq!(net.element("V1").map(|e| e.rest.as_str()), Some("0.75"));
+        assert_eq!(net.element("V2").map(|e| e.rest.as_str()), Some("1.5"));
+        assert_eq!(net.element("Vm").map(|e| e.rest.as_str()), Some("0"));
+    }
 }
 
 /// The whole deck is checked by the netlist policy before anything is

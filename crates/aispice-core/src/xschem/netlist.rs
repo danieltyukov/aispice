@@ -1574,6 +1574,26 @@ fn strip_multiplicities(s: &str) -> String {
     out
 }
 
+/// `line` as xschem 3.4.8's `spice.awk` leaves it: without a ` m=1` that
+/// ends it (`gsub(/ [mM] *= *1 *$/, "")`). 3.4.4's, which [`postprocess`]
+/// follows, keeps it; SPICE reads both alike, so a comparison with a later
+/// xschem's netlist applies this to both sides.
+pub fn without_trailing_m1(line: &str) -> String {
+    let t = line.trim_end_matches(' ');
+    let Some(rest) = t.strip_suffix('1') else {
+        return line.to_string();
+    };
+    let rest = rest.trim_end_matches(' ');
+    let Some(rest) = rest.strip_suffix('=') else {
+        return line.to_string();
+    };
+    let rest = rest.trim_end_matches(' ');
+    match rest.strip_suffix(['m', 'M']) {
+        Some(head) if head.ends_with(' ') => head[..head.len() - 1].to_string(),
+        _ => line.to_string(),
+    }
+}
+
 /// `gsub(/\( */, "(")` and `gsub(/ *\)/, ")")`.
 fn collapse_parens(s: &str) -> String {
     let mut t = s.to_string();
