@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::backend::which;
 
 #[cfg(unix)]
