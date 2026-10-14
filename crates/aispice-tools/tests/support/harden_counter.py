@@ -15,10 +15,20 @@ the PDK's, which macro/v1's pdk.cell_name accepts from a check that has the
 PDK's libraries (the chip's has them). Its SPICE netlist instantiates those
 cells and defines only the block, since LVS takes the cells from the PDK's CDL.
 
-    python3 harden_counter.py OUT_DIR [--librelane librelane]
+    python3 harden_counter.py OUT_DIR [--librelane librelane] [--pdk-root DIR]
 
-writes OUT_DIR/tiny_counter.macro/. Needs the `librelane` command (here a
-wrapper around the LibreLane 3.0.0.dev44 container). Standard library only.
+writes OUT_DIR/tiny_counter.macro/. Needs the `librelane` command. With
+--pdk-root, LibreLane runs on the PDK in DIR (`--manual-pdk`): a ciel root with
+the chip's IHP-Open-PDK commit enabled,
+
+    ciel enable --pdk-root DIR --pdk-family ihp-sg13g2 22f2a25f1734796de3debbbf29cf697cbbc54081
+
+so the package records the commit the chip is checked against. That commit's
+LibreLane configuration needs LibreLane 3.0 or newer: tested with 3.0.14, the
+release Tiny Tapeout's GDS action uses (the image
+ghcr.io/librelane/librelane:3.0.14, for a wrapper that takes LIBRELANE_IMAGE). Without
+--pdk-root, LibreLane installs the commit it pins itself, and a chip on another
+commit warns (`pdk.expected`). Standard library only.
 """
 
 import argparse
@@ -83,6 +93,10 @@ CONFIG = {
     "IO_PIN_ORDER_CFG": "dir::pins.cfg",
     "IO_PIN_MIN_DISTANCE": 4,
     "RT_MAX_LAYER": "Metal4",
+    # Magic's stream-out copies the PDK's standard cells as they are, which
+    # pdk.cell_name checks byte for byte. KLayout's, LibreLane 3.0's default,
+    # writes the same shapes in other bytes.
+    "PRIMARY_GDSII_STREAMOUT_TOOL": "magic",
 }
 
 
@@ -173,6 +187,12 @@ def main():
     ap.add_argument("out", type=Path)
     ap.add_argument("--librelane", default="librelane")
     ap.add_argument(
+        "--pdk-root",
+        type=Path,
+        help="run LibreLane on the PDK in this directory (one holding ihp-sg13g2) "
+        "instead of the commit it pins",
+    )
+    ap.add_argument(
         "--package-only",
         action="store_true",
         help="package an earlier run in OUT_DIR/build without running LibreLane",
@@ -185,11 +205,13 @@ def main():
     (build / "pins.cfg").write_text(PINS)
     (build / "config.json").write_text(json.dumps(CONFIG, indent=2))
     if not args.package_only:
-        subprocess.run(
-            [args.librelane, "--run-tag", "aispice", "--overwrite", "config.json"],
-            cwd=build,
-            check=True,
-        )
+        cmd = [args.librelane, "--pdk", "ihp-sg13g2", "--run-tag", "aispice", "--overwrite"]
+        if args.pdk_root:
+            root = args.pdk_root.resolve()
+            if not (root / "ihp-sg13g2").is_dir():
+                raise SystemExit("%s holds no ihp-sg13g2" % root)
+            cmd += ["--manual-pdk", "--pdk-root", str(root)]
+        subprocess.run(cmd + ["config.json"], cwd=build, check=True)
     run = build / "runs" / "aispice"
     final = run / "final"
     resolved = json.loads((run / "resolved.json").read_text())
@@ -199,8 +221,11 @@ def main():
     if drc != 0 or lvs != 0:
         raise SystemExit("LibreLane's DRC (%d) or LVS (%d) is not clean" % (drc, lvs))
     pdk_root = Path(resolved["PDK_ROOT"]) / resolved["PDK"]
-    commit = re.search(r"versions/([0-9a-f]{7,40})", str(pdk_root))
+    # ciel keeps each PDK version in .../versions/<commit>/, which the PDK's
+    # name in the root links to.
+    commit = re.search(r"versions/([0-9a-f]{7,40})", str(pdk_root.resolve()))
     commit = commit.group(1) if commit else "0" * 40
+    version = str((resolved.get("meta") or {}).get("librelane_version") or "unknown")
     cdl = (pdk_root / "libs.ref/sg13g2_stdcell/cdl/sg13g2_stdcell.cdl").read_text()
 
     pkg = out / ("%s.macro" % NAME)
@@ -237,7 +262,7 @@ def main():
         "",
         "[producer]",
         'tool = "librelane"',
-        'version = "3.0.0.dev44"',
+        'version = "%s"' % version,
         'source = "crates/aispice-tools/tests/support/harden_counter.py"',
         "",
         "[size]",
@@ -278,7 +303,7 @@ def main():
         doc = {
             "schema": "macro.evidence/v1",
             "operation": op,
-            "tool": {"name": "librelane", "version": "3.0.0.dev44"},
+            "tool": {"name": "librelane", "version": version},
             "pdk": {"name": "ihp-sg13g2", "commit": commit},
             "engineering": {"status": "pass", "summary": summary},
             "inputs": [{"path": f, "sha256": sha256(pkg / f)} for f in inputs],
