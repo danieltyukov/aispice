@@ -17,12 +17,12 @@ The comparator's `outp` enables the counter, so the counter counts its decisions
 
 The counter arrives as a package too. aispice assembles the chip and runs full-chip DRC and LVS.
 
-Every figure below is from one run on 13 Oct 2026:
+Every figure below is from one run on 14 Oct 2026:
 
-- aispice `master` at `5db63e1`;
+- aispice `master` at `9447904`;
 - IHP-Open-PDK at `22f2a25`;
 - ngspice 42, KLayout 0.30.7 and Magic 8.3.624 on Linux;
-- the counter hardened with LibreLane 3.0.0.dev44.
+- the counter hardened with LibreLane 3.0.14 on the same IHP-Open-PDK commit.
 
 <p align="center">
   <img src="chip.jpg" alt="The analog-on-top chip drawn from its GDS before fill: 16 bond pads and IHP's IO ring around a 420 um core holding the OTA, the StrongARM comparator and the counter, inside the seal ring" width="600">
@@ -35,7 +35,7 @@ Every figure below is from one run on 13 Oct 2026:
 
 - A git checkout of IHP-Open-PDK with its OSDI models compiled, the pcell submodules and the IO library (`libs.ref/sg13g2_io`). See [docs/SETUP.md](../../docs/SETUP.md#pdks-for-ic-design).
 - ngspice 42 or newer, KLayout and Magic. `aispice doctor` lists them.
-- For the counter: LibreLane (the `librelane` command) and Python 3.
+- For the counter: LibreLane 3.0 or newer (the `librelane` command), [ciel](https://github.com/fossi-foundation/ciel) and Python 3.
 
 Register the PDK once:
 
@@ -130,14 +130,15 @@ A package is written only when every spec holds after layout.
 | `ota5t` | 56.19 x 26.37 um | 117.6 fF | gain 27.92 dB, unity-gain 20.59 MHz, phase margin 82.95° (worst) |
 | `strongarm` | 32.70 x 43.30 um | 131.4 fF | both decisions; decision time 288.5 ps (worst) |
 
-The counter is hardened by LibreLane with [the script aispice's chip test uses](../../crates/aispice-tools/tests/support/harden_counter.py):
+The counter is hardened by LibreLane with [the script aispice's chip test uses](../../crates/aispice-tools/tests/support/harden_counter.py). ciel installs the chip's PDK commit for LibreLane, and `--pdk-root` has LibreLane run on it instead of the release it pins:
 
 ```sh
-python3 ../../crates/aispice-tools/tests/support/harden_counter.py build/counter
+ciel enable --pdk-root ~/ciel-22f2a25 --pdk-family ihp-sg13g2 22f2a25f1734796de3debbbf29cf697cbbc54081
+python3 ../../crates/aispice-tools/tests/support/harden_counter.py build/counter --pdk-root ~/ciel-22f2a25
 cp -r build/counter/tiny_counter.macro macros/
 ```
 
-LibreLane builds a 60 x 60 um block in about 100 s. It is DRC clean on KLayout and Magic, LVS and antenna clean, with 15.1 ns of setup slack at its 50 MHz clock. The package keeps the PDK's standard cells under their own names in its GDS.
+The run here used LibreLane 3.0.14, the release Tiny Tapeout's GDS action uses, through a `librelane` wrapper around its container (`LIBRELANE_IMAGE=ghcr.io/librelane/librelane:3.0.14`). LibreLane builds a 60 x 60 um block in about 50 s. It is DRC clean on KLayout and Magic, LVS and antenna clean, with 14.7 ns of setup slack at its 50 MHz clock. The package records the PDK commit it was built on, `22f2a25`, and keeps the PDK's standard cells under their own names in its GDS.
 
 ## 5. Both tools check every package
 
@@ -150,14 +151,14 @@ for p in ota5t strongarm tiny_counter; do
 done
 ```
 
-| Package | aispice | ChipLeap (`main` at `3183e23`) |
+| Package | aispice | ChipLeap (`main` at `1f9db23`) |
 |---|---|---|
 | `ota5t` | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 | `strongarm` | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
-| `tiny_counter` | pass, 0 errors, 1 warning | pass, 0 errors, 1 warning |
+| `tiny_counter` | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 | ChipLeap's UART [`strongarm.macro`](https://github.com/danieltyukov/chipleap/tree/main/examples/uart/macros), exported by this aispice from its own netlist | pass, 0 errors, 0 warnings | pass, 0 errors, 0 warnings |
 
-**The counter's warning.** The counter's warning is `pdk.expected`: it was built on PDK commit `cb7daaa`, not the `22f2a25` this chip uses. LibreLane 3.0.0.dev44 hardens on the IHP release it downloads itself (`cb7daaa`), because it cannot load the LibreLane configuration of the `22f2a25` checkout. The twelve standard cells in the counter's GDS are identical to `22f2a25`'s, which is why both checks pass with the libraries. Without `--pdk-libs`, both tools refuse the package with one `pdk.cell_name` error per cell, because they cannot show that those cells are the PDK's own.
+**The counter's standard cells.** The eleven standard cells in the counter's GDS are the PDK's own, byte for byte: the script keeps Magic's stream-out, which copies them from the PDK as they are. That is why both checks pass with the libraries. Without `--pdk-libs`, both tools refuse the package with one `pdk.cell_name` error per cell, because they cannot show that those cells are the PDK's own.
 
 ## 6. The chip
 
@@ -176,8 +177,8 @@ analog_on_top: die 1040 x 1040 um, core 420 x 420 um, 16 pads, 40 IO ring cells,
   net clk: pad clk (sg13g2_IOPadIn), cmp.clk, cnt.clk (270.0 um, 3 vias)
   net cmp_outp: pad cmp_outp (sg13g2_IOPadOut4mA), cmp.outp, cnt.en (215.4 um, 3 vias)
   ...
-Drawn and filled in 60 s.
-Checked in 116 s.
+Drawn and filled in 59 s.
+Checked in 114 s.
 DRC clean: cell analog_on_top, decks main, extra, antenna, density.
 LVS clean: the layout of analog_on_top matches the schematic.
 ```
@@ -203,7 +204,8 @@ aispice check ota.asc --post-layout ota.gds --process tt,ss,ff,sf,fs --temp=-40,
 aispice check comparator.asc --post-layout comparator.gds --specs comparator.layout.specs --process tt,ss,ff,sf,fs --temp=-40,27,125
 aispice macro export ota.asc --layout ota.gds --name ota5t --process tt,ss,ff
 aispice macro export comparator.asc --layout comparator.gds --name strongarm --specs comparator.layout.specs --process tt,ss,ff --pins '{"clk": {"kind": "clock"}, "outp": {"kind": "signal"}, "outn": {"kind": "signal"}}'
-python3 ../../crates/aispice-tools/tests/support/harden_counter.py build/counter && cp -r build/counter/tiny_counter.macro macros/
+ciel enable --pdk-root ~/ciel-22f2a25 --pdk-family ihp-sg13g2 22f2a25f1734796de3debbbf29cf697cbbc54081
+python3 ../../crates/aispice-tools/tests/support/harden_counter.py build/counter --pdk-root ~/ciel-22f2a25 && cp -r build/counter/tiny_counter.macro macros/
 aispice macro check macros/tiny_counter.macro --pdk ihp-sg13g2@22f2a25 --pdk-libs ~/IHP-Open-PDK/ihp-sg13g2
 aispice chip assemble analog_on_top.chip.toml
 ```
