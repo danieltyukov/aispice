@@ -112,8 +112,27 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Every test removes the folders it makes, also when it fails. The
+      # tests get a temporary folder of their own here, and nothing they
+      # name (aispice-*, or tempfile's .tmp*) may be left in it.
+      - name: A temporary folder for the tests (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tests"
+          echo "TMPDIR=$RUNNER_TEMP/tests" >> "$GITHUB_ENV"
+
       - name: Tests
         run: cargo test --no-fail-fast
+
+      - name: Nothing left in the temporary folder (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          left=$(find "$TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'aispice-*' -o -name '.tmp*' \))
+          if [ -n "$left" ]; then
+            echo "The tests left these in their temporary folder:"
+            echo "$left"
+            exit 1
+          fi
 
       # Only when every step above passed (a failed run saves nothing, as with
       # actions/cache) and only on master, which every pull request restores from.
@@ -277,6 +296,13 @@ jobs:
           path: ~/klayout-deb
           key: klayout-${{ env.KLAYOUT_VERSION }}-ubuntu-24.04-amd64
 
+      # As in the engine job: the tests' own temporary folder, checked
+      # after the layout tests.
+      - name: A temporary folder for the tests
+        run: |
+          mkdir -p "$RUNNER_TEMP/tests"
+          echo "TMPDIR=$RUNNER_TEMP/tests" >> "$GITHUB_ENV"
+
       - name: PDK tests
         run: |
           export AISPICE_PDK_IHP="$HOME/pdk/IHP-Open-PDK/ihp-sg13g2"
@@ -304,6 +330,15 @@ jobs:
           cargo test -p aispice-layout --test chip_script_ihp -- --nocapture
           cargo test -p aispice-layout --test layout_sandbox -- --nocapture
           cargo test -p aispice-tools --test layout_ihp -- --nocapture each_layout_tool_writes_only
+
+      - name: Nothing left in the temporary folder
+        run: |
+          left=$(find "$TMPDIR" -mindepth 1 -maxdepth 1 \( -name 'aispice-*' -o -name '.tmp*' \))
+          if [ -n "$left" ]; then
+            echo "The tests left these in their temporary folder:"
+            echo "$left"
+            exit 1
+          fi
 
       # Only when every step above passed (a failed run saves nothing, as with
       # actions/cache) and only on master, which every pull request restores from.

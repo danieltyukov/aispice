@@ -42,6 +42,7 @@ Other test suites:
 ## Writing changes
 
 - **Tests.** New behaviour needs a test that runs offline. Tests that need a simulator other than ngspice must skip cleanly when it is missing; look at the existing tests in `crates/aispice-sim/tests/` for the pattern.
+- **Temporary folders.** A test makes its folders with `tempfile` (a `TempDir`, which removes the folder when dropped, also when the test fails), never by joining a name to `std::env::temp_dir()`. CI runs the tests with a temporary folder of their own and fails when an `aispice-*` or `.tmp*` folder is left in it. `AISPICE_KEEP=1` keeps a test's run folder where a test offers it, to inspect.
 - **Netlister changes.** Compare against LTspice's own output. Add a schematic and its LTspice netlist to `crates/aispice-sim/tests/schematics/` when you fix a case.
 - **Tools.** A tool returns text the model reads and, where the interface shows something, structured data. Keep the description short and concrete. After changing tools, regenerate the reference with `cargo run -p aispice -- docs tools > docs/TOOLS.md`.
 - **Security.** Paths go through `Project::resolve`. Processes are started with argument vectors, never a shell string. Anything that writes a file goes through `Workspace::approve`. Treat circuit files, logs and model output as untrusted.

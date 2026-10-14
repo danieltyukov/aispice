@@ -566,7 +566,12 @@ mod tests {
 
     #[test]
     fn ltspice_library_is_preferred_when_present() {
-        let dir = std::env::temp_dir().join(format!("aispice-models-{}", std::process::id()));
+        // Removed when dropped, also when the test fails.
+        let tmp = tempfile::Builder::new()
+            .prefix("aispice-models-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
         std::fs::create_dir_all(dir.join("cmp")).unwrap();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(
@@ -580,7 +585,7 @@ mod tests {
         )
         .unwrap();
         let n = parse("t\nD1 a 0 1N4148\nX1 a b c MYAMP\n.op\n");
-        let r = resolve(&n, &["standard.dio".to_string()], Some(&dir));
+        let r = resolve(&n, &["standard.dio".to_string()], Some(dir));
         let sources: Vec<_> = r
             .added
             .iter()
@@ -589,6 +594,5 @@ mod tests {
         assert_eq!(sources, vec![("1N4148", true), ("MYAMP", true)]);
         // The subcircuit's own model is not anywhere.
         assert_eq!(r.missing, vec!["DCLAMP"]);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
