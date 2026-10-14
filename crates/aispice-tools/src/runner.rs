@@ -757,7 +757,10 @@ impl Runner {
             // No code of the project's runs here: ngspice runs under the
             // denylist where a sandbox can start, and unconfined, with a
             // warning in its output, where none can.
-            match aispice_sim::backend::native_code::plain_sandbox().await {
+            match aispice_sim::backend::native_code::plain_sandbox()
+                .await
+                .map_err(|e| RunError::Sim(e.to_string()))?
+            {
                 Ok(sandbox) => {
                     aispice_sim::backend::native_code::check_links(
                         &sandbox,

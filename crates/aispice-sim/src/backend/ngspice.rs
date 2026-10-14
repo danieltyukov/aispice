@@ -299,8 +299,9 @@ impl Simulator for Ngspice {
             d.notes.push(format!("runs with ngbehavior={c}"));
         }
         d.notes.push(match native_code::plain_sandbox().await {
-            Ok(s) => format!("runs in a sandbox: {}", s.describe()),
-            Err(why) => format!("runs without a sandbox ({why})"),
+            Ok(Ok(s)) => format!("runs in a sandbox: {}", s.describe()),
+            Ok(Err(why)) => format!("runs without a sandbox ({why})"),
+            Err(e) => format!("could not tell whether it runs in a sandbox: {e}"),
         });
         d
     }
@@ -322,15 +323,16 @@ impl Simulator for Ngspice {
         // ngspice's temporary file in the run folder. Compiled code gets
         // the native-code allowlist; control commands alone get the
         // denylist. A run with neither, such as a PDK run, gets the
-        // denylist where it can, and otherwise runs unconfined, as before,
-        // with a warning.
-        let mut how = if !job.libraries.is_empty() || job.control {
+        // denylist where this machine can give one, and otherwise runs
+        // unconfined, as before, with a warning; once a sandbox is chosen,
+        // a run that cannot be set up in it fails rather than run outside.
+        let how = if !job.libraries.is_empty() || job.control {
             let purpose = if job.libraries.is_empty() {
                 native_code::Purpose::ControlCommands
             } else {
                 native_code::Purpose::CompiledModels
             };
-            Confine::Required(match &job.sandbox {
+            Confine::Sandboxed(match &job.sandbox {
                 Some(s) => s.clone(),
                 None => native_code::ready_for(purpose, cancel)
                     .await
@@ -339,10 +341,10 @@ impl Simulator for Ngspice {
         } else {
             let sandbox = match &job.sandbox {
                 Some(s) => Ok(s.clone()),
-                None => native_code::plain_sandbox().await,
+                None => native_code::plain_sandbox().await?,
             };
             match sandbox {
-                Ok(s) => Confine::Preferred(s),
+                Ok(s) => Confine::Sandboxed(s),
                 Err(why) => Confine::Unconfined(native_code::unconfined_warning(&why)),
             }
         };
@@ -354,7 +356,7 @@ impl Simulator for Ngspice {
                 &format!("{stem}.cir"),
                 &deck,
                 Self::args(&stem),
-                &mut how,
+                &how,
                 cancel,
             )
             .await?;
@@ -373,7 +375,7 @@ impl Simulator for Ngspice {
                     &format!("{stem}_meas.cir"),
                     &measurement_deck(&deck),
                     Self::meas_args(&stem),
-                    &mut how,
+                    &how,
                     cancel,
                 )
                 .await?;
@@ -421,12 +423,10 @@ impl Simulator for Ngspice {
 
 /// How a run's ngspice processes are confined.
 enum Confine {
-    /// In this sandbox, or not at all: the run loads the project's code or
-    /// has control commands.
-    Required(Sandbox),
-    /// In this sandbox, and unconfined if it cannot be set up.
-    Preferred(Sandbox),
-    /// Unconfined, with this warning.
+    /// In this sandbox, or not at all.
+    Sandboxed(Sandbox),
+    /// Unconfined, with this warning: the run loads none of the project's
+    /// code, and this machine has no sandbox for it.
     Unconfined(String),
 }
 
@@ -443,8 +443,8 @@ impl Ngspice {
     /// `.spiceinit`, the project's libraries and, in a sandbox, the
     /// preloaded library), and the command that runs it there with `args`.
     /// aispice writes nothing into the folder once ngspice has run in it.
-    /// A sandbox that is only preferred and cannot be set up turns `how`
-    /// unconfined.
+    /// A run that cannot be set up in its sandbox fails: an integrity
+    /// check, a cancellation or a timeout never sends it outside.
     #[allow(clippy::too_many_arguments)]
     async fn prepare(
         &self,
@@ -453,7 +453,7 @@ impl Ngspice {
         name: &str,
         deck: &str,
         args: Vec<String>,
-        how: &mut Confine,
+        how: &Confine,
         cancel: &CancellationToken,
     ) -> Result<Process, SimError> {
         let ws = Workspace::new()?;
@@ -468,15 +468,8 @@ impl Ngspice {
             ".spiceinit",
             self.spiceinit_with(job.pdk.as_ref(), &osdi).as_bytes(),
         )?;
-        let sandboxed = match &*how {
-            Confine::Required(s) => Some((s.clone(), confine(job, exe, &ws, cancel).await?)),
-            Confine::Preferred(s) => match confine(job, exe, &ws, cancel).await {
-                Ok(plan) => Some((s.clone(), plan)),
-                Err(e) => {
-                    *how = Confine::Unconfined(native_code::unconfined_warning(&e.to_string()));
-                    None
-                }
-            },
+        let sandboxed = match how {
+            Confine::Sandboxed(s) => Some((s.clone(), confine(job, exe, &ws, cancel).await?)),
             Confine::Unconfined(_) => None,
         };
         let spec = match sandboxed {
@@ -583,20 +576,12 @@ mod tests {
     async fn every_ngspice_process_starts_in_a_fresh_folder() {
         let job = SimJob::new("t\n.end\n", "runs");
         let exe = PathBuf::from("ngspice");
-        let mut how = Confine::Unconfined(String::new());
+        let how = Confine::Unconfined(String::new());
         let ng = Ngspice::default();
         let cancel = CancellationToken::new();
         let deck = "t\n.meas op x find v(a)\n.end\n";
         let main = ng
-            .prepare(
-                &job,
-                &exe,
-                "d.cir",
-                deck,
-                Ngspice::args("d"),
-                &mut how,
-                &cancel,
-            )
+            .prepare(&job, &exe, "d.cir", deck, Ngspice::args("d"), &how, &cancel)
             .await
             .unwrap();
         let meas = ng
@@ -606,7 +591,7 @@ mod tests {
                 "d_meas.cir",
                 &measurement_deck(deck),
                 Ngspice::meas_args("d"),
-                &mut how,
+                &how,
                 &cancel,
             )
             .await
@@ -625,6 +610,44 @@ mod tests {
         for p in [&main, &meas] {
             assert_eq!(p.spec.cwd, p.ws.path());
         }
+    }
+
+    /// Once a sandbox is chosen, a process that cannot be set up in it
+    /// fails, and never runs outside instead: here ngspice cannot be
+    /// resolved for the plan. Unconfined, the same process is set up.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_process_that_cannot_be_set_up_in_its_sandbox_fails() {
+        if native_code::compiler().is_none() {
+            eprintln!("skipped: no C compiler");
+            return;
+        }
+        let job = SimJob::new("t\n.end\n", "runs");
+        let missing = PathBuf::from("/nonexistent/aispice/bin/ngspice");
+        let ng = Ngspice::default();
+        let cancel = CancellationToken::new();
+        let prepare = |how: Confine| {
+            let (job, missing, ng, cancel) = (&job, &missing, &ng, &cancel);
+            async move {
+                ng.prepare(
+                    job,
+                    missing,
+                    "d.cir",
+                    "t\n.end\n",
+                    Ngspice::args("d"),
+                    &how,
+                    cancel,
+                )
+                .await
+                .map(|p| p.spec)
+            }
+        };
+        let e = prepare(Confine::Sandboxed(Sandbox::landlock_for_tests(6)))
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("cannot resolve"), "{e}");
+        let spec = prepare(Confine::Unconfined(String::new())).await.unwrap();
+        assert_eq!(spec.program, missing);
     }
 
     /// A run that loads none of the project's compiled models gets the

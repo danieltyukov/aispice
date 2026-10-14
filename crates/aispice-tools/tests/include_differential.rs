@@ -577,6 +577,7 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
     // logs are checked as everywhere.
     let confined = rt
         .block_on(aispice_sim::backend::native_code::plain_sandbox())
+        .unwrap()
         .is_ok();
     let ng_traced = fx.strace.is_some() && !confined;
     let mut runner_sims = vec![("ngspice", ng_trace.clone(), ng_traced)];

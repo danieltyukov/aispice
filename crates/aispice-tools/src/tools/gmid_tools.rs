@@ -159,7 +159,7 @@ impl GmIdTool {
             .ok_or("this system has no cache folder for gm/Id tables")?;
         ctx.progress(format!("gm/Id table for {}", device.name), None);
         let started = std::time::Instant::now();
-        let (table, cached) = gmid::table(
+        let (table, cached, mut warnings) = gmid::table(
             &pdk,
             device,
             &grid,
@@ -183,7 +183,7 @@ impl GmIdTool {
             )
         };
         let (Some(gm_id), Some(l)) = (input.gm_id, input.l.as_ref()) else {
-            let source = with_sandbox_note(source, !cached).await;
+            let source = with_warnings(source, &warnings);
             return Ok(ToolOutput::text(format!("{}{source}\n", coverage(&table)))
                 .with_data(json!({"kind": "generic", "value": {"device": device.name, "grid": table.grid, "cached": cached}})));
         };
@@ -204,13 +204,12 @@ impl GmIdTool {
             w: input.w.as_ref().map(|a| a.value("w")).transpose()?,
         };
         let mut sizing = gmid::size(&table, &query).map_err(|e| e.to_string())?;
-        let refined = query.id.is_some() || query.w.is_some();
-        if refined {
+        if query.id.is_some() || query.w.is_some() {
             ctx.progress(
                 format!("checking the sized {} on ngspice", device.name),
                 None,
             );
-            sizing = gmid::refine(
+            let (refined, ran) = gmid::refine(
                 &pdk,
                 device,
                 &table,
@@ -221,8 +220,14 @@ impl GmIdTool {
             )
             .await
             .map_err(|e| e.to_string())?;
+            sizing = refined;
+            for w in ran {
+                if !warnings.contains(&w) {
+                    warnings.push(w);
+                }
+            }
         }
-        let source = with_sandbox_note(source, !cached || refined).await;
+        let source = with_warnings(source, &warnings);
         let text = format!("{}{source}\n", gmid::describe(&table, &sizing));
         Ok(ToolOutput::text(text).with_data(json!({
             "kind": "generic",
@@ -231,16 +236,14 @@ impl GmIdTool {
     }
 }
 
-/// `source`, and when ngspice `ran` here without a sandbox, a line that
-/// says so.
-async fn with_sandbox_note(source: String, ran: bool) -> String {
-    match aispice_sim::backend::native_code::plain_sandbox().await {
-        Err(why) if ran => format!(
-            "{source}\nNote: {}.",
-            aispice_sim::backend::native_code::unconfined_warning(&why)
-        ),
-        _ => source,
+/// `source`, then the warnings of the ngspice runs behind it (such as
+/// that ngspice ran without a sandbox), at most ten.
+fn with_warnings(source: String, warnings: &[String]) -> String {
+    let mut s = source;
+    for w in warnings.iter().take(10) {
+        s.push_str(&format!("\nWarning: {w}"));
     }
+    s
 }
 
 /// What a table covers, for a request without a target.

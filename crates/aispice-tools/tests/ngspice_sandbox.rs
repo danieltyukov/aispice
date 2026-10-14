@@ -52,7 +52,7 @@ async fn a_run_without_the_projects_code_goes_in_the_sandbox() {
     let read_b = |run: &aispice_tools::StoredRun| {
         run.output.datasets.iter().any(|d| d.vector("b").is_some())
     };
-    match native_code::plain_sandbox().await {
+    match native_code::plain_sandbox().await.unwrap() {
         Ok(sandbox) if sandbox.is_bwrap() => {
             let e = result.unwrap_err();
             assert!(matches!(e, RunError::Netlist(_)), "{e:?}");
