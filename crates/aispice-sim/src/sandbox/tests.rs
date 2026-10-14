@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::backend::which;
 
 #[cfg(unix)]
 fn plan_in(dir: &Path, program: &Path, profile: Profile) -> Plan {
@@ -741,6 +743,64 @@ async fn bubblewrap_must_start_native_code_and_not_be_setuid() {
     let err = Sandbox::bwrap_at(fake, &cancel).await.unwrap_err();
     assert!(err.contains("setuid"), "{err}");
     assert!(!ran.exists(), "a setuid bwrap was run");
+}
+
+/// bubblewrap, and the programs that probe or start a sandbox, come only
+/// from the system folders. A fake bwrap that runs its program with nothing
+/// around it passes the probe when it is used, and what runs under it
+/// writes outside its folder, so one in a folder on aispice's `PATH` (the
+/// working folder, a project's shell hook) must never be taken.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn bubblewrap_comes_only_from_the_system_folders() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let source = dir.join("bwrap.sh");
+    std::fs::write(
+        &source,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'bubblewrap 0.9.0'; exit 0; fi\n\
+         while [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+    )
+    .unwrap();
+    let fake = dir.join("bwrap");
+    // Made by another process, as in the test above (ETXTBSY).
+    let installed = std::process::Command::new("install")
+        .args(["-m", "0755"])
+        .arg(&source)
+        .arg(&fake)
+        .status()
+        .unwrap();
+    assert!(installed.success());
+
+    // Taken, it passes as a sandbox, and confines nothing.
+    let cancel = CancellationToken::new();
+    let taken = Sandbox::bwrap_at(fake.clone(), &cancel).await.unwrap();
+    let out = dir.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let outside = dir.join("outside");
+    let sh = system_program("sh").unwrap();
+    let mut plan = plan_in(&out, &sh, Profile::Denylist);
+    plan.args = vec!["-c".into(), format!("touch '{}'", outside.display()).into()];
+    let spec = taken.command(&plan).unwrap();
+    process::run(&spec, Duration::from_secs(10), &cancel)
+        .await
+        .unwrap();
+    assert!(outside.exists(), "the fake bwrap confined its program");
+
+    // Only the system folders are searched.
+    let folder = dir.to_str().unwrap();
+    assert_eq!(in_folders("bwrap", &[folder]), Some(fake.clone()));
+    assert_ne!(system_program("bwrap"), Some(fake));
+    for name in ["bwrap", "true", "sh", "env"] {
+        if let Some(p) = system_program(name) {
+            let parent = p.parent().unwrap();
+            assert!(
+                SYSTEM_PATH.iter().any(|d| parent == Path::new(d)),
+                "{}",
+                p.display()
+            );
+        }
+    }
 }
 
 /// `select` picks a sandbox here when one is available, and it starts.

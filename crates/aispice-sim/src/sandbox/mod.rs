@@ -30,16 +30,39 @@
 //! Either way the process keeps no descriptor of aispice's beyond stdin,
 //! stdout and stderr, gets the plan's limits, dies with aispice, and its
 //! process group is killed when it exits.
+//!
+//! bubblewrap, and the programs that probe a sandbox or start one, come
+//! only from [`SYSTEM_PATH`], never from aispice's own `PATH`.
 
 pub mod policy;
+
+/// The only folders aispice takes bubblewrap, the programs that probe a
+/// sandbox (`true`, `sh`) or start one (`env`), and the C compiler from.
+/// aispice's own `PATH` may hold the working folder or a folder a
+/// project's shell hook added, and a fake bubblewrap found there would pass
+/// the probe and run everything unconfined.
+pub const SYSTEM_PATH: &[&str] = &["/usr/local/bin", "/usr/bin", "/bin"];
+
+/// The executable `name` in [`SYSTEM_PATH`], and nowhere else.
+pub fn system_program(name: &str) -> Option<PathBuf> {
+    in_folders(name, SYSTEM_PATH)
+}
+
+/// The executable `name` in the first of `folders` that has one.
+fn in_folders(name: &str, folders: &[&str]) -> Option<PathBuf> {
+    folders
+        .iter()
+        .map(|d| Path::new(d).join(name))
+        .find(|p| crate::backend::is_executable(p))
+}
 
 pub use policy::{
     Confinement, ConfinementBuilder, LandlockPolicy, Limits, MAX_LANDLOCK_ABI, MIN_LANDLOCK_ABI,
     PolicyError, Profile, SCOPED_LANDLOCK_ABI, Scopes, SeccompPolicy, Signals,
 };
 
+use crate::backend::SimError;
 use crate::backend::process::{self, ProcessSpec};
-use crate::backend::{SimError, which};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -137,7 +160,8 @@ impl Sandbox {
     }
 
     async fn bwrap(cancel: &CancellationToken) -> Result<Self, String> {
-        let program = which("bwrap").ok_or("bubblewrap (bwrap) is not installed")?;
+        let program = system_program("bwrap")
+            .ok_or("bubblewrap (bwrap) is not installed in /usr/local/bin, /usr/bin or /bin")?;
         Self::bwrap_at(program, cancel).await
     }
 
@@ -187,8 +211,8 @@ impl Sandbox {
     async fn probe(&self, cancel: &CancellationToken) -> Result<(), String> {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         let dir = tmp.path().canonicalize().map_err(|e| e.to_string())?;
-        let truth = which("true").unwrap_or_else(|| PathBuf::from("/usr/bin/true"));
-        let sh = which("sh").unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let truth = system_program("true").unwrap_or_else(|| PathBuf::from("/usr/bin/true"));
+        let sh = system_program("sh").unwrap_or_else(|| PathBuf::from("/bin/sh"));
         let runs = [
             (truth, Vec::new(), Profile::Denylist),
             (
@@ -453,7 +477,7 @@ fn bwrap_args(plan: &Plan, program: &Path, programs: usize) -> Vec<OsString> {
     // process and so with the same pid, and the program gets exactly the
     // plan's environment, as under Landlock.
     push(&[&"--"]);
-    if let Some(env) = which("env").map(|e| real(&e)) {
+    if let Some(env) = system_program("env").map(|e| real(&e)) {
         match plan.env.iter().find(|(k, _)| k == "PWD") {
             Some((_, v)) => {
                 let mut set = OsString::from("PWD=");

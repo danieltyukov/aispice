@@ -268,18 +268,19 @@ pub fn deck(pdk: &Pdk, device: &Device, grid: &Grid) -> String {
 
 /// Characterise a device on ngspice. The deck is checked with the netlist
 /// policy (it names only the PDK's own files) and runs with the PDK's OSDI
-/// files, which are checked to be inside the PDK.
+/// files, which are checked to be inside the PDK. Returns the table and the
+/// run's warnings, such as that ngspice ran without a sandbox.
 pub async fn build(
     pdk: &Pdk,
     device: &Device,
     grid: &Grid,
     ngspice: &Ngspice,
     cancel: &CancellationToken,
-) -> Result<Table, GmidError> {
+) -> Result<(Table, Vec<String>), GmidError> {
     if !device.is_mosfet() {
         return Err(not_mos(pdk, device.name));
     }
-    let ds = run_deck(pdk, &deck(pdk, device, grid), ngspice, cancel).await?;
+    let (ds, warnings) = run_deck(pdk, &deck(pdk, device, grid), ngspice, cancel).await?;
     let (vds, vgs) = (grid.vds(), grid.vgs());
     let n = vds.len() * vgs.len();
     let inner = device.name.to_ascii_lowercase();
@@ -326,18 +327,19 @@ pub async fn build(
         t.cgg.push(shape(column(i, "cgg")?));
         t.vth.push(shape(column(i, "vth")?));
     }
-    Ok(t)
+    Ok((t, warnings))
 }
 
 /// Run a deck aispice wrote on ngspice with the PDK's models: the deck is
 /// checked with the netlist policy (it names only the PDK's own files) and
-/// the OSDI files are checked to be inside the PDK. Returns its DC sweep.
+/// the OSDI files are checked to be inside the PDK. Returns its DC sweep and
+/// the run's warnings.
 async fn run_deck(
     pdk: &Pdk,
     text: &str,
-    ngspice: &Ngspice,
+    ngspice: &dyn Simulator,
     cancel: &CancellationToken,
-) -> Result<crate::dataset::Dataset, GmidError> {
+) -> Result<(crate::dataset::Dataset, Vec<String>), GmidError> {
     let work = tempfile::tempdir().map_err(|e| GmidError::Sim(e.to_string()))?;
     let policy = aispice_core::netlist::Policy {
         base_dir: work.path().to_path_buf(),
@@ -362,6 +364,8 @@ async fn run_deck(
         osdi,
         xyce_plugins: Vec::new(),
     });
+    // The deck reads only the PDK's own files.
+    job.reads = vec![pdk.root.clone()];
     let mut out = ngspice
         .run(&job, cancel)
         .await
@@ -371,7 +375,7 @@ async fn run_deck(
         .iter()
         .position(|d| d.kind == AnalysisKind::Dc)
         .ok_or_else(|| GmidError::BadOutput("no DC sweep".into()))?;
-    Ok(out.datasets.swap_remove(i))
+    Ok((out.datasets.swap_remove(i), out.warnings))
 }
 
 fn not_mos(pdk: &Pdk, name: &str) -> GmidError {
@@ -416,7 +420,8 @@ pub fn save(path: &Path, table: &Table) -> Result<(), GmidError> {
 }
 
 /// The table for a device: from the cache when it still matches, else
-/// built and cached. Returns whether it came from the cache.
+/// built and cached. Returns whether it came from the cache, and the
+/// warnings of the run that built it (none from the cache).
 pub async fn table(
     pdk: &Pdk,
     device: &Device,
@@ -425,14 +430,14 @@ pub async fn table(
     refresh: bool,
     ngspice: &Ngspice,
     cancel: &CancellationToken,
-) -> Result<(Table, bool), GmidError> {
+) -> Result<(Table, bool, Vec<String>), GmidError> {
     let path = cache_path(cache_dir, &pdk.name, device.name);
     if !refresh && let Some(t) = load_cached(&path, pdk, device, grid) {
-        return Ok((t, true));
+        return Ok((t, true, Vec::new()));
     }
-    let t = build(pdk, device, grid, ngspice, cancel).await?;
+    let (t, warnings) = build(pdk, device, grid, ngspice, cancel).await?;
     save(&path, &t)?;
-    Ok((t, false))
+    Ok((t, false, warnings))
 }
 
 /// Where `x` falls on an ascending axis: the two indices around it and the
@@ -650,7 +655,8 @@ const MAX_FINGER: f64 = 10e-6;
 /// fingers), so the device is built as fingers of about the table's width,
 /// its VGS sweep simulated, the VGS where its gm/Id is the target found, and
 /// the width rescaled until it carries the current asked for. Each round is
-/// one short ngspice run; two or three are usually enough.
+/// one short ngspice run; two or three are usually enough. Returns the
+/// sizing and the runs' warnings.
 pub async fn refine(
     pdk: &Pdk,
     device: &Device,
@@ -659,8 +665,9 @@ pub async fn refine(
     first: &Sizing,
     ngspice: &Ngspice,
     cancel: &CancellationToken,
-) -> Result<Sizing, GmidError> {
+) -> Result<(Sizing, Vec<String>), GmidError> {
     let wf = table.grid.w;
+    let mut warnings: Vec<String> = Vec::new();
     let mut w = first.w.unwrap_or(wf);
     let mut ng = ((w / wf).round() as u32).max(1);
     let mut last = None;
@@ -668,13 +675,18 @@ pub async fn refine(
         while w / f64::from(ng) > MAX_FINGER {
             ng += 1;
         }
-        let ds = run_deck(
+        let (ds, ran) = run_deck(
             pdk,
             &single_deck(pdk, device, table, q, w, ng),
             ngspice,
             cancel,
         )
         .await?;
+        for r in ran {
+            if !warnings.contains(&r) {
+                warnings.push(r);
+            }
+        }
         let column = |name: &str| -> Result<Vec<f64>, GmidError> {
             let key = format!("[{name}]");
             ds.vectors
@@ -731,7 +743,7 @@ pub async fn refine(
     }
     let (w, ng, x) = last.expect("at least one round");
     let gm = q.gm_id * x.id;
-    Ok(Sizing {
+    let sizing = Sizing {
         gm_id: q.gm_id,
         l: q.l,
         vds: q.vds,
@@ -747,7 +759,8 @@ pub async fn refine(
         cgg: Some(x.cgg),
         ng: Some(ng),
         verified: true,
-    })
+    };
+    Ok((sizing, warnings))
 }
 
 /// A deck that sweeps VGS of one device built as `ng` fingers.
@@ -983,6 +996,53 @@ mod tests {
         assert!(msg(size(&t, &q(30.0, 1e-6, 0.6))).contains("above what this device reaches"));
         assert!(msg(size(&t, &q(0.5, 1e-6, 0.6))).contains("below what the device reaches"));
         assert!(msg(size(&t, &q(-1.0, 1e-6, 0.6))).contains("positive"));
+    }
+
+    /// A run's warnings, such as that ngspice ran without a sandbox, reach
+    /// the caller with its sweep instead of being dropped.
+    #[tokio::test]
+    async fn a_runs_warnings_come_back_with_its_sweep() {
+        struct Fake;
+        #[async_trait::async_trait]
+        impl Simulator for Fake {
+            fn id(&self) -> crate::backend::SimId {
+                crate::backend::SimId::Ngspice
+            }
+            async fn detect(&self) -> crate::backend::Detection {
+                crate::backend::Detection::default()
+            }
+            async fn run(
+                &self,
+                _: &SimJob,
+                _: &CancellationToken,
+            ) -> Result<crate::backend::SimOutput, crate::backend::SimError> {
+                Ok(crate::backend::SimOutput {
+                    datasets: vec![crate::dataset::Dataset {
+                        title: "gmid".into(),
+                        plotname: "DC transfer characteristic".into(),
+                        kind: AnalysisKind::Dc,
+                        axis: None,
+                        vectors: Vec::new(),
+                        steps: Vec::new(),
+                    }],
+                    warnings: vec![
+                        "ngspice ran without a sandbox (this system is not Linux)".into(),
+                    ],
+                    ..Default::default()
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::pdk::fake_ihp(dir.path());
+        let pdk = Pdk::open("ihp", &root).unwrap();
+        let (ds, warnings) = run_deck(&pdk, "* gmid\n.end\n", &Fake, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(ds.kind, AnalysisKind::Dc);
+        assert_eq!(
+            warnings,
+            ["ngspice ran without a sandbox (this system is not Linux)"]
+        );
     }
 
     #[test]

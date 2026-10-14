@@ -35,6 +35,14 @@
 //! nor Landlock ABI 4) or there is no C compiler, the libraries are not
 //! loaded at all, and [`ready`] says what is missing and how to simulate
 //! without them; there is no unconfined fallback.
+//!
+//! A run that loads none of the project's code (a PDK run, a board-level
+//! run) goes in the same sandbox under seccomp's [`Profile::Denylist`],
+//! with the same reads, writes, environment and preloaded library: ngspice
+//! still parses a deck and model files aispice did not write. Where no
+//! sandbox can start or there is no C compiler, such a run goes unconfined,
+//! as before, and its output says so ([`plain_sandbox`],
+//! [`unconfined_warning`]).
 
 use super::process::{self, ProcessSpec};
 use super::{RAW_SIZE_LIMIT, SimError};
@@ -108,7 +116,7 @@ pub const PRELOAD_FILE: &str = "aispice_tmpfile.so";
 /// The only folders the C compiler is looked for in. aispice's own `PATH`
 /// is not used: it may hold the working folder, or a project's folder that
 /// a shell hook added.
-pub const TOOL_PATH: &[&str] = &["/usr/local/bin", "/usr/bin", "/bin"];
+pub const TOOL_PATH: &[&str] = crate::sandbox::SYSTEM_PATH;
 
 /// The C compilers tried, in this order.
 const COMPILERS: &[&str] = &["cc", "gcc", "clang"];
@@ -173,6 +181,150 @@ pub async fn ready_for(purpose: Purpose, cancel: &CancellationToken) -> Result<S
     }
 }
 
+/// The sandbox a run that loads none of the project's code uses, chosen
+/// once per process: `Ok(Ok(sandbox))` where a sandbox can start, the
+/// preloaded library builds and the temporary folder can hold it, and
+/// `Ok(Err(why))` where one of these lasting conditions fails, so such a
+/// run goes unconfined and says why. `Err` means building the library
+/// timed out, which decides nothing; it is not kept, and the run fails.
+pub async fn plain_sandbox() -> Result<Result<Sandbox, String>, SimError> {
+    static CHOSEN: tokio::sync::OnceCell<Result<Sandbox, String>> =
+        tokio::sync::OnceCell::const_new();
+    // The test-only ABI override changes the choice after the fact.
+    #[cfg(all(target_os = "linux", feature = "testing"))]
+    if super::confine::abi_override_for_tests().is_some() {
+        return choose_plain().await;
+    }
+    CHOSEN.get_or_try_init(choose_plain).await.cloned()
+}
+
+async fn choose_plain() -> Result<Result<Sandbox, String>, SimError> {
+    // Not a run's token: a cancelled run must not leave every later run
+    // without a sandbox.
+    let cancel = CancellationToken::new();
+    let sandbox = if !cfg!(target_os = "linux") {
+        Err("this system is not Linux".to_string())
+    } else if !seccomp_here() {
+        Err("the kernel has no seccomp filters".to_string())
+    } else {
+        Sandbox::select(&cancel).await
+    };
+    let sandbox = match with_compiler(sandbox, compiler().is_some()) {
+        Ok(s) => s,
+        Err(why) => return Ok(Err(why)),
+    };
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    if let Err(why) = temp_usable(&std::env::temp_dir(), &mounts) {
+        return Ok(Err(why));
+    }
+    with_preload(sandbox, preload(&cancel).await.map(|_| ()))
+}
+
+/// A sandbox counts only when the preloaded library builds: a compiler
+/// that cannot build it (one without the C library's headers, say) is as
+/// good as none. A build that timed out or was cancelled decides nothing.
+fn with_preload<T>(sandbox: T, built: Result<(), SimError>) -> Result<Result<T, String>, SimError> {
+    match built {
+        Ok(()) => Ok(Ok(sandbox)),
+        Err(e @ (SimError::Timeout(_) | SimError::Cancelled)) => Err(e),
+        Err(SimError::Config(why)) => Ok(Err(why)),
+        Err(e) => Ok(Err(format!(
+            "the library a sandboxed ngspice preloads could not be built: {e}"
+        ))),
+    }
+}
+
+/// Whether a run folder made in the temporary folder `dir` can hold the
+/// preloaded library: `LD_PRELOAD` splits at a space or a colon, and
+/// nothing on a filesystem mounted `noexec` can be loaded, as
+/// `/proc/self/mountinfo` (`mounts`) shows them.
+fn temp_usable(dir: &Path, mounts: &str) -> Result<(), String> {
+    let real = dir.canonicalize().map_err(|e| {
+        format!(
+            "the temporary folder {} cannot be resolved: {e}",
+            dir.display()
+        )
+    })?;
+    if real.to_string_lossy().contains([' ', ':']) {
+        return Err(format!(
+            "the temporary folder {} has a space or a colon in its path, which the preloaded library cannot be named by; set TMPDIR to a plain path",
+            real.display()
+        ));
+    }
+    if noexec(mounts, &real) {
+        return Err(format!(
+            "the temporary folder {} is on a filesystem mounted noexec, from which the preloaded library cannot be loaded; set TMPDIR to a folder on another filesystem",
+            real.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the mount that holds `path` is `noexec`: of the mounts in
+/// `mounts` (`/proc/self/mountinfo`) whose mount point holds it, the
+/// deepest, and of those on one point the last, which is mounted on top.
+fn noexec(mounts: &str, path: &Path) -> bool {
+    let mut found: Option<(usize, bool)> = None;
+    for line in mounts.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let (Some(point), Some(options)) = (fields.get(4), fields.get(5)) else {
+            continue;
+        };
+        let point = PathBuf::from(unescape_mount(point));
+        if !path.starts_with(&point) {
+            continue;
+        }
+        let depth = point.components().count();
+        if found.is_none_or(|(d, _)| depth >= d) {
+            found = Some((depth, options.split(',').any(|o| o == "noexec")));
+        }
+    }
+    found.is_some_and(|(_, noexec)| noexec)
+}
+
+/// A mount point as the kernel writes it in `mountinfo`, with a space, a
+/// tab, a newline and a backslash as three octal digits after a backslash.
+fn unescape_mount(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find('\\') {
+        out.push_str(&rest[..i]);
+        let code = rest.get(i + 1..i + 4);
+        match code.and_then(|c| u8::from_str_radix(c, 8).ok()) {
+            Some(b) => {
+                out.push(char::from(b));
+                rest = &rest[i + 4..];
+            }
+            None => {
+                out.push('\\');
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A sandbox counts only with the C compiler the preloaded library needs.
+fn with_compiler<T>(sandbox: Result<T, String>, compiler: bool) -> Result<T, String> {
+    match sandbox {
+        Ok(_) if !compiler => Err(format!(
+            "there is no C compiler ({} in {}), which the sandboxed ngspice needs",
+            COMPILERS.join(", "),
+            TOOL_PATH.join(", ")
+        )),
+        other => other,
+    }
+}
+
+/// The warning a run that loads none of the project's code carries when it
+/// went unconfined because of `why`.
+pub fn unconfined_warning(why: &str) -> String {
+    format!(
+        "ngspice ran without a sandbox ({why}); the deck loads none of the project's code, so it ran unconfined, as before"
+    )
+}
+
 /// Refuse, under bubblewrap, a deck that includes a file through a symbolic
 /// link outside the folders the sandbox shows whole (`whole`, such as the
 /// project's PDK, and the system). bubblewrap shows every other file the
@@ -195,7 +347,7 @@ pub fn check_links(
             continue;
         }
         return Err(format!(
-            "the include `{}` reaches {} through the symbolic link {}, which ngspice cannot follow in the bubblewrap sandbox that runs the project's compiled models (it shows each file the deck reads at its real path only). Include {} itself, or replace the link with the file.",
+            "the include `{}` reaches {} through the symbolic link {}, which ngspice cannot follow in the bubblewrap sandbox it runs in (it shows each file the deck reads at its real path only). Include {} itself, or replace the link with the file.",
             l.include,
             l.file.display(),
             link.display(),
@@ -475,6 +627,14 @@ fn install_dirs(exe: &Path) -> Vec<PathBuf> {
     v.retain(|p| p.is_dir());
     v
 }
+
+/// How many processes and threads a run under the denylist may add to what
+/// its user runs. It loads no code of the project's, so the margin only has
+/// to stop a runaway ngspice, and it is relative to everything the user
+/// runs: the native-code margin below leaves 128 on a 32-core machine,
+/// which a busy machine's other work uses up while ngspice runs, as it did
+/// for xschem.
+pub(crate) const DENYLIST_NPROC_HEADROOM: u64 = 1024;
 
 /// How many processes and threads a confined run may add to what its user
 /// runs: ngspice starts a thread per core, and a little more.

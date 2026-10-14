@@ -38,6 +38,89 @@ fn a_refusal_says_what_is_missing_and_what_to_do_instead() {
     );
 }
 
+/// A run without the project's code counts a sandbox only with a C
+/// compiler, and its warning says why it went unconfined.
+#[test]
+fn a_plain_run_needs_a_compiler_and_says_why_it_went_unconfined() {
+    assert_eq!(with_compiler(Ok(()), true), Ok(()));
+    assert_eq!(
+        with_compiler(Ok(()), false),
+        Err("there is no C compiler (cc, gcc, clang in /usr/local/bin, /usr/bin, /bin), which the sandboxed ngspice needs".to_string())
+    );
+    let none = "no sandbox is available here: bubblewrap (bwrap) is not installed";
+    assert_eq!(
+        with_compiler::<()>(Err(none.into()), false),
+        Err(none.to_string())
+    );
+    assert_eq!(
+        unconfined_warning("this system is not Linux"),
+        "ngspice ran without a sandbox (this system is not Linux); the deck loads none of the project's code, so it ran unconfined, as before"
+    );
+}
+
+/// A sandbox counts for a run without the project's code only when the
+/// preloaded library builds; a build that timed out or was cancelled
+/// decides nothing and is passed on.
+#[test]
+fn a_plain_run_needs_a_library_that_builds() {
+    assert_eq!(with_preload(1, Ok(())).unwrap(), Ok(1));
+    let failed = SimError::Config(
+        "/usr/bin/cc could not build the library a sandboxed ngspice preloads: stdio.h: No such file".into(),
+    );
+    assert_eq!(
+        with_preload(1, Err(failed)).unwrap(),
+        Err("/usr/bin/cc could not build the library a sandboxed ngspice preloads: stdio.h: No such file".to_string())
+    );
+    let io = with_preload(
+        1,
+        Err(SimError::Io("cannot make a build folder: disk full".into())),
+    );
+    assert!(io.unwrap().unwrap_err().contains("disk full"));
+    for e in [SimError::Timeout(BUILD_TIMEOUT), SimError::Cancelled] {
+        assert!(with_preload(1, Err(e)).is_err());
+    }
+}
+
+/// The temporary folder must hold a library `LD_PRELOAD` can name and the
+/// loader can map: no space or colon in its real path, and not on a
+/// filesystem mounted noexec, by the deepest mount that holds it.
+#[cfg(unix)]
+#[test]
+fn a_plain_run_needs_a_temporary_folder_the_library_loads_from() {
+    let mounts = "\
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/root rw
+30 22 0:27 / /tmp rw,nosuid,nodev,noexec shared:5 - tmpfs tmpfs rw
+31 30 0:28 / /tmp/exec rw,nosuid,nodev shared:6 - tmpfs tmpfs rw
+32 22 0:29 / /mnt/with\\040space rw,noexec shared:7 - tmpfs tmpfs rw
+33 22 0:30 / /home rw,noexec shared:8 - ext4 /dev/sdb rw
+34 22 0:31 / /home rw shared:9 - ext4 /dev/sdb rw
+";
+    assert!(noexec(mounts, Path::new("/tmp/aispice-run-x")));
+    assert!(!noexec(mounts, Path::new("/tmp/exec/aispice-run-x")));
+    assert!(!noexec(mounts, Path::new("/tmpfoo/aispice-run-x")));
+    assert!(noexec(mounts, Path::new("/mnt/with space/x")));
+    // A later mount on the same point is on top.
+    assert!(!noexec(mounts, Path::new("/home/u/tmp")));
+    assert!(!noexec("", Path::new("/tmp")));
+    assert_eq!(unescape_mount("/a\\040b\\011c\\134d\\x"), "/a b\tc\\d\\x");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    assert_eq!(temp_usable(&dir, ""), Ok(()));
+    let all = "1 0 0:1 / / rw,noexec - ext4 /dev/root rw\n";
+    let e = temp_usable(&dir, all).unwrap_err();
+    assert!(
+        e.contains("mounted noexec") && e.contains("set TMPDIR"),
+        "{e}"
+    );
+    for odd in ["with space", "with:colon"] {
+        let d = dir.join(odd);
+        std::fs::create_dir(&d).unwrap();
+        let e = temp_usable(&d, "").unwrap_err();
+        assert!(e.contains("a space or a colon"), "{e}");
+    }
+}
+
 #[cfg(unix)]
 fn fake_ngspice(dir: &Path) -> PathBuf {
     let bin = dir.join("opt/ngspice/bin");

@@ -753,6 +753,25 @@ impl Runner {
                 "ran ngspice in a sandbox, since control blocks are enabled in the settings".into(),
             );
             Some(sandbox)
+        } else if id == SimId::Ngspice && sandbox.is_none() {
+            // No code of the project's runs here: ngspice runs under the
+            // denylist where a sandbox can start, and unconfined, with a
+            // warning in its output, where none can.
+            match aispice_sim::backend::native_code::plain_sandbox()
+                .await
+                .map_err(|e| RunError::Sim(e.to_string()))?
+            {
+                Ok(sandbox) => {
+                    aispice_sim::backend::native_code::check_links(
+                        &sandbox,
+                        &deck_reads.linked,
+                        &pdk_roots,
+                    )
+                    .map_err(RunError::Netlist)?;
+                    Some(sandbox)
+                }
+                Err(_) => None,
+            }
         } else {
             sandbox
         };

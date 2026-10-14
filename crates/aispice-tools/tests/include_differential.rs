@@ -9,7 +9,8 @@
 //! prints with a sentinel value, reachable only through symbolic links and
 //! spellings the policy has to see through. A run that saw it prints the
 //! sentinel or names it in its log. Where `strace` is installed, every file
-//! the simulators open is checked as well.
+//! the simulators open is checked as well, except the runner's ngspice
+//! where it runs in a sandbox.
 //!
 //! Unix only (symbolic links). Needs ngspice; the Xyce half needs Xyce
 //! (`AISPICE_XYCE`, else `Xyce` on PATH) and is skipped without it.
@@ -569,17 +570,28 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let ng_trace = fx.root.join("runner-ngspice");
     let xy_trace = fx.root.join("runner-xyce");
-    let mut runner_sims = vec![("ngspice", ng_trace.clone())];
+    // Where a sandbox can start, the runner's ngspice runs in it, and the
+    // strace wrapper cannot run there: the denylist refuses ptrace, and the
+    // trace goes outside the run folder. The sandbox then keeps ngspice
+    // from opening anything the deck was not granted, and its values and
+    // logs are checked as everywhere.
+    let confined = rt
+        .block_on(aispice_sim::backend::native_code::plain_sandbox())
+        .unwrap()
+        .is_ok();
+    let ng_traced = fx.strace.is_some() && !confined;
+    let mut runner_sims = vec![("ngspice", ng_trace.clone(), ng_traced)];
     let xyce_exe = match (&xyce, &fx.strace) {
         (Some(x), Some(_)) => Some(traced(&fx, "Xyce", x, &xy_trace)),
         (x, _) => x.clone(),
     };
     if xyce_exe.is_some() {
-        runner_sims.push(("xyce", xy_trace.clone()));
+        runner_sims.push(("xyce", xy_trace.clone(), fx.strace.is_some()));
     }
-    let ngspice_exe = match &fx.strace {
-        Some(_) => traced(&fx, "ngspice", &ngspice, &ng_trace),
-        None => ngspice.clone(),
+    let ngspice_exe = if ng_traced {
+        traced(&fx, "ngspice", &ngspice, &ng_trace)
+    } else {
+        ngspice.clone()
     };
     let runner = Runner::new(RunnerConfig {
         ngspice_exe: Some(ngspice_exe),
@@ -603,7 +615,7 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
         };
         let circuit = format!("case-{n}.cir");
         std::fs::write(fx.proj.join(&circuit), &deck).unwrap();
-        for (sim, trace) in &runner_sims {
+        for (sim, trace, is_traced) in &runner_sims {
             let result = rt.block_on(runner.run_circuit(
                 &project,
                 &circuit,
@@ -613,7 +625,9 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
             ));
             let s = match &result {
                 Err(RunError::Policy(_)) if expect == Expect::Refused => {
-                    let _ = opened_files(trace);
+                    if *is_traced {
+                        let _ = opened_files(trace);
+                    }
                     continue;
                 }
                 Err(RunError::Policy(why)) => {
@@ -635,7 +649,7 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
                     ..Seen::default()
                 },
             };
-            let s = seen(&fx, s, trace);
+            let s = if *is_traced { seen(&fx, s, trace) } else { s };
             if expect == Expect::Refused {
                 failures.push(format!(
                     "{name}, deck, {sim}: accepted, expected refused: {result:?}"
@@ -653,10 +667,7 @@ fn include_spellings_never_reach_a_file_outside_the_project() {
                     result.as_ref().err()
                 ));
             }
-            if fx.strace.is_some()
-                && result.is_ok()
-                && !s.opened.iter().any(|p| p.ends_with(".cir"))
-            {
+            if *is_traced && result.is_ok() && !s.opened.iter().any(|p| p.ends_with(".cir")) {
                 failures.push(format!(
                     "{name}, deck, {sim}: the trace saw no deck opened: {s:?}"
                 ));
