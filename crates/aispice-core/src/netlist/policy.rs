@@ -1397,10 +1397,30 @@ pub fn check_module(
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("aispice-policy-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// A fresh folder under the temporary folder, removed when it is
+    /// dropped, also when a test fails. It derefs to its path.
+    struct Temp(tempfile::TempDir);
+
+    impl std::ops::Deref for Temp {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    impl AsRef<Path> for Temp {
+        fn as_ref(&self) -> &Path {
+            self.0.path()
+        }
+    }
+
+    fn temp(name: &str) -> Temp {
+        Temp(
+            tempfile::Builder::new()
+                .prefix(&format!("aispice-policy-{name}-"))
+                .tempdir()
+                .unwrap(),
+        )
     }
 
     fn policy_at(dir: &Path) -> Policy {
@@ -1710,7 +1730,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn includes_through_a_link_are_reported() {
-        let d = temp("linked").canonicalize().unwrap();
+        let t = temp("linked");
+        let d = t.canonicalize().unwrap();
         std::fs::create_dir_all(d.join("models/sub")).unwrap();
         std::fs::create_dir_all(d.join("shared")).unwrap();
         std::fs::write(d.join("shared/vref.inc"), "V2 b 0 2\n").unwrap();
@@ -1879,7 +1900,7 @@ mod tests {
 
     /// A fake PDK: a corner library with a section, a model file IHP-style
     /// expressions, an OSDI file, and a folder outside it.
-    fn fake_pdk(name: &str) -> (PathBuf, PathBuf) {
+    fn fake_pdk(name: &str) -> (Temp, Temp) {
         let root = temp(&format!("pdk-{name}"));
         let models = root.join("libs.tech/ngspice/models");
         let osdi = root.join("libs.tech/ngspice/osdi");
@@ -1922,7 +1943,7 @@ mod tests {
         // The same model file in an ordinary allowed folder is still read
         // with the strict path check, which misreads `w/ng`.
         let plain = Policy {
-            allowed_dirs: vec![pdk.clone()],
+            allowed_dirs: vec![pdk.to_path_buf()],
             ..policy_at(&proj)
         };
         assert!(!check(&deck, &plain).is_empty());
@@ -2356,7 +2377,7 @@ mod tests {
     fn modules_load_only_from_inside_a_registered_folder() {
         let (pdk, _) = fake_pdk("module");
         let osdi = pdk.join("libs.tech/ngspice/osdi/psp103.osdi");
-        let roots = vec![pdk.clone()];
+        let roots = vec![pdk.to_path_buf()];
         let real = check_module(&osdi, &roots, &["osdi"]).unwrap();
         assert_eq!(real, std::fs::canonicalize(&osdi).unwrap());
         // Not registered.
@@ -2380,6 +2401,7 @@ mod tests {
         // A path that would break out of the generated start-up file.
         let odd = temp("module-it's");
         std::fs::write(odd.join("m.osdi"), b"x").unwrap();
-        assert!(check_module(&odd.join("m.osdi"), std::slice::from_ref(&odd), &["osdi"]).is_err());
+        let odd_root = [odd.to_path_buf()];
+        assert!(check_module(&odd.join("m.osdi"), &odd_root, &["osdi"]).is_err());
     }
 }

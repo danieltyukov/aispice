@@ -805,15 +805,18 @@ mod tests {
     /// is flagged and one it defines is not.
     #[test]
     fn project_libraries_are_read() {
-        let dir = std::env::temp_dir().join(format!("aispice-lint-sub-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // Removed when dropped, also when the test fails.
+        let tmp = tempfile::Builder::new()
+            .prefix("aispice-lint-sub-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
         std::fs::write(
             dir.join("amps.lib"),
             "* amps\n.subckt myamp a b c\nE1 c 0 b a 1e5\n.ends myamp\n",
         )
         .unwrap();
-        let lib =
-            SymbolLibrary::builtin_only().with_dir(&dir, crate::symbol::SymbolSource::Project);
+        let lib = SymbolLibrary::builtin_only().with_dir(dir, crate::symbol::SymbolSource::Project);
         let src = |v: &str| {
             format!(
                 "{}TEXT 0 340 Left 2 !.lib amps.lib\n",
@@ -832,7 +835,6 @@ mod tests {
         )
         .unwrap();
         assert!(unknown_subckt(&src("youramp"), &lib).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// LTspice finds a vendor part's subcircuit by searching its library
@@ -840,7 +842,11 @@ mod tests {
     /// flagged.
     #[test]
     fn ltspice_parts_are_not_second_guessed() {
-        let dir = std::env::temp_dir().join(format!("aispice-lint-lt-{}", std::process::id()));
+        let tmp = tempfile::Builder::new()
+            .prefix("aispice-lint-lt-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
         std::fs::create_dir_all(dir.join("sym")).unwrap();
         std::fs::write(
             dir.join("sym/vendorop.asy"),
@@ -851,7 +857,6 @@ mod tests {
             .with_dir(&dir.join("sym"), crate::symbol::SymbolSource::Ltspice);
         let src = OPAMP.replace("SYMBOL OpAmps/opamp", "SYMBOL vendorop");
         assert!(unknown_subckt(&src, &lib).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

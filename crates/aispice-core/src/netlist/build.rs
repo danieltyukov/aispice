@@ -555,20 +555,25 @@ mod tests {
         );
     }
 
+    /// A fresh folder under the temporary folder, removed when it is
+    /// dropped, also when a test fails.
+    fn temp(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("aispice-{name}-"))
+            .tempdir()
+            .unwrap()
+    }
+
     /// A symbol written to a temp project folder, so rules that depend on
-    /// symbol attributes can be tested without LTspice's library.
-    fn lib_with(symbols: &[(&str, &str)]) -> (std::path::PathBuf, SymbolLibrary) {
-        let dir = std::env::temp_dir().join(format!(
-            "aispice-build-{}-{}",
-            std::process::id(),
-            symbols.len() + symbols.iter().map(|s| s.0.len()).sum::<usize>()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// symbol attributes can be tested without LTspice's library. The
+    /// folder lives as long as the first value.
+    fn lib_with(symbols: &[(&str, &str)]) -> (tempfile::TempDir, SymbolLibrary) {
+        let dir = temp("build");
         for (name, text) in symbols {
-            std::fs::write(dir.join(format!("{name}.asy")), text).unwrap();
+            std::fs::write(dir.path().join(format!("{name}.asy")), text).unwrap();
         }
-        let lib =
-            SymbolLibrary::builtin_only().with_dir(&dir, crate::symbol::SymbolSource::Project);
+        let lib = SymbolLibrary::builtin_only()
+            .with_dir(dir.path(), crate::symbol::SymbolSource::Project);
         (dir, lib)
     }
 
@@ -667,31 +672,28 @@ mod tests {
         assert!(built.warnings.iter().any(|w| w.contains("pin order")));
 
         // A sheet that places itself must terminate.
-        let dir = std::env::temp_dir().join(format!("aispice-selfref-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = temp("selfref");
+        let dir = tmp.path();
         std::fs::write(
             dir.join("loop.asy"),
             "SymbolType BLOCK\nPIN 0 0 LEFT 8\nPINATTR PinName a\nPINATTR SpiceOrder 1\n",
         )
         .unwrap();
         std::fs::write(dir.join("loop.asc"), "Version 4\nSHEET 1 880 680\nSYMBOL loop 0 0 R0\nSYMATTR InstName X1\nSYMBOL loop 64 0 R0\nSYMATTR InstName X2\n").unwrap();
-        let lib =
-            SymbolLibrary::builtin_only().with_dir(&dir, crate::symbol::SymbolSource::Project);
+        let lib = SymbolLibrary::builtin_only().with_dir(dir, crate::symbol::SymbolSource::Project);
         let (sch, _) =
             parse("Version 4\nSHEET 1 880 680\nSYMBOL loop 0 0 R0\nSYMATTR InstName X1\n");
         let (built, _) = build(&sch, &lib, "* t");
         assert_eq!(built.netlist.subckts().count(), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn hierarchical_block_becomes_inline_subckt() {
-        let dir = std::env::temp_dir().join(format!("aispice-hier-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = temp("hier");
+        let dir = tmp.path();
         std::fs::write(dir.join("half.asy"), "SymbolType BLOCK\nPIN -32 0 LEFT 8\nPINATTR PinName in\nPINATTR SpiceOrder 1\nPIN 32 0 RIGHT 8\nPINATTR PinName out\nPINATTR SpiceOrder 2\n").unwrap();
         std::fs::write(dir.join("half.asc"), "Version 4\nSHEET 1 880 680\nFLAG 16 16 in\nFLAG 16 96 out\nSYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\n").unwrap();
-        let lib =
-            SymbolLibrary::builtin_only().with_dir(&dir, crate::symbol::SymbolSource::Project);
+        let lib = SymbolLibrary::builtin_only().with_dir(dir, crate::symbol::SymbolSource::Project);
         let src = "Version 4\nSHEET 1 880 680\nFLAG -32 0 a\nFLAG 32 0 b\nSYMBOL half 0 0 R0\nSYMATTR InstName X1\n";
         let text = netlist_of(src, &lib);
         assert!(text.contains("XX1 a b half\n"), "{text}");
@@ -699,6 +701,5 @@ mod tests {
             text.contains(".subckt half in out\nR1 in out 1k\n.ends half\n"),
             "{text}"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
