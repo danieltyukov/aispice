@@ -93,6 +93,11 @@ fn the_bubblewrap_command_shows_only_the_plan() {
     assert!(has(&["--chdir", &s(&out)]));
     assert!(has(&["--setenv", "HOME", &s(&out)]));
     assert!(has(&["--tmpfs", "/tmp"]));
+    // The root goes read-only after the last bind.
+    let remount = args.iter().position(|a| a == "--remount-ro").unwrap();
+    assert_eq!(args[remount + 1], "/");
+    let last_bind = args.iter().rposition(|a| a.ends_with("bind")).unwrap();
+    assert!(remount > last_bind, "{args:?}");
     // The only writable bind is the plan's folder; the user's home and the
     // working folder are not shown.
     assert_eq!(args.iter().filter(|a| *a == "--bind").count(), 1);
@@ -800,6 +805,85 @@ async fn bubblewrap_comes_only_from_the_system_folders() {
                 p.display()
             );
         }
+    }
+}
+
+/// Nothing outside a run's write folders takes a write, in every sandbox
+/// here under either profile: not the folder above its input, the folder
+/// above its write folder, or (under bubblewrap, whose root is a tmpfs
+/// where it makes those folders) the root. bubblewrap's private /tmp still
+/// does. Unconfined, the same script writes in each folder.
+#[cfg(unix)]
+#[tokio::test]
+async fn nothing_outside_the_write_folders_takes_a_write() {
+    let (Some(sh), Some(mkdir)) = (system_program("sh"), system_program("mkdir")) else {
+        eprintln!("skipped: no sh or mkdir");
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let inputs = dir.join("inputs");
+    std::fs::create_dir(&inputs).unwrap();
+    let input = inputs.join("deck.cir");
+    std::fs::write(&input, "* deck\n").unwrap();
+    let jobs = dir.join("jobs");
+    let out = jobs.join("run");
+    std::fs::create_dir_all(&out).unwrap();
+    let targets = [inputs.clone(), jobs.clone(), dir.clone()];
+    let script = |private_tmp: bool| {
+        let mut s = String::from("printf 'ok\\n' > result\n");
+        if private_tmp {
+            s.push_str("printf x > /tmp/aispice-tmp 2>/dev/null && printf 'tmp\\n' >> result\n");
+            s.push_str("mkdir /aispice-root 2>/dev/null && printf 'root\\n' >> result\n");
+        }
+        for t in &targets {
+            let t = t.display();
+            s.push_str(&format!(
+                "(printf x > '{t}/aispice-mark') 2>/dev/null && printf 'wrote {t}\\n' >> result\n"
+            ));
+        }
+        s
+    };
+    for sandbox in every_available().await {
+        for profile in [Profile::Denylist, Profile::NativeCode] {
+            let what = format!("{} {profile:?}", sandbox.describe());
+            let _ = std::fs::remove_file(out.join("result"));
+            let mut plan = plan_in(&out, &sh, profile);
+            plan.args = vec!["-c".into(), script(true).into()];
+            plan.read = vec![input.clone()];
+            plan.exec = vec![mkdir.clone()];
+            let spec = sandbox.command(&plan).unwrap();
+            let run = process::run(&spec, Duration::from_secs(30), &CancellationToken::new())
+                .await
+                .unwrap();
+            let text = std::fs::read_to_string(out.join("result"))
+                .unwrap_or_else(|_| panic!("{what}: no result: {}", run.combined()));
+            let want = if sandbox.is_bwrap() {
+                "ok\ntmp\n"
+            } else {
+                "ok\n"
+            };
+            assert_eq!(text, want, "{what}");
+            for t in &targets {
+                assert!(
+                    !t.join("aispice-mark").exists(),
+                    "{what}: wrote in {}",
+                    t.display()
+                );
+            }
+        }
+    }
+    // Unconfined, the script writes in each folder.
+    let plain = std::process::Command::new(&sh)
+        .arg("-c")
+        .arg(script(false))
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(plain.success());
+    let text = std::fs::read_to_string(out.join("result")).unwrap();
+    for t in &targets {
+        assert!(text.contains(&format!("wrote {}\n", t.display())), "{text}");
     }
 }
 
