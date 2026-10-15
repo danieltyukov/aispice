@@ -10,7 +10,8 @@
 //!   user, PID, IPC, UTS and network namespaces, no user namespace inside
 //!   (`--disable-userns`, checked with `--assert-userns-disabled`), the
 //!   system folders and the plan's `read` and `exec` paths read-only, its
-//!   `write` folders read-write, a private size-capped `/tmp`, the plan's
+//!   `write` folders read-write, a private size-capped `/tmp`, a root that
+//!   is read-only once everything is bound, the plan's
 //!   environment only, and the profile's seccomp programs installed by
 //!   bubblewrap (`--add-seccomp-fd`). Every path appears at its own place,
 //!   so the arguments and environment are the same as under Landlock. The
@@ -464,6 +465,12 @@ fn bwrap_args(plan: &Plan, program: &Path, programs: usize) -> Vec<OsString> {
     for w in &plan.write {
         push(&[&"--bind", w, w]);
     }
+    // bubblewrap's root is a tmpfs with no size cap, and it makes the
+    // folders above each bound path there (a project folder above an
+    // input, the home above a write folder). Read-only once everything is
+    // bound, it takes no write: the binds, /proc, /dev and the capped /tmp
+    // are mounts of their own and keep their flags.
+    push(&[&"--remount-ro", &"/"]);
     push(&[&"--chdir", &plan.cwd]);
     // The seccomp programs arrive as descriptors 3.. (backend::confine
     // moves them there); bubblewrap installs them before the program runs.

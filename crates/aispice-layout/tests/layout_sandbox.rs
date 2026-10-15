@@ -87,13 +87,13 @@ async fn gate(found: bool, what: &str) -> bool {
 
 /// The result the script wrote, after checking that no mark was left and
 /// the input's mode is unchanged. bubblewrap gives the program a /tmp of
-/// its own and makes the folders above each path it binds on a root of its
-/// own, so a write there (the real /tmp, a project folder or the home above
-/// a bound input, wherever the test's temporary folder is) works inside
-/// and leaves nothing outside, which the check of the marks shows; under
-/// bubblewrap those lines are dropped.
+/// its own, so a write anywhere under /tmp (the real /tmp, or a project
+/// that sits there) works inside and leaves nothing outside, which the
+/// check of the marks shows; those lines are dropped. The folders it makes
+/// above each bound path (a project folder, the home) are on its read-only
+/// root and take no write, wherever the test's temporary folder is.
 async fn result(s: &Setup, log: &str) -> String {
-    let private = tools::sandbox_description().await.starts_with("bubblewrap");
+    let private_tmp = tools::sandbox_description().await.starts_with("bubblewrap");
     let left: Vec<&PathBuf> = s.marks.iter().filter(|m| m.exists()).collect();
     for m in &left {
         let _ = std::fs::remove_file(m);
@@ -104,7 +104,7 @@ async fn result(s: &Setup, log: &str) -> String {
     let text = std::fs::read_to_string(s.out.join("result"))
         .unwrap_or_else(|_| panic!("no result: {log}"));
     text.lines()
-        .filter(|l| !(private && l.starts_with("wrote ")))
+        .filter(|l| !(private_tmp && l.starts_with("wrote /tmp/")))
         .map(|l| format!("{l}\n"))
         .collect()
 }
