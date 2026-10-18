@@ -26,7 +26,7 @@ tokio-util = "0.7"
 async-trait = "0.1"
 # Behavioural models: the SHA-256 of a library aispice built, checked before
 # it is loaded.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # libc is used on every Unix to read xschem's netlist without following a
 # symlink and to kill a process group; Landlock and seccomp

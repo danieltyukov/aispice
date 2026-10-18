@@ -20,7 +20,7 @@ similar.workspace = true
 resvg = { workspace = true, optional = true }
 # Macro packages (macropkg): macro.toml, pattern checks, evidence hashes.
 regex = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 toml = "1"
 
 # Package files are opened one directory at a time without following a link
