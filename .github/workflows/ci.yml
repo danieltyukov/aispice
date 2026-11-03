@@ -42,6 +42,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # A pull request that changes Cargo.lock restores master's target folder
+      # and rebuilds beside it, which no longer fits the Ubuntu 26.04 image's
+      # free disk. These preinstalled toolchains are not used here.
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # Restored on every run and saved only by pushes to master (the last step):
       # GitHub keeps 10 GB of caches per repository, and a cache per pull request
       # evicted master's. A pull request starts from master's cache, by its exact
