@@ -381,12 +381,15 @@ jobs:
           key: cargo-shell-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-shell-
 
+      # Ubuntu 26.04 renamed webkit2gtk-driver to webkitgtk-webdriver.
       - name: Install the WebKitGTK toolchain, ngspice and a WebDriver
         run: |
           sudo apt-get update
+          driver=webkitgtk-webdriver
+          apt-cache show "$driver" > /dev/null 2>&1 || driver=webkit2gtk-driver
           sudo apt-get install --no-install-recommends -y \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-            webkit2gtk-driver xvfb ngspice
+            "$driver" xvfb ngspice
 
       - run: npm ci
 
