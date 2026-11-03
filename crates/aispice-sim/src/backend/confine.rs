@@ -586,13 +586,15 @@ const FCNTL_ALLOWED: [libc::c_int; 13] = [
 /// `ioctl` requests [`Profile::NativeCode`] allows (the generic numbers,
 /// the same on x86_64 and aarch64): asking whether a descriptor is a
 /// terminal and its size, bytes readable, non-blocking and close-on-exec.
-const IOCTL_ALLOWED: [u64; 6] = [
-    0x5401, // TCGETS
-    0x5413, // TIOCGWINSZ
-    0x541B, // FIONREAD
-    0x5421, // FIONBIO
-    0x5450, // FIONCLEX
-    0x5451, // FIOCLEX
+/// glibc 2.42 and later ask with `TCGETS2` in `tcgetattr` and `isatty`.
+const IOCTL_ALLOWED: [u64; 7] = [
+    0x5401,      // TCGETS
+    0x802C_542A, // TCGETS2
+    0x5413,      // TIOCGWINSZ
+    0x541B,      // FIONREAD
+    0x5421,      // FIONBIO
+    0x5450,      // FIONCLEX
+    0x5451,      // FIOCLEX
 ];
 
 /// `prctl` options [`Profile::NativeCode`] allows: naming the thread and
