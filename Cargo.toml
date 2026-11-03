@@ -43,7 +43,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs
 futures = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 clap = { version = "4", features = ["derive", "env"] }
-resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 similar = "3"
 keyring = "4"
 tempfile = "3"
