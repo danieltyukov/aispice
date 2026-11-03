@@ -28,6 +28,13 @@ fn strings(args: &[OsString]) -> Vec<String> {
         .collect()
 }
 
+/// `/usr/bin/true` as the sandbox names it, through its symlinks: Ubuntu
+/// 26.04 points it at `gnutrue`.
+#[cfg(unix)]
+fn usr_bin_true() -> PathBuf {
+    Path::new("/usr/bin/true").canonicalize().unwrap()
+}
+
 #[test]
 fn landlock_abis_are_floored_and_capped() {
     assert!(landlock_abi_from(0).is_err());
@@ -126,7 +133,7 @@ fn the_bubblewrap_command_shows_only_the_plan() {
             env.display().to_string().as_str(),
             "-u",
             "PWD",
-            "/usr/bin/true",
+            usr_bin_true().display().to_string().as_str(),
             "--flag"
         ]
     );
@@ -192,7 +199,7 @@ fn the_landlock_command_confines_to_the_plan() {
         (4, Scopes::default(), Signals::SelfOnly),
     ] {
         let spec = Sandbox::landlock_for_tests(abi).command(&plan).unwrap();
-        assert_eq!(spec.program, PathBuf::from("/usr/bin/true"));
+        assert_eq!(spec.program, usr_bin_true());
         assert!(spec.clear_env);
         assert_eq!(spec.env, plan.env);
         let c = spec.confine.as_ref().unwrap();
@@ -209,7 +216,7 @@ fn the_landlock_command_confines_to_the_plan() {
         assert!(ll.read.contains(&PathBuf::from("/usr")));
         assert_eq!(ll.write, vec![dir.clone()]);
         assert_eq!(ll.rw, vec![PathBuf::from("/dev/null")]);
-        assert!(ll.exec.contains(&PathBuf::from("/usr/bin/true")));
+        assert!(ll.exec.contains(&usr_bin_true()));
         assert!(
             ll.exec
                 .contains(&Path::new("/bin/sh").canonicalize().unwrap())
