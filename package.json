@@ -17,5 +17,8 @@
     "site:dev": "npm run dev -w site",
     "site:build": "npm run build -w site",
     "site:preview": "npm run preview -w site"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }
