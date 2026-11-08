@@ -6,7 +6,7 @@
     <title>aispice: design circuits by describing them</title>
     <meta
       name="description"
-      content="aispice edits LTspice schematics, simulates them on ngspice, LTspice, Xyce or Spectre, and checks every change against your specs. On the IHP SG13G2 open PDK it takes IC blocks through corners and mismatch to a layout checked with DRC and LVS, and hands them to ChipLeap as macros. Desktop app, CLI and MCP server. Open source, runs on your machine."
+      content="aispice edits circuit schematics, simulates them on ngspice, Xyce, LTspice or Spectre, and checks every change against your specs. On the IHP SG13G2 open PDK it takes IC blocks through corners and mismatch to a layout checked with DRC and LVS, and hands them to ChipLeap as macros. Desktop app, CLI and MCP server. Open source, runs on your machine."
     />
     <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#fafaf8" media="(prefers-color-scheme: light)" />
@@ -23,7 +23,7 @@
       content="An agent that edits schematics, simulates them and checks every change against your specs, on a board or on an open PDK down to a checked layout."
     />
     <meta property="og:url" content="https://danieltyukov.github.io/aispice/" />
-    <meta property="og:image" content="https://danieltyukov.github.io/aispice/og.png" />
+    <meta property="og:image" content="https://danieltyukov.github.io/aispice/og.png?v=2" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content="The aispice mark and wordmark." />
@@ -33,7 +33,7 @@
       name="twitter:description"
       content="An agent that edits schematics, simulates them and checks every change against your specs, on a board or on an open PDK down to a checked layout."
     />
-    <meta name="twitter:image" content="https://danieltyukov.github.io/aispice/og.png" />
+    <meta name="twitter:image" content="https://danieltyukov.github.io/aispice/og.png?v=2" />
 
     <script>
       // Blocking, in the head, so a stored theme applies before first paint.
@@ -105,8 +105,8 @@
           </a>
           <h1>Design circuits<br />by describing them.</h1>
           <p class="sub">
-            aispice reads your LTspice schematics, makes the change you ask for, and proves it in
-            simulation on ngspice, LTspice, Xyce or Spectre. Every edit is a diff you can undo. On
+            aispice reads your schematics, makes the change you ask for, and proves it in
+            simulation on ngspice, Xyce, LTspice or Spectre. Every edit is a diff you can undo. On
             an open PDK it takes IC blocks down to a layout checked with DRC and LVS.
           </p>
           <div class="cta">
@@ -177,7 +177,7 @@
               <h2>Changes you can review, not files rewritten behind your back.</h2>
               <p>
                 The agent edits with typed operations: set a value, add a part, connect two pins.
-                aispice places and routes them so the schematic stays readable in LTspice, outlines
+                aispice places and routes them so the schematic stays readable, in aispice or in LTspice, outlines
                 what changed, and keeps a snapshot for one-click undo.
               </p>
               <ul class="checks">
@@ -501,7 +501,7 @@
       <section id="download" class="download">
         <div class="wrap download-inner">
           <h2>Start with the circuit you have.</h2>
-          <p class="sub">Open a folder of LTspice schematics and ask for the first change.</p>
+          <p class="sub">Open a folder of schematics and ask for the first change.</p>
           <ul class="downloads" aria-label="Downloads">
             <li><a class="btn btn-ghost" href="https://github.com/danieltyukov/aispice/releases/latest/download/aispice_x86_64.AppImage">Linux <span>AppImage</span></a></li>
             <li><a class="btn btn-ghost" href="https://github.com/danieltyukov/aispice/releases/latest/download/aispice_amd64.deb">Linux <span>.deb</span></a></li>

@@ -31,7 +31,7 @@
 
 ## What it does
 
-aispice works on the LTspice schematics (`.asc`) in a folder. You describe a change in plain language; the agent reads the circuit, edits it, runs a simulation and checks the result against your specs before it answers. It comes in three forms that share one engine:
+aispice works on the circuit schematics in a folder. It stores them in LTspice's `.asc` format so LTspice can open them, but LTspice is optional: ngspice is the default simulator, and Xyce and Spectre work too. xschem schematics and SPICE netlists come in by conversion. You describe a change in plain language; the agent reads the circuit, edits it, runs a simulation and checks the result against your specs before it answers. It comes in three forms that share one engine:
 
 - a **desktop app** with the schematic, waveforms with cursors, a spec table, edit history and the chat side by side
 - a **command line tool**, `aispice`, for chat, simulation, netlisting, linting and spec checks in CI
