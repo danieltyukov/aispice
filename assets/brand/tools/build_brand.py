@@ -215,7 +215,7 @@ def build(conf: Path, tmp: Path) -> None:
     write(BRAND / "lockup-dark.svg", lockup(INK_DARK))
 
     print("social card")
-    lines = ["An agent that edits LTspice schematics,", "simulates them and checks the results", "against your specs."]
+    lines = ["An agent that edits circuit schematics,", "simulates them and checks the results", "against your specs."]
     size, leading = 54, 68
     sentence = []
     for i, line in enumerate(lines):
@@ -237,7 +237,7 @@ def build(conf: Path, tmp: Path) -> None:
     og_scale = 0.8
     og = f"""
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
-<title>aispice: an agent that edits LTspice schematics, simulates them and checks the results against your specs</title>
+<title>aispice: an agent that edits circuit schematics, simulates them and checks the results against your specs</title>
 <rect width="1200" height="630" fill="{PAPER}"/>
 <path d="{''.join(grid)}" fill="none" stroke="{TEAL}" stroke-opacity="0.14" stroke-width="1.5"/>
 <path d="{wave}" fill="none" stroke="{TEAL}" stroke-opacity="0.34" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
