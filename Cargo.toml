@@ -19,7 +19,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -28,11 +28,11 @@ repository = "https://github.com/danieltyukov/aispice"
 homepage = "https://danieltyukov.github.io/aispice/"
 
 [workspace.dependencies]
-aispice-core = { path = "crates/aispice-core", version = "0.2.0" }
-aispice-sim = { path = "crates/aispice-sim", version = "0.2.0" }
-aispice-layout = { path = "crates/aispice-layout", version = "0.2.0" }
-aispice-agent = { path = "crates/aispice-agent", version = "0.2.0" }
-aispice-tools = { path = "crates/aispice-tools", version = "0.2.0" }
+aispice-core = { path = "crates/aispice-core", version = "0.3.0" }
+aispice-sim = { path = "crates/aispice-sim", version = "0.3.0" }
+aispice-layout = { path = "crates/aispice-layout", version = "0.3.0" }
+aispice-agent = { path = "crates/aispice-agent", version = "0.3.0" }
+aispice-tools = { path = "crates/aispice-tools", version = "0.3.0" }
 
 anyhow = "1"
 thiserror = "2"

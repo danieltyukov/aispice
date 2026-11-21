@@ -4,6 +4,8 @@ All notable changes to aispice are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.3.0]
+
 ### Added
 
 - `aispice_sim::sandbox`, one sandbox for any program aispice does not trust: a `Plan` (host paths, the whole environment, a seccomp profile, limits) run by whichever sandbox `Sandbox::select` finds. bubblewrap 0.8 or later installs the same seccomp programs as the Landlock path (`--add-seccomp-fd`). Landlock now runs from ABI 4 (Linux 6.7): below ABI 6 a seccomp program written with the child's pid keeps signals to the process and its group. A `NativeCode` seccomp allowlist for untrusted native code joins the xschem `Denylist`. A `Confinement` is only made by a builder that refuses combinations leaving a gap, and a confined process is refused off Linux instead of run unconfined. See `docs/SANDBOX.md`.
@@ -142,6 +144,7 @@ A rewrite. aispice is now one Rust engine with three front ends: a desktop app, 
 
 The first version: a Tauri desktop chat beside LTspice that edited `.asc` files and triggered LTspice to reload.
 
-[Unreleased]: https://github.com/danieltyukov/aispice/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/danieltyukov/aispice/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/danieltyukov/aispice/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/danieltyukov/aispice/releases/tag/v0.2.0
 [0.1.0]: https://github.com/danieltyukov/aispice/tree/808c0de
