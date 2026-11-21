@@ -41,10 +41,15 @@ pub async fn doctor(state: State<'_, AppState>) -> Res<Value> {
 /// reached over D-Bus or a system API and can stall (a locked keyring, no
 /// Secret Service), so the lookup runs off the async runtime with a time
 /// limit, and a stalled keychain reads as "no key" rather than a hung window.
+///
+/// The providers are the key store's own list, the one `aispice doctor` and
+/// `aispice keys list` go through. A list kept here left out `custom`, so a
+/// key saved for the custom endpoint was stored and still shown as "No key".
 async fn provider_status(keys: Arc<KeyStore>) -> Vec<Value> {
-    const IDS: [&str; 5] = ["anthropic", "openai", "google", "openrouter", "ollama"];
+    use aispice_agent::keys::KNOWN_PROVIDERS;
     let lookup = tokio::task::spawn_blocking(move || {
-        IDS.iter()
+        KNOWN_PROVIDERS
+            .iter()
             .map(|id| {
                 let source = keys.source(id).ok().flatten().map(|s| {
                     if matches!(s, aispice_agent::keys::KeySource::Env { .. }) {
@@ -61,7 +66,7 @@ async fn provider_status(keys: Arc<KeyStore>) -> Vec<Value> {
     });
     match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await {
         Ok(Ok(list)) => list,
-        _ => IDS
+        _ => KNOWN_PROVIDERS
             .iter()
             .map(|id| json!({"id": id, "configured": *id == "ollama", "source": null}))
             .collect(),
@@ -484,4 +489,45 @@ pub fn approve(request_id: String, approved: bool, state: State<'_, AppState>) -
         let _ = tx.send(approved);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aispice_agent::keys::KNOWN_PROVIDERS;
+
+    fn entry<'a>(list: &'a [Value], id: &str) -> &'a Value {
+        list.iter()
+            .find(|p| p["id"] == id)
+            .unwrap_or_else(|| panic!("no status for {id}: {list:?}"))
+    }
+
+    /// Was issue #82: the status list was written out here and left `custom`
+    /// out, so Settings offered "Set key" again after every save.
+    #[tokio::test]
+    async fn a_key_saved_for_the_custom_endpoint_shows_as_configured() {
+        let keys = Arc::new(KeyStore::memory());
+        let before = provider_status(keys.clone()).await;
+        assert_eq!(entry(&before, "custom")["configured"], false);
+        assert!(entry(&before, "custom")["source"].is_null());
+
+        keys.set("custom", "sk-test").unwrap();
+        let after = provider_status(keys).await;
+        assert_eq!(entry(&after, "custom")["configured"], true);
+        assert!(entry(&after, "custom")["source"].is_string());
+    }
+
+    /// The interface asks for each provider by id and reads a missing one as
+    /// "No key", so the list has to cover every provider a key can be saved
+    /// for.
+    #[tokio::test]
+    async fn the_status_covers_every_provider_the_key_store_knows() {
+        let list = provider_status(Arc::new(KeyStore::memory())).await;
+        let ids: Vec<&str> = list.iter().filter_map(|p| p["id"].as_str()).collect();
+        assert_eq!(ids, KNOWN_PROVIDERS);
+        // Ollama needs no key, and is the only one configured without one.
+        for p in &list {
+            assert_eq!(p["configured"], p["id"] == "ollama", "{p}");
+        }
+    }
 }
