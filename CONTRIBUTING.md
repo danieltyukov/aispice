@@ -27,7 +27,7 @@ cargo build -p aispice
 npm run check
 ```
 
-runs what CI runs for the engine and the interface: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then the interface typecheck, lint and unit tests, and the site build. For the desktop shell, also run `cargo clippy -p aispice-app --all-targets -- -D warnings`.
+runs what CI runs for the engine and the interface: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, then the interface typecheck, lint and unit tests, and the site build. For the desktop shell, also run `cargo clippy -p aispice-app --all-targets -- -D warnings` and `cargo test -p aispice-app`.
 
 Other test suites:
 

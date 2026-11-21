@@ -406,6 +406,11 @@ jobs:
       - name: Clippy (shell)
         run: cargo clippy -p aispice-app --all-targets -- -D warnings
 
+      # `cargo test` in the engine job covers the default members, and the shell
+      # is not one of them, so its unit tests run here.
+      - name: Test (shell)
+        run: cargo test -p aispice-app
+
       # The real binary with the real backend, driven through WebKitWebDriver
       # under a virtual display. This is the end-to-end test that covers the
       # IPC layer the mocked interface tests cannot.
